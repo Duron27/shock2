@@ -182,7 +182,8 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             float lambertian = max((ndl + wrap) / (1.0 + wrap), 0.0);
 
             vec3 radiance = spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
-                            * coneAttenuation * distanceAttenuation;
+                            * coneAttenuation * distanceAttenuation
+                            * pointShadowVisibility(lightShadowSlot[i], 0, worldPos, normal);
             if (shineHighlights()) {
                 specular += shineHighlight(radiance, lightDir, normal, worldPos, power);
             }
@@ -232,6 +233,7 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 struct UnifiedUniforms {
     world_wave: crate::scene::world_wave::Uniforms,
     self_depth: super::self_depth::Uniforms,
+    point_shadow: super::point_shadow::Uniforms,
     incidence: IncidenceUniforms,
     render_pass: super::render_pass::Uniforms,
     shine: ShineUniforms,
@@ -341,6 +343,7 @@ impl SkinnedMaterial {
         shader_program.bind();
         uniforms.world_wave.bind(render_context.world_wave);
         uniforms.self_depth.bind(render_context.self_depth);
+        uniforms.point_shadow.bind(lights, render_context);
         uniforms
             .incidence
             .bind(self.incidence.as_ref(), render_context, view_matrix);
@@ -535,8 +538,9 @@ impl Material for SkinnedMaterial {
                 &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
 
             let fragment_shader = &format!(
-                "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 include_str!("flashlight.glsl"),
+                super::point_shadow::GLSL,
                 super::self_depth::GLSL,
                 super::incidence::GLSL,
                 super::environment::GLSL,
@@ -565,6 +569,7 @@ impl Material for SkinnedMaterial {
             let uniforms = UnifiedUniforms {
                 world_wave: crate::scene::world_wave::Uniforms::new(&shader),
                 self_depth: super::self_depth::Uniforms::new(&shader),
+                point_shadow: super::point_shadow::Uniforms::new(&shader),
                 incidence: IncidenceUniforms::new(&shader),
                 render_pass: super::render_pass::Uniforms::new(&shader),
                 shine: ShineUniforms::new(&shader),

@@ -596,6 +596,10 @@ pub fn main() {
         for spotlight in hand_spotlights {
             scene_for_render.lights_mut().add_light(spotlight);
         }
+        (
+            scene_for_render.point_shadows,
+            scene_for_render.point_shadow_strength,
+        ) = game.get_shadow_lights();
 
         {
             renderer.resize(fb_width as u32, fb_height as u32);

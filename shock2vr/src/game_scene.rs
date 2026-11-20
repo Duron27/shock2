@@ -271,6 +271,11 @@ pub trait GameScene {
     /// Get lighting information for VR enhancement
     fn get_hand_lights(&self, options: &GameOptions) -> Vec<engine::scene::light::SceneLight>;
 
+    /// Mission lamps that cast shadows this frame, strongest first.
+    fn get_shadow_lights(&self) -> Vec<engine::scene::point_shadow::ShadowLight> {
+        Vec::new()
+    }
+
     /// Access to the ECS world (required for most game systems)
     fn world(&self) -> &World;
 

@@ -336,6 +336,8 @@ pub struct RayCastRequest {
 pub struct SceneListResult {
     /// Current player-carried lights, using the same accessor as all renderers.
     pub carried_lights: Vec<CarriedLightSummary>,
+    /// Mission lamps casting shadows this frame, strongest first.
+    pub shadow_lights: Vec<CarriedLightSummary>,
     pub objects: Vec<SceneObjectSummary>,
     /// Objects in the frame before any filtering.
     pub total_count: usize,
@@ -392,6 +394,8 @@ pub struct SceneObjectSummary {
     /// Depth pulled slightly toward the camera on the opaque pass (polygon
     /// offset) - set for flat decal-like models coplanar with world geometry.
     pub depth_bias: bool,
+    /// Casts point-light shadows (moving casters only).
+    pub casts_shadow: bool,
     /// Explicit renderer composition layer.
     pub render_layer: String,
     /// Backwards-compatible indication that this object begins a depth-cleared

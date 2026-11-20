@@ -88,6 +88,7 @@ pub use debug_normal_material::{
 pub mod clipped_screen_material;
 pub use clipped_screen_material::ClippedScreenMaterial;
 
+pub mod point_shadow;
 pub mod self_depth;
 
 pub mod sphere;

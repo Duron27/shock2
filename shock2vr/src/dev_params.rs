@@ -557,6 +557,16 @@ dev_params! {
     /// a prop's shadowed side at the cost of the directional read that makes a
     /// lamp feel like a lamp.
     OBJECT_LIGHT_WRAP = Lighting::float("object_light_wrap", "Obj wrap", 0.0, 0.0, 1.0, 0.05),
+    /// Shadows from the strongest mission lamps near the player: objects
+    /// are occluded from a lamp by walls and by each other, and cast
+    /// shadows onto the lightmapped world.
+    POINT_SHADOWS = Lighting::bool("point_shadows", "Lamp shadows", true),
+    /// How many lamps cast shadows at once (the renderer's maximum is 4).
+    /// Each one redraws the nearby scene six times.
+    POINT_SHADOW_LIGHTS = Lighting::float("point_shadow_lights", "Shadow lamps", 4.0, 1.0, 4.0, 1.0),
+    /// How much of a shadowing lamp's light the world loses under an
+    /// object's shadow (objects themselves are always fully occluded).
+    POINT_SHADOW_STRENGTH = Lighting::float("point_shadow_strength", "Shadow strength", 1.0, 0.0, 1.0, 0.05),
     /// Strength of the moving highlight on wet organic surfaces (eggs, grubs,
     /// arachnids, growth). 0 leaves only the authored view-angle sheen.
     OBJECT_SPECULAR = Lighting::float("object_specular", "Obj specular", 1.5, 0.0, 4.0, 0.1),

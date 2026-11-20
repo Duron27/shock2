@@ -148,6 +148,9 @@ pub struct SceneObject {
     pub morph_weights: Vec<f32>,
     /// Parts sharing an ID hide one another, without occluding other transparency.
     pub self_depth_group: Option<u64>,
+    /// Casts point-light shadows (see `point_shadow`): things that move,
+    /// whose shadows no lightmap holds. World geometry occludes regardless.
+    pub casts_shadow: bool,
     render_layer: RenderLayer,
     /// Viewmodel framing changes projection, never the world-space light inputs.
     projection_override: Option<Matrix4<f32>>,
@@ -440,6 +443,7 @@ impl SceneObject {
             world_wave: Default::default(),
             morph_weights: Vec::new(),
             self_depth_group: None,
+            casts_shadow: false,
             render_layer: RenderLayer::World,
             projection_override: None,
             only_eye: None,
@@ -494,6 +498,11 @@ impl SceneObject {
         depth.set_transparency(Some(0.0));
         depth.set_depth_write(true);
         Some(depth)
+    }
+
+    /// Drawn with its own projection (the first-person viewmodel).
+    pub(crate) fn has_projection_override(&self) -> bool {
+        self.projection_override.is_some()
     }
 
     fn draw_context(&self, render_context: &EngineRenderContext) -> EngineRenderContext {
@@ -747,6 +756,7 @@ impl SceneObject {
             world_wave: Default::default(),
             morph_weights: Vec::new(),
             self_depth_group: None,
+            casts_shadow: false,
             render_layer: RenderLayer::World,
             projection_override: None,
             only_eye: None,
@@ -776,6 +786,7 @@ impl SceneObject {
             world_wave: self.world_wave,
             morph_weights: self.morph_weights.clone(),
             self_depth_group: self.self_depth_group,
+            casts_shadow: self.casts_shadow,
             render_layer: self.render_layer,
             projection_override: self.projection_override,
             only_eye: self.only_eye,

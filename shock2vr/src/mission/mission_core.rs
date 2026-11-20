@@ -15564,6 +15564,11 @@ impl MissionCore {
 
             if let Ok(xform) = v_transform.get(*entity_id).map(|p| p.0) {
                 let held = self.interaction.is_holding(*entity_id);
+                let is_creature = is_animated_model
+                    && self
+                        .world
+                        .borrow::<View<PropCreature>>()
+                        .is_ok_and(|v| v.contains(*entity_id));
                 let visual_xform = xform;
                 // One light set per entity, resolved at its origin and shared by
                 // its sub-objects - the lights that reach the room it stands in.
@@ -15614,6 +15619,9 @@ impl MissionCore {
                     xformed_obj.set_debug_tag(Some(debug_tag.clone()));
                     xformed_obj.set_lights(entity_lights.clone());
                     xformed_obj.self_depth_group = self_depth_group;
+                    // Creatures move, so no lightmap holds their shadows;
+                    // static props (jointed ducts included) never cast in Dark.
+                    xformed_obj.casts_shadow = is_creature && !held && render_alpha.is_none();
                     xformed_obj.set_emissivity_scale(emissivity_scale);
                     if v_double_sided.contains(*entity_id) {
                         xformed_obj.set_backface_culling(None);
@@ -16061,6 +16069,43 @@ impl MissionCore {
             );
         }
         lights
+    }
+
+    /// The strongest mission lamps at the player, to cast shadows. Objects
+    /// take their lights from their own cell, and nearby cells mostly share
+    /// the player's lamps; one an object doesn't have simply isn't shadowed
+    /// on it.
+    pub fn get_shadow_lights(&self) -> Vec<engine::scene::point_shadow::ShadowLight> {
+        use engine::scene::point_shadow::{MAX_SHADOW_LIGHTS, ShadowLight};
+        if !crate::dev_params::get_bool(crate::dev_params::POINT_SHADOWS)
+            || !crate::dev_params::get_bool(crate::dev_params::OBJECT_LIGHTING)
+        {
+            return Vec::new();
+        }
+        let Some(spatial) = self.spatial_data.as_deref() else {
+            return Vec::new();
+        };
+        let count = (crate::dev_params::get(crate::dev_params::POINT_SHADOW_LIGHTS).round()
+            as usize)
+            .min(MAX_SHADOW_LIGHTS);
+        let player = self.world.borrow::<UniqueView<PlayerInfo>>().unwrap().pos;
+        let lights = crate::object_lighting::lights_for_position(
+            spatial,
+            player,
+            self.animated_lightmaps
+                .as_ref()
+                .map(|c| c.light_intensities()),
+        );
+        lights
+            .iter_active()
+            .map(|(_, light)| ShadowLight {
+                position: light.position(),
+                range: light.range(),
+                color_intensity: light.color_intensity(),
+            })
+            .filter(|light| light.color_intensity.w > 0.0)
+            .take(count)
+            .collect()
     }
 
     /// Whether the runtime should show a 2D cursor instead of captured
@@ -20767,6 +20812,10 @@ impl crate::game_scene::GameScene for MissionCore {
 
     fn get_hand_lights(&self, options: &GameOptions) -> Vec<engine::scene::light::SceneLight> {
         self.get_hand_lights(options)
+    }
+
+    fn get_shadow_lights(&self) -> Vec<engine::scene::point_shadow::ShadowLight> {
+        self.get_shadow_lights()
     }
 
     fn world(&self) -> &World {

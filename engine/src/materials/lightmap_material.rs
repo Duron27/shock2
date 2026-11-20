@@ -134,8 +134,34 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             // brighter authored pixels while keeping unlit surfaces legible.
             vec3 finalColor = max(diffuseColor.rgb * lightmapColor.rgb, ambientColor);
 
-            // Add dynamic spotlight contributions on top of baked lighting
             vec3 normal = normalize(worldNormal);
+            // An object between a shadow lamp and this surface takes back the
+            // share of the baked light that lamp would have put here. World
+            // casters are not in this set: the lightmap holds their shadows.
+            if (!unlit) {
+                highp float baked = max(dot(finalColor, vec3(0.299, 0.587, 0.114)), 0.001);
+                for (int k = 0; k < POINT_SHADOW_MAX; k++) {
+                    highp vec4 lamp = pointShadowLights[k];
+                    if (lamp.w <= 0.0) continue;
+                    highp vec3 toLamp = lamp.xyz - worldPos;
+                    highp float distance = length(toLamp);
+                    if (distance >= lamp.w) continue;
+                    float ndl = max(dot(normal, toLamp / max(distance, 0.00001)), 0.0);
+                    if (ndl <= 0.0) continue;
+                    float shadow = 1.0 - pointShadowVisibility(k, 1, worldPos, normal);
+                    if (shadow <= 0.0) continue;
+                    vec3 lampLight = diffuseColor.rgb * pointShadowColor[k].rgb * pointShadowColor[k].w
+                        * ndl / max(distance, 0.8);
+                    // The objects' lamp scale runs dimmer than the baked
+                    // light it stands for; doubling the ratio lets a shadow
+                    // take back what a player expects (a dark, readable shape).
+                    highp float share = clamp(2.0 * dot(lampLight, vec3(0.299, 0.587, 0.114)) / baked, 0.0, 1.0);
+                    finalColor *= 1.0 - pointShadowStrength * shadow * share;
+                }
+                finalColor = max(finalColor, ambientColor);
+            }
+
+            // Add dynamic spotlight contributions on top of baked lighting
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
             for (int i = 0; i < 6; i++) {
@@ -154,6 +180,7 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 
 struct UnifiedUniforms {
     shine: ShineUniforms,
+    point_shadow: crate::scene::point_shadow::Uniforms,
     world_wave: crate::scene::world_wave::Uniforms,
     uv_offset_loc: gfx::Uniform,
     unlit_loc: gfx::Uniform,
@@ -181,6 +208,36 @@ struct UnifiedUniforms {
 }
 
 static UNIFIED_SHADER_PROGRAM: OnceCell<(ShaderProgram, UnifiedUniforms)> = OnceCell::new();
+
+/// Depth only, for shadow maps: no lighting, and above all no sampling of
+/// the shadow atlas being drawn into. Alpha-tested layers (grates) keep
+/// their holes.
+const CAPTURE_FRAGMENT_SHADER_SOURCE: &str = r#"
+        out vec4 fragColor;
+        in vec2 texCoord;
+        uniform sampler2D texture2;
+        uniform highp vec2 diffuseUvOffset;
+        uniform vec4 layerColorAlpha;
+        uniform bool layerAlphaTest;
+        void main() {
+            vec4 diffuseColor = texture(texture2, texCoord + diffuseUvOffset);
+            if (layerAlphaTest && diffuseColor.a * layerColorAlpha.a < 0.1) discard;
+            fragColor = vec4(0.0);
+        }
+"#;
+
+struct CaptureUniforms {
+    world_wave: crate::scene::world_wave::Uniforms,
+    world_loc: gfx::Uniform,
+    view_loc: gfx::Uniform,
+    projection_loc: gfx::Uniform,
+    texture2_loc: gfx::Uniform,
+    uv_offset_loc: gfx::Uniform,
+    layer_color_alpha_loc: gfx::Uniform,
+    layer_alpha_test_loc: gfx::Uniform,
+}
+
+static CAPTURE_SHADER_PROGRAM: OnceCell<(ShaderProgram, CaptureUniforms)> = OnceCell::new();
 
 pub struct LightmapMaterial {
     shine: Option<Shine>,
@@ -227,6 +284,32 @@ impl LightmapMaterial {
         })
     }
 
+    fn draw_capture(
+        &self,
+        render_context: &EngineRenderContext,
+        view_matrix: &Matrix4<f32>,
+        world_matrix: &Matrix4<f32>,
+    ) {
+        let (shader_program, uniforms) = CAPTURE_SHADER_PROGRAM
+            .get()
+            .expect("capture shader not compiled");
+        self.diffuse_texture.bind1(render_context);
+        shader_program.bind();
+        uniforms.world_wave.bind(render_context.world_wave);
+        gfx::set_mat4(uniforms.world_loc, world_matrix);
+        gfx::set_mat4(uniforms.view_loc, view_matrix);
+        gfx::set_mat4(uniforms.projection_loc, &render_context.projection_matrix);
+        gfx::set_i32(uniforms.texture2_loc, 1);
+        let uv = self.uv_motion.offset(render_context.time);
+        gfx::set_vec2(uniforms.uv_offset_loc, [uv[0], uv[1]]);
+        let alpha = self.layer.as_ref().map_or(1.0, |p| p.alpha);
+        gfx::set_vec4(uniforms.layer_color_alpha_loc, [1.0, 1.0, 1.0, alpha]);
+        gfx::set_i32(
+            uniforms.layer_alpha_test_loc,
+            i32::from(self.layer.as_ref().is_some_and(|p| p.alpha_test)),
+        );
+    }
+
     pub fn draw_unified(
         &self,
         render_context: &EngineRenderContext,
@@ -234,6 +317,13 @@ impl LightmapMaterial {
         world_matrix: &Matrix4<f32>,
         lights: &crate::scene::light::LightArray,
     ) {
+        if matches!(
+            render_context.self_depth,
+            crate::scene::self_depth::Phase::Capture
+        ) {
+            self.draw_capture(render_context, view_matrix, world_matrix);
+            return;
+        }
         let (shader_program, uniforms) = UNIFIED_SHADER_PROGRAM
             .get()
             .expect("unified shader not compiled");
@@ -244,6 +334,7 @@ impl LightmapMaterial {
 
         shader_program.bind();
         uniforms.world_wave.bind(render_context.world_wave);
+        uniforms.point_shadow.bind(lights, render_context);
         let strength = render_context.terrain_wetness;
         let shine = self
             .shine
@@ -365,13 +456,30 @@ impl Material for LightmapMaterial {
     }
 
     fn initialize(&mut self, _is_opengl_es: bool) {
+        let _ = CAPTURE_SHADER_PROGRAM.get_or_init(|| {
+            let vertex_shader =
+                &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
+            let shader = gfx::Program::new(vertex_shader, CAPTURE_FRAGMENT_SHADER_SOURCE);
+            let uniforms = CaptureUniforms {
+                world_wave: crate::scene::world_wave::Uniforms::new(&shader),
+                world_loc: shader.uniform("world"),
+                view_loc: shader.uniform("view"),
+                projection_loc: shader.uniform("projection"),
+                texture2_loc: shader.uniform("texture2"),
+                uv_offset_loc: shader.uniform("diffuseUvOffset"),
+                layer_color_alpha_loc: shader.uniform("layerColorAlpha"),
+                layer_alpha_test_loc: shader.uniform("layerAlphaTest"),
+            };
+            (shader, uniforms)
+        });
         let _ = UNIFIED_SHADER_PROGRAM.get_or_init(|| {
             // Build and compile unified shader program with lightmaps + 6-spotlight support
             let vertex_shader =
                 &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
 
             let fragment_shader = &format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}",
+                crate::scene::point_shadow::GLSL,
                 crate::scene::environment::GLSL,
                 crate::scene::shine::GLSL,
                 include_str!("../scene/flashlight.glsl"),
@@ -383,6 +491,7 @@ impl Material for LightmapMaterial {
             // Get uniform locations for all shader variables
             let uniforms = UnifiedUniforms {
                 shine: ShineUniforms::new(&shader),
+                point_shadow: crate::scene::point_shadow::Uniforms::new(&shader),
                 layer_color_alpha_loc: shader.uniform("layerColorAlpha"),
                 layer_enabled_loc: shader.uniform("layerEnabled"),
                 layer_alpha_test_loc: shader.uniform("layerAlphaTest"),

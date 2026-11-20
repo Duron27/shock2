@@ -3107,6 +3107,18 @@ impl Game {
         self.active_game_scene.get_hand_lights(&self.options)
     }
 
+    /// Mission lamps that cast shadows this frame, and how strongly an
+    /// object's shadow darkens the world (0..1).
+    pub fn get_shadow_lights(&self) -> (Vec<engine::scene::point_shadow::ShadowLight>, f32) {
+        if self.pending_save_load.is_some() {
+            return (Vec::new(), 0.0);
+        }
+        (
+            self.active_game_scene.get_shadow_lights(),
+            dev_params::get(dev_params::POINT_SHADOW_STRENGTH),
+        )
+    }
+
     /// Eye (render camera) height above the pawn position returned by
     /// [`Game::render`], in SS2 units - crouch-aware, reflecting the player's
     /// *actual* collider state (stand-up can be refused for lack of headroom).
@@ -3936,6 +3948,13 @@ impl App {
         match self {
             App::Ready(game) => game.get_hand_lights(),
             App::MissingAssets(_) => Vec::new(),
+        }
+    }
+
+    pub fn get_shadow_lights(&self) -> (Vec<engine::scene::point_shadow::ShadowLight>, f32) {
+        match self {
+            App::Ready(game) => game.get_shadow_lights(),
+            App::MissingAssets(_) => (Vec::new(), 0.0),
         }
     }
 

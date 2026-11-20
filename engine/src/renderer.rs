@@ -132,6 +132,10 @@ impl Engine for Renderer {
             set_render_state();
             crate::gfx::clear_color([0.0, 0.0, 0.0, 0.0]);
             crate::gfx::clear(true, true);
+            // Shadow depth first: it pauses the frame's pass, and the world
+            // layer's receivers sample it. Bound until this frame is drawn.
+            let _shadows =
+                crate::scene::point_shadow::render_atlas(self, render_context, scene);
             let view = util::compute_view_matrix_from_render_context(render_context);
             self.draw_layers(
                 render_context,

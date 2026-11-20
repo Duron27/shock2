@@ -355,6 +355,8 @@ struct FrameRes {
     ubo_at: (usize, u64),
     pools: Vec<vk::DescriptorPool>,
     pool_at: usize,
+    /// Sets taken from `pools[pool_at]` this frame.
+    pool_used: u32,
 }
 
 struct State {
@@ -389,14 +391,26 @@ struct State {
     units: [Option<u32>; MAX_UNITS],
     cube_units: [Option<u32>; MAX_UNITS],
     depth_capture: Option<DepthCapture>,
+    /// Whether the open capture kept its image's previous contents.
+    capture_kept: bool,
 }
 
-/// The self-depth scratch: one depth image, sampled as a texture after a
-/// capture, resized with the viewport it captures.
+/// Depth-only capture targets, sampled as textures after a capture: the
+/// self-depth scratch (resized with the viewport it captures) and the
+/// point-light shadow atlas. They share one render pass.
 struct DepthCapture {
     pass: vk::RenderPass,
-    image: Option<(u32, vk::Framebuffer, vk::Extent2D)>,
+    /// `pass` keeping what the image held: the shadow atlas is redrawn
+    /// tile by tile across frames.
+    load_pass: vk::RenderPass,
+    images: [Option<(u32, vk::Framebuffer, vk::Extent2D)>; CAPTURE_TARGETS],
+    /// The target the open capture draws into.
+    active: usize,
 }
+
+const CAPTURE_TARGETS: usize = 2;
+const SELF_DEPTH_TARGET: usize = 0;
+const SHADOW_TARGET: usize = 1;
 
 /// Sampled depth: D32_SFLOAT supports sampling and depth attachment on
 /// every desktop driver.
@@ -521,6 +535,7 @@ pub fn install(ctx: &crate::vk::VkContext) {
         units: [None; MAX_UNITS],
         cube_units: [None; MAX_UNITS],
         depth_capture: None,
+        capture_kept: false,
     };
     state.zero_buffer = state.create_buffer(&[0u8; 16], vk::BufferUsageFlags::VERTEX_BUFFER);
     state.white = state.create_texture(
@@ -546,7 +561,7 @@ pub fn shutdown() {
     let d = s.dev.device.clone();
     unsafe {
         if let Some(capture) = s.depth_capture.take() {
-            if let Some((id, framebuffer, _)) = capture.image {
+            for (id, framebuffer, _) in capture.images.into_iter().flatten() {
                 d.destroy_framebuffer(framebuffer, None);
                 if let Some(i) = s.images.remove(&id) {
                     d.destroy_image_view(i.view, None);
@@ -554,6 +569,7 @@ pub fn shutdown() {
                 }
             }
             d.destroy_render_pass(capture.pass, None);
+            d.destroy_render_pass(capture.load_pass, None);
         }
         for (_, g) in s.garbage.drain(..) {
             destroy_garbage(&d, s.upload_pool, g);
@@ -652,6 +668,7 @@ pub fn begin_frame(
         let frame = &mut s.frames[slot];
         frame.ubo_at = (0, 0);
         frame.pool_at = 0;
+        frame.pool_used = 0;
         for &pool in &frame.pools {
             unsafe {
                 s.dev
@@ -1365,7 +1382,13 @@ impl State {
     ) -> vk::DescriptorSet {
         loop {
             let frame = &mut self.frames[slot];
-            if frame.pool_at == frame.pools.len() {
+            // Move on before the pool runs out rather than probe a full one.
+            if frame.pool_used >= POOL_SETS {
+                frame.pool_at += 1;
+                frame.pool_used = 0;
+            }
+            let fresh = frame.pool_at == frame.pools.len();
+            if fresh {
                 let sizes = [
                     vk::DescriptorPoolSize {
                         ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -1373,7 +1396,9 @@ impl State {
                     },
                     vk::DescriptorPoolSize {
                         ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        descriptor_count: POOL_SETS * 4,
+                        // Lit materials bind up to ~9 (diffuse, pass, shine,
+                        // self-depth, environment, shadow atlas).
+                        descriptor_count: POOL_SETS * 10,
                     },
                 ];
                 let pool = unsafe {
@@ -1395,9 +1420,18 @@ impl State {
                         .set_layouts(&layouts),
                 )
             } {
-                Ok(sets) => return sets[0],
-                Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY | vk::Result::ERROR_FRAGMENTED_POOL) => {
-                    frame.pool_at += 1
+                Ok(sets) => {
+                    frame.pool_used += 1;
+                    return sets[0];
+                }
+                // A Vulkan 1.0 device without maintenance1 may report an
+                // exhausted pool as any allocation failure (out of device
+                // memory, typically), so any failure moves on to the next
+                // pool - unless the pool was new, which no retry would fix.
+                Err(e) if !fresh => {
+                    let _ = e;
+                    frame.pool_at += 1;
+                    frame.pool_used = 0;
                 }
                 Err(e) => panic!("vkAllocateDescriptorSets: {e}"),
             }
@@ -2016,7 +2050,28 @@ pub fn clear(color: bool, depth: bool) {
 /// draw". Returns where that viewport's corner is in fragment coordinates
 /// (Vulkan's are top-left, so a mask lines up with `gl_FragCoord`).
 pub fn begin_depth_capture() -> Option<[i32; 2]> {
-    with(|s| s.begin_depth_capture()).flatten()
+    with(|s| s.begin_depth_capture(SELF_DEPTH_TARGET, None, false)).flatten()
+}
+
+/// Pause the frame's render pass and capture depth only into the persistent
+/// shadow atlas of `size` texels. The viewport starts as the whole atlas;
+/// draws pick their tile with [`viewport`]. With `keep` the atlas holds what
+/// earlier frames drew (clear tiles with a scissored [`clear`]); without it,
+/// or when the atlas was just (re)made, it starts at the far plane. Returns
+/// whether the old contents were kept.
+pub fn begin_shadow_capture(size: [u32; 2], keep: bool) -> Option<bool> {
+    with(|s| {
+        s.begin_depth_capture(
+            SHADOW_TARGET,
+            Some(vk::Extent2D {
+                width: size[0].max(1),
+                height: size[1].max(1),
+            }),
+            keep,
+        )
+        .map(|_| s.capture_kept)
+    })
+    .flatten()
 }
 
 /// Finish a capture and resume the frame. Returns the depth image's texture
@@ -2035,7 +2090,12 @@ pub fn bind_texture_id(unit: u32, id: Option<u32>) {
 }
 
 impl State {
-    fn begin_depth_capture(&mut self) -> Option<[i32; 2]> {
+    fn begin_depth_capture(
+        &mut self,
+        target: usize,
+        fixed_size: Option<vk::Extent2D>,
+        keep: bool,
+    ) -> Option<[i32; 2]> {
         let rec = self.recording.as_ref()?;
         if rec.paused.is_some() {
             return None;
@@ -2046,12 +2106,25 @@ impl State {
             .gl
             .viewport
             .unwrap_or([0, 0, frame_extent.width as i32, h]);
-        let size = vk::Extent2D {
+        let size = fixed_size.unwrap_or(vk::Extent2D {
             width: vp[2].max(1) as u32,
             height: vp[3].max(1) as u32,
+        });
+        let clear_pass = self.depth_capture_pass();
+        let existed = self
+            .depth_capture
+            .as_ref()
+            .and_then(|c| c.images[target])
+            .is_some_and(|(_, _, extent)| extent == size);
+        let (id, framebuffer) = self.depth_capture_image(target, clear_pass, size);
+        self.capture_kept = keep && existed;
+        let pass = match self.depth_capture.as_mut() {
+            Some(c) => {
+                c.active = target;
+                if self.capture_kept { c.load_pass } else { c.pass }
+            }
+            None => clear_pass,
         };
-        let pass = self.depth_capture_pass();
-        let (id, framebuffer) = self.depth_capture_image(pass, size);
         // Never sample the image being drawn into.
         for unit in self.units.iter_mut() {
             if *unit == Some(id) {
@@ -2131,7 +2204,7 @@ impl State {
         }
         self.depth_capture
             .as_ref()
-            .and_then(|c| c.image)
+            .and_then(|c| c.images[c.active])
             .map(|(id, _, _)| id)
     }
 
@@ -2139,14 +2212,36 @@ impl State {
         if let Some(c) = &self.depth_capture {
             return c.pass;
         }
+        let pass = self.make_capture_pass(false);
+        let load_pass = self.make_capture_pass(true);
+        self.depth_capture = Some(DepthCapture {
+            pass,
+            load_pass,
+            images: [None; CAPTURE_TARGETS],
+            active: SELF_DEPTH_TARGET,
+        });
+        pass
+    }
+
+    /// The depth-only capture pass: clearing, or (`load`) keeping the
+    /// image's contents from the last capture, which left it shader-readable.
+    fn make_capture_pass(&self, load: bool) -> vk::RenderPass {
+        let (load_op, initial) = if load {
+            (
+                vk::AttachmentLoadOp::LOAD,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            )
+        } else {
+            (vk::AttachmentLoadOp::CLEAR, vk::ImageLayout::UNDEFINED)
+        };
         let attachments = [vk::AttachmentDescription::builder()
             .format(CAPTURE_DEPTH)
             .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .load_op(load_op)
             .store_op(vk::AttachmentStoreOp::STORE)
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .initial_layout(initial)
             .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .build()];
         let depth_ref = vk::AttachmentReference {
@@ -2182,7 +2277,7 @@ impl State {
                 .dst_access_mask(vk::AccessFlags::SHADER_READ)
                 .build(),
         ];
-        let pass = unsafe {
+        unsafe {
             self.dev.device.create_render_pass(
                 &vk::RenderPassCreateInfo::builder()
                     .attachments(&attachments)
@@ -2191,18 +2286,19 @@ impl State {
                 None,
             )
         }
-        .expect("vkCreateRenderPass");
-        self.depth_capture = Some(DepthCapture { pass, image: None });
-        pass
+        .expect("vkCreateRenderPass")
     }
 
     /// The scratch image and framebuffer at `size`, rebuilt when it changes.
     fn depth_capture_image(
         &mut self,
+        target: usize,
         pass: vk::RenderPass,
         size: vk::Extent2D,
     ) -> (u32, vk::Framebuffer) {
-        if let Some((id, framebuffer, extent)) = self.depth_capture.as_ref().and_then(|c| c.image) {
+        if let Some((id, framebuffer, extent)) =
+            self.depth_capture.as_ref().and_then(|c| c.images[target])
+        {
             if extent == size {
                 return (id, framebuffer);
             }
@@ -2288,7 +2384,7 @@ impl State {
             },
         );
         if let Some(c) = self.depth_capture.as_mut() {
-            c.image = Some((id, framebuffer, size));
+            c.images[target] = Some((id, framebuffer, size));
         }
         (id, framebuffer)
     }

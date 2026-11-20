@@ -306,6 +306,10 @@ impl crate::game_scene::GameScene for Mission {
         self.mission_core.get_hand_lights(options)
     }
 
+    fn get_shadow_lights(&self) -> Vec<engine::scene::point_shadow::ShadowLight> {
+        self.mission_core.get_shadow_lights()
+    }
+
     fn active_world_panel(&self) -> Option<EntityId> {
         self.mission_core.gui.active_panel()
     }

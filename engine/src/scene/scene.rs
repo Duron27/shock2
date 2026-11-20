@@ -13,6 +13,13 @@ pub struct Scene {
 
     /// Light array for single-pass rendering (up to 6 spotlights)
     pub lights: LightArray,
+
+    /// Lamps that cast shadows this frame, strongest first (see
+    /// [`point_shadow`](super::point_shadow)); empty for none.
+    pub point_shadows: Vec<super::point_shadow::ShadowLight>,
+
+    /// How much of an object-cast shadow's lamp the world loses, 0..1.
+    pub point_shadow_strength: f32,
 }
 
 impl Scene {
@@ -21,6 +28,8 @@ impl Scene {
         Self {
             objects: Vec::new(),
             lights: LightArray::new(),
+            point_shadows: Vec::new(),
+            point_shadow_strength: 0.0,
         }
     }
 
@@ -29,6 +38,8 @@ impl Scene {
         Self {
             objects,
             lights: LightArray::new(),
+            point_shadows: Vec::new(),
+            point_shadow_strength: 0.0,
         }
     }
 

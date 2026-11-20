@@ -1217,6 +1217,10 @@ fn run_game_blocking(
         for spotlight in hand_spotlights {
             scene_for_render.lights_mut().add_light(spotlight);
         }
+        (
+            scene_for_render.point_shadows,
+            scene_for_render.point_shadow_strength,
+        ) = game.get_shadow_lights();
 
         // Actually render the scene (through the Options menu's Brightness,
         // like the desktop runtime, so screenshots match what a player sees).
@@ -1338,6 +1342,7 @@ fn summarize_scene(scene: &[engine::scene::SceneObject]) -> Vec<commands::SceneO
                     .as_ref()
                     .is_some_and(|stack| stack.material_only),
                 depth_bias: obj.depth_bias(),
+                casts_shadow: obj.casts_shadow,
                 render_layer: render_layer.as_str().to_owned(),
                 clear_depth: render_layer.clears_depth() && first_in_layer,
                 backface_culling: obj.backface_culling().map(|w| format!("{w:?}")),
@@ -2123,6 +2128,17 @@ fn process_command(
                 .cloned()
                 .collect();
             let result = commands::SceneListResult {
+                shadow_lights: game
+                    .get_shadow_lights()
+                    .0
+                    .into_iter()
+                    .map(|light| commands::CarriedLightSummary {
+                        kind: "shadow",
+                        position: light.position.into(),
+                        color_intensity: light.color_intensity.into(),
+                        range: light.range,
+                    })
+                    .collect(),
                 carried_lights: game
                     .get_hand_lights()
                     .into_iter()
@@ -3917,6 +3933,7 @@ async fn list_scene_objects(
 
     let empty = || commands::SceneListResult {
         carried_lights: vec![],
+        shadow_lights: vec![],
         objects: vec![],
         total_count: 0,
         matched_count: 0,
