@@ -8,6 +8,10 @@
 //! `SHOCK2_VK_DEVICE=llvmpipe` runs on the software rasteriser.
 
 fn main() {
+    // This example exists to catch validation errors: on unless told not.
+    if std::env::var_os("SHOCK2_VK_VALIDATION").is_none() {
+        unsafe { std::env::set_var("SHOCK2_VK_VALIDATION", "1") };
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

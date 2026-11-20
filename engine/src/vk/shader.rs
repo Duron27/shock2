@@ -218,6 +218,8 @@ const OP_TYPE_INT: u32 = 21;
 const OP_TYPE_FLOAT: u32 = 22;
 const OP_TYPE_VECTOR: u32 = 23;
 const OP_TYPE_MATRIX: u32 = 24;
+const OP_TYPE_IMAGE: u32 = 25;
+const OP_TYPE_SAMPLED_IMAGE: u32 = 27;
 const OP_TYPE_ARRAY: u32 = 28;
 const OP_TYPE_STRUCT: u32 = 30;
 const OP_TYPE_POINTER: u32 = 32;
@@ -258,8 +260,9 @@ pub struct Reflection {
     pub block: Option<(u32, BTreeMap<String, Member>)>,
     block_binding_word: Option<usize>,
     block_set_word: Option<usize>,
-    /// Samplers by name, with the word holding each one's binding.
-    samplers: BTreeMap<String, (usize, Option<usize>)>,
+    /// Samplers by name: the words holding each one's binding and set, and
+    /// whether it samples a cube.
+    samplers: BTreeMap<String, (usize, Option<usize>, bool)>,
     /// Non-builtin inputs: name -> (location word, location).
     pub inputs: BTreeMap<String, (usize, u32)>,
     /// Non-builtin outputs: name -> location.
@@ -276,12 +279,32 @@ fn string_at(words: &[u32]) -> String {
 
 #[derive(Clone, Debug)]
 enum Ty {
-    Scalar { int: bool },
-    Vector { int: bool, n: u32 },
-    Matrix { columns: u32, column: u32 },
-    Array { length: u32 },
+    Scalar {
+        int: bool,
+    },
+    Vector {
+        int: bool,
+        n: u32,
+    },
+    Matrix {
+        columns: u32,
+        column: u32,
+    },
+    Array {
+        length: u32,
+    },
     Struct(Vec<u32>),
-    Pointer { class: u32, pointee: u32 },
+    /// An image type (`cube` when Dim is Cube) or a sampled image of one.
+    Image {
+        cube: bool,
+    },
+    SampledImage {
+        image: u32,
+    },
+    Pointer {
+        class: u32,
+        pointee: u32,
+    },
     Other,
 }
 
@@ -341,6 +364,12 @@ pub fn reflect(spirv: &[u32]) -> Reflection {
             }
             OP_TYPE_ARRAY => {
                 types.insert(w[1], Ty::Array { length: w[3] });
+            }
+            OP_TYPE_IMAGE if count >= 4 => {
+                types.insert(w[1], Ty::Image { cube: w[3] == 3 });
+            }
+            OP_TYPE_SAMPLED_IMAGE => {
+                types.insert(w[1], Ty::SampledImage { image: w[2] });
             }
             OP_TYPE_STRUCT => {
                 types.insert(w[1], Ty::Struct(w[2..].to_vec()));
@@ -450,7 +479,15 @@ pub fn reflect(spirv: &[u32]) -> Reflection {
                     (names.get(&id), decorations.get(&(id, DEC_BINDING)))
                 {
                     let set = decorations.get(&(id, DEC_DESCRIPTOR_SET)).map(|d| d.0);
-                    reflection.samplers.insert(name.clone(), (binding.0, set));
+                    let cube = match types.get(&pointee) {
+                        Some(Ty::SampledImage { image }) => {
+                            matches!(types.get(image), Some(Ty::Image { cube: true }))
+                        }
+                        _ => false,
+                    };
+                    reflection
+                        .samplers
+                        .insert(name.clone(), (binding.0, set, cube));
                 }
             }
             SC_INPUT if !builtin => {
@@ -490,10 +527,18 @@ pub struct Linked {
     /// (size, members) of the vertex block (binding 0) and fragment block (binding 1).
     pub vertex_block: Option<(u32, BTreeMap<String, Member>)>,
     pub fragment_block: Option<(u32, BTreeMap<String, Member>)>,
-    /// Sampler name -> (binding, used by vertex, used by fragment).
-    pub samplers: BTreeMap<String, (u32, bool, bool)>,
+    /// Sampler name -> binding and use.
+    pub samplers: BTreeMap<String, SamplerUse>,
     /// Vertex inputs the program reads, by location.
     pub vertex_inputs: BTreeMap<u32, (bool, u32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SamplerUse {
+    pub binding: u32,
+    pub vertex: bool,
+    pub fragment: bool,
+    pub cube: bool,
 }
 
 pub const VERTEX_BLOCK_BINDING: u32 = 0;
@@ -506,10 +551,15 @@ pub fn link(mut vertex: Vec<u32>, mut fragment: Vec<u32>) -> Linked {
     let vr = reflect(&vertex);
     let fr = reflect(&fragment);
 
-    let mut samplers: BTreeMap<String, (u32, bool, bool)> = BTreeMap::new();
-    for name in vr.samplers.keys().chain(fr.samplers.keys()) {
+    let mut samplers: BTreeMap<String, SamplerUse> = BTreeMap::new();
+    for (name, &(_, _, cube)) in vr.samplers.iter().chain(fr.samplers.iter()) {
         let next = FIRST_SAMPLER_BINDING + samplers.len() as u32;
-        samplers.entry(name.clone()).or_insert((next, false, false));
+        samplers.entry(name.clone()).or_insert(SamplerUse {
+            binding: next,
+            vertex: false,
+            fragment: false,
+            cube,
+        });
     }
     for (words, reflection, block_binding, is_vertex) in [
         (&mut vertex, &vr, VERTEX_BLOCK_BINDING, true),
@@ -521,16 +571,16 @@ pub fn link(mut vertex: Vec<u32>, mut fragment: Vec<u32>) -> Linked {
         if let Some(word) = reflection.block_set_word {
             words[word] = 0;
         }
-        for (name, (binding_word, set_word)) in &reflection.samplers {
+        for (name, (binding_word, set_word, _)) in &reflection.samplers {
             let entry = samplers.get_mut(name).unwrap();
-            words[*binding_word] = entry.0;
+            words[*binding_word] = entry.binding;
             if let Some(set_word) = set_word {
                 words[*set_word] = 0;
             }
             if is_vertex {
-                entry.1 = true;
+                entry.vertex = true;
             } else {
-                entry.2 = true;
+                entry.fragment = true;
             }
         }
     }
@@ -569,8 +619,9 @@ mod tests {
                   uniform mat4 world;\nuniform mat4 projection;\nout vec2 texCoord;\nout float fade;\n\
                   void main() { texCoord = uv; fade = 1.0; gl_Position = projection * world * vec4(pos, 1.0); }";
         let fs = "in float fade;\nin vec2 texCoord;\nout vec4 color;\nuniform sampler2D tex;\n\
-                  uniform vec4 tint;\nuniform float lights[4];\nuniform mat3 rot;\n\
-                  void main() { color = texture(tex, texCoord) * tint * fade * lights[2] * rot[1][1]; }";
+                  uniform vec4 tint;\nuniform float lights[4];\nuniform mat3 rot;\nuniform samplerCube sky;\n\
+                  void main() { color = texture(tex, texCoord) * tint * fade * lights[2] * rot[1][1]\n\
+                  + texture(sky, vec3(texCoord, 1.0)); }";
         let (Ok(v), Ok(f)) = (compile(vs, Stage::Vertex), compile(fs, Stage::Fragment)) else {
             eprintln!("libshaderc unavailable; skipping");
             return;
@@ -584,7 +635,10 @@ mod tests {
         assert_eq!(fb["lights"].array_stride, 16, "std140 pads float arrays");
         assert_eq!(fb["rot"].matrix_stride, 16, "std140 pads mat3 columns");
         assert!(*size >= fb["rot"].offset + 48);
-        assert_eq!(linked.samplers["tex"], (2, false, true));
+        let tex = linked.samplers["tex"];
+        assert!(tex.fragment && !tex.vertex && !tex.cube);
+        assert!(linked.samplers["sky"].cube);
+        assert_ne!(linked.samplers["sky"].binding, tex.binding);
         assert_eq!(linked.vertex_inputs[&0], (false, 3));
         // Fragment inputs now sit at the vertex outputs' locations.
         let vr = reflect(&linked.vertex);

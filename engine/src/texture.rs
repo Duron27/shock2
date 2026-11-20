@@ -2,9 +2,7 @@ use crate::EngineRenderContext;
 use crate::texture_format;
 use crate::texture_format::RawTextureData;
 use crate::texture_format::TextureFormat;
-use gl::types;
 
-use std::os::raw::c_void;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -163,64 +161,28 @@ impl Texture {
 }
 
 /// A six-face cube map, sampled by direction.
-#[derive(Debug)]
 pub struct CubeTexture {
-    gl_id: types::GLuint,
+    gpu: crate::gfx::TextureCube,
+}
+
+impl std::fmt::Debug for CubeTexture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CubeTexture")
+    }
 }
 
 impl CubeTexture {
     /// Upload RGBA8 faces with a full mip chain: reflections sample blurred
     /// mips, not just the sharp top level.
     pub fn new(cube: &crate::dds::CubeFaces) -> CubeTexture {
-        let mut gl_id = 0;
-        unsafe {
-            // GLES 3 always filters across face edges; desktop GL must opt in,
-            // or blurred mips show the cube's seams.
-            #[cfg(not(target_os = "android"))]
-            gl::Enable(gl::TEXTURE_CUBE_MAP_SEAMLESS);
-            gl::GenTextures(1, &mut gl_id);
-            gl::BindTexture(gl::TEXTURE_CUBE_MAP, gl_id);
-            for (index, face) in cube.faces.iter().enumerate() {
-                gl::TexImage2D(
-                    gl::TEXTURE_CUBE_MAP_POSITIVE_X + index as u32,
-                    0,
-                    gl::RGBA as i32,
-                    cube.size as i32,
-                    cube.size as i32,
-                    0,
-                    gl::RGBA,
-                    gl::UNSIGNED_BYTE,
-                    face.as_ptr() as *const c_void,
-                );
-            }
-            let target = gl::TEXTURE_CUBE_MAP;
-            gl::TexParameteri(target, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
-            gl::TexParameteri(target, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
-            gl::TexParameteri(target, gl::TEXTURE_WRAP_R, gl::CLAMP_TO_EDGE as i32);
-            gl::TexParameteri(
-                target,
-                gl::TEXTURE_MIN_FILTER,
-                gl::LINEAR_MIPMAP_LINEAR as i32,
-            );
-            gl::TexParameteri(target, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
-            gl::GenerateMipmap(target);
+        let faces: Vec<u8> = cube.faces.iter().flat_map(|f| f.iter().copied()).collect();
+        CubeTexture {
+            gpu: crate::gfx::TextureCube::new(cube.size, &faces),
         }
-        CubeTexture { gl_id }
     }
 
     pub fn bind_to(&self, unit: u32) {
-        unsafe {
-            gl::ActiveTexture(gl::TEXTURE0 + unit);
-            gl::BindTexture(gl::TEXTURE_CUBE_MAP, self.gl_id);
-        }
-    }
-}
-
-impl Drop for CubeTexture {
-    fn drop(&mut self) {
-        unsafe {
-            gl::DeleteTextures(1, &self.gl_id);
-        }
+        self.gpu.bind(unit);
     }
 }
 

@@ -3,14 +3,13 @@ use std::any::Any;
 use std::ops::Deref;
 
 use crate::engine::EngineRenderContext;
+use crate::gfx;
+use crate::gfx::Program as ShaderProgram;
 use crate::scene::Material;
-use crate::shader_program::ShaderProgram;
 
 use crate::texture::TextureTrait;
-use c_string::*;
 use cgmath::Matrix4;
 use cgmath::Vector3;
-use cgmath::prelude::*;
 
 use once_cell::sync::OnceCell;
 
@@ -60,13 +59,13 @@ const FRAGMENT_SHADER_SOURCE: &str = r#"
 
 struct Uniforms {
     world_wave: crate::scene::world_wave::Uniforms,
-    world_loc: i32,
-    view_loc: i32,
-    projection_loc: i32,
-    in_color_loc: i32,
-    emissivity_loc: i32,
-    transparency_loc: i32,
-    scale_loc: i32,
+    world_loc: gfx::Uniform,
+    view_loc: gfx::Uniform,
+    projection_loc: gfx::Uniform,
+    in_color_loc: gfx::Uniform,
+    emissivity_loc: gfx::Uniform,
+    transparency_loc: gfx::Uniform,
+    scale_loc: gfx::Uniform,
 }
 
 static SHADER_PROGRAM: OnceCell<(ShaderProgram, Uniforms)> = OnceCell::new();
@@ -116,31 +115,21 @@ where
     ) {
         let (shader_program, uniforms) = SHADER_PROGRAM.get().expect("shader not compiled");
         self.diffuse_texture.bind0(render_context);
-        unsafe {
-            gl::UseProgram(shader_program.gl_id);
-            uniforms.world_wave.bind(render_context.world_wave);
+        shader_program.bind();
+        uniforms.world_wave.bind(render_context.world_wave);
 
-            let projection = render_context.projection_matrix;
+        let projection = render_context.projection_matrix;
 
-            gl::UniformMatrix4fv(uniforms.world_loc, 1, gl::FALSE, world_matrix.as_ptr());
-            crate::multiview::bind_view_projection(
-                uniforms.view_loc,
-                uniforms.projection_loc,
-                &view_matrix,
-                &projection,
-                render_context,
-                true,
-            );
-            gl::Uniform3f(
-                uniforms.in_color_loc,
-                self.color.x,
-                self.color.y,
-                self.color.z,
-            );
-            gl::Uniform1f(uniforms.transparency_loc, self.transparency);
-            gl::Uniform1f(uniforms.emissivity_loc, self.emissivity);
-            gl::Uniform1f(uniforms.scale_loc, self.scale);
-        }
+        gfx::set_mat4(uniforms.world_loc, &world_matrix);
+        gfx::set_mat4(uniforms.view_loc, &view_matrix);
+        gfx::set_mat4(uniforms.projection_loc, &projection);
+        gfx::set_vec3(
+            uniforms.in_color_loc,
+            [self.color.x, self.color.y, self.color.z],
+        );
+        gfx::set_f32(uniforms.transparency_loc, self.transparency);
+        gfx::set_f32(uniforms.emissivity_loc, self.emissivity);
+        gfx::set_f32(uniforms.scale_loc, self.scale);
     }
 }
 impl<T> Material for BillboardMaterial<T>
@@ -159,48 +148,29 @@ where
         self.has_initialized
     }
 
-    fn initialize(&mut self, is_opengl_es: bool) {
+    fn initialize(&mut self, _is_opengl_es: bool) {
         let _ = SHADER_PROGRAM.get_or_init(|| {
             // build and compile our shader program
             // ------------------------------------
             // vertex shader
-            let vertex_shader = crate::shader::build(
-                &[crate::scene::world_wave::GLSL, VERTEX_SHADER_SOURCE].concat(),
-                crate::shader::ShaderType::Vertex,
-                is_opengl_es,
-            );
+            let vertex_shader = &[crate::scene::world_wave::GLSL, VERTEX_SHADER_SOURCE].concat();
 
             // fragment shader
-            let fragment_shader = crate::shader::build(
-                FRAGMENT_SHADER_SOURCE,
-                crate::shader::ShaderType::Fragment,
-                is_opengl_es,
-            );
+            let fragment_shader = FRAGMENT_SHADER_SOURCE;
             // link shaders
-            unsafe {
-                let shader = crate::shader_program::link(&vertex_shader, &fragment_shader);
+            let shader = gfx::Program::new(&vertex_shader, &fragment_shader);
 
-                let uniforms = Uniforms {
-                    world_wave: crate::scene::world_wave::Uniforms::new(shader.gl_id),
-                    world_loc: gl::GetUniformLocation(shader.gl_id, c_str!("world").as_ptr()),
-                    view_loc: gl::GetUniformLocation(shader.gl_id, c_str!("view").as_ptr()),
-                    in_color_loc: gl::GetUniformLocation(shader.gl_id, c_str!("inColor").as_ptr()),
-                    emissivity_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("emissivity").as_ptr(),
-                    ),
-                    transparency_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("transparency").as_ptr(),
-                    ),
-                    projection_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("projection").as_ptr(),
-                    ),
-                    scale_loc: gl::GetUniformLocation(shader.gl_id, c_str!("scale").as_ptr()),
-                };
-                (shader, uniforms)
-            }
+            let uniforms = Uniforms {
+                world_wave: crate::scene::world_wave::Uniforms::new(&shader),
+                world_loc: shader.uniform("world"),
+                view_loc: shader.uniform("view"),
+                in_color_loc: shader.uniform("inColor"),
+                emissivity_loc: shader.uniform("emissivity"),
+                transparency_loc: shader.uniform("transparency"),
+                projection_loc: shader.uniform("projection"),
+                scale_loc: shader.uniform("scale"),
+            };
+            (shader, uniforms)
         });
 
         // self.diffuse_texture_descriptor

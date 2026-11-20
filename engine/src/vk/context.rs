@@ -24,15 +24,13 @@ pub fn validation_error_count() -> usize {
     VALIDATION_ERRORS.load(Ordering::Relaxed)
 }
 
-/// Validation runs in debug builds, or whenever `SHOCK2_VK_VALIDATION=1`;
-/// `SHOCK2_VK_VALIDATION=0` turns it off. It needs the Khronos layer
+/// Validation runs when `SHOCK2_VK_VALIDATION` is set to anything but `0`.
+/// It needs the Khronos layer
 /// installed (Fedora: `vulkan-validation-layers`) and is skipped otherwise.
 fn validation_requested() -> bool {
-    match std::env::var("SHOCK2_VK_VALIDATION").as_deref() {
-        Ok("0") => false,
-        Ok(_) => true,
-        Err(_) => cfg!(debug_assertions),
-    }
+    // Opt-in: the layer costs a quarter of the frame rate even in a
+    // menu-light scene, and dev builds are the ones played.
+    matches!(std::env::var("SHOCK2_VK_VALIDATION").as_deref(), Ok(v) if v != "0")
 }
 
 unsafe extern "system" fn debug_callback(

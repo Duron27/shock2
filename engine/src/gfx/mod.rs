@@ -125,6 +125,13 @@ pub fn set_i32(uniform: Uniform, value: i32) {
         gl_backend::set_i32(uniform.gl, value)
     }
 }
+pub fn set_ivec2(uniform: Uniform, value: [i32; 2]) {
+    if is_vulkan() {
+        vk_backend::set_ivec(uniform.vk, &value, 2)
+    } else {
+        unsafe { gl::Uniform2i(uniform.gl, value[0], value[1]) }
+    }
+}
 pub fn set_vec2(uniform: Uniform, value: [f32; 2]) {
     if is_vulkan() {
         vk_backend::set_floats(uniform.vk, &value, 2)
@@ -186,6 +193,14 @@ pub fn set_vec4_array(uniform: Uniform, values: &[[f32; 4]]) {
         vk_backend::set_floats(uniform.vk, values.as_flattened(), 4)
     } else {
         gl_backend::set_vec4_array(uniform.gl, values)
+    }
+}
+/// `mat3x4` elements: three columns of four floats each, column-major.
+pub fn set_mat3x4_array(uniform: Uniform, values: &[f32]) {
+    if is_vulkan() {
+        vk_backend::set_mat3x4(uniform.vk, values)
+    } else {
+        gl_backend::set_mat3x4_array(uniform.gl, values)
     }
 }
 pub fn set_mat4_array(uniform: Uniform, values: &[cgmath::Matrix4<f32>]) {
@@ -544,6 +559,41 @@ impl Texture2D {
         match &self.inner {
             TextureInner::Gl(t) => t.id(),
             TextureInner::Vk(_) => 0,
+        }
+    }
+}
+
+/// A cube map: six square RGBA8 faces (+X, -X, +Y, -Y, +Z, -Z), clamped and
+/// mipmapped (reflections sample the blurred mips).
+pub struct TextureCube {
+    inner: CubeInner,
+}
+
+unsafe impl Send for TextureCube {}
+unsafe impl Sync for TextureCube {}
+
+enum CubeInner {
+    Gl(gl_backend::GlCube),
+    Vk(vk_backend::VkCube),
+}
+
+impl TextureCube {
+    /// `faces` holds the six faces in turn, `size * size * 4` bytes each.
+    pub fn new(size: u32, faces: &[u8]) -> TextureCube {
+        assert_eq!(faces.len(), (size * size * 4 * 6) as usize);
+        TextureCube {
+            inner: match backend() {
+                Backend::OpenGl => CubeInner::Gl(gl_backend::GlCube::new(size, faces)),
+                Backend::Vulkan => CubeInner::Vk(vk_backend::VkCube::new(size, faces)),
+            },
+        }
+    }
+
+    /// Bind to unit `unit`'s cube slot (a unit holds a 2D and a cube texture).
+    pub fn bind(&self, unit: u32) {
+        match &self.inner {
+            CubeInner::Gl(t) => t.bind(unit),
+            CubeInner::Vk(t) => t.bind(unit),
         }
     }
 }

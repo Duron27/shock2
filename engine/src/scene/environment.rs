@@ -2,13 +2,12 @@
 //! sampler shares, and a debug preview that paints it around the camera.
 extern crate gl;
 use crate::engine::EngineRenderContext;
+use crate::gfx;
+use crate::gfx::Program as ShaderProgram;
 use crate::scene::Material;
-use crate::shader_program::ShaderProgram;
 use crate::texture::CubeTexture;
 
-use c_string::*;
 use cgmath::Matrix4;
-use cgmath::prelude::*;
 use once_cell::sync::OnceCell;
 use std::any::Any;
 use std::rc::Rc;
@@ -54,11 +53,11 @@ const FRAGMENT_SHADER_SOURCE: &str = r#"
 "#;
 
 struct Uniforms {
-    world: i32,
-    view: i32,
-    projection: i32,
-    environment: i32,
-    eye: i32,
+    world: gfx::Uniform,
+    view: gfx::Uniform,
+    projection: gfx::Uniform,
+    environment: gfx::Uniform,
+    eye: gfx::Uniform,
 }
 
 static SHADER_PROGRAM: OnceCell<(ShaderProgram, Uniforms)> = OnceCell::new();
@@ -91,31 +90,20 @@ impl Material for EnvironmentPreviewMaterial {
         self.has_initialized
     }
 
-    fn initialize(&mut self, is_opengl_es: bool) {
+    fn initialize(&mut self, _is_opengl_es: bool) {
         let _ = SHADER_PROGRAM.get_or_init(|| {
-            let vertex_shader = crate::shader::build(
-                VERTEX_SHADER_SOURCE,
-                crate::shader::ShaderType::Vertex,
-                is_opengl_es,
-            );
-            let fragment_shader = crate::shader::build(
-                &format!("{GLSL}\n{FRAGMENT_SHADER_SOURCE}"),
-                crate::shader::ShaderType::Fragment,
-                is_opengl_es,
-            );
-            unsafe {
-                let shader = crate::shader_program::link(&vertex_shader, &fragment_shader);
-                let loc =
-                    |name: &std::ffi::CStr| gl::GetUniformLocation(shader.gl_id, name.as_ptr());
-                let uniforms = Uniforms {
-                    world: loc(c_str!("world")),
-                    view: loc(c_str!("view")),
-                    projection: loc(c_str!("projection")),
-                    environment: loc(c_str!("environment")),
-                    eye: loc(c_str!("environmentEye")),
-                };
-                (shader, uniforms)
-            }
+            let vertex_shader = VERTEX_SHADER_SOURCE;
+            let fragment_shader = &format!("{GLSL}\n{FRAGMENT_SHADER_SOURCE}");
+            let shader = gfx::Program::new(&vertex_shader, &fragment_shader);
+            let loc = |name: &str| shader.uniform(name);
+            let uniforms = Uniforms {
+                world: loc("world"),
+                view: loc("view"),
+                projection: loc("projection"),
+                environment: loc("environment"),
+                eye: loc("environmentEye"),
+            };
+            (shader, uniforms)
         });
         self.has_initialized = true;
     }
@@ -129,21 +117,17 @@ impl Material for EnvironmentPreviewMaterial {
         _lights: &crate::scene::light::LightArray,
     ) -> bool {
         let (program, uniforms) = SHADER_PROGRAM.get().expect("shader not compiled");
-        unsafe {
-            gl::UseProgram(program.gl_id);
-            gl::UniformMatrix4fv(uniforms.world, 1, gl::FALSE, world_matrix.as_ptr());
-            crate::multiview::bind_view_projection(
-                uniforms.view,
-                uniforms.projection,
-                &view_matrix,
-                &render_context.projection_matrix,
-                render_context,
-                true,
-            );
-            crate::multiview::bind_eye(uniforms.eye, view_matrix, render_context);
-            gl::Uniform1i(uniforms.environment, ENVIRONMENT_UNIT as i32);
-            self.environment.bind_to(ENVIRONMENT_UNIT);
-        }
+        program.bind();
+        gfx::set_mat4(uniforms.world, &world_matrix);
+        gfx::set_mat4(uniforms.view, &view_matrix);
+        gfx::set_mat4(uniforms.projection, &render_context.projection_matrix);
+        gfx::set_vec3(
+            uniforms.eye,
+            crate::scene::material::eye_position(view_matrix).into(),
+        );
+        gfx::set_i32(uniforms.environment, ENVIRONMENT_UNIT as i32);
+        self.environment.bind_to(ENVIRONMENT_UNIT);
+
         true
     }
 

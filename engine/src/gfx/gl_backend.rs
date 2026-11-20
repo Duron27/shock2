@@ -384,3 +384,66 @@ impl Drop for GlTexture {
         unsafe { gl::DeleteTextures(1, &self.id) }
     }
 }
+
+pub struct GlCube {
+    id: u32,
+}
+
+impl GlCube {
+    pub fn new(size: u32, faces: &[u8]) -> GlCube {
+        let face_bytes = (size * size * 4) as usize;
+        let mut id = 0;
+        unsafe {
+            // GLES 3 always filters across face edges; desktop GL must opt in,
+            // or blurred mips show the cube's seams.
+            #[cfg(not(target_os = "android"))]
+            gl::Enable(gl::TEXTURE_CUBE_MAP_SEAMLESS);
+            gl::GenTextures(1, &mut id);
+            gl::BindTexture(gl::TEXTURE_CUBE_MAP, id);
+            for (index, face) in faces.chunks_exact(face_bytes).enumerate() {
+                gl::TexImage2D(
+                    gl::TEXTURE_CUBE_MAP_POSITIVE_X + index as u32,
+                    0,
+                    gl::RGBA as i32,
+                    size as i32,
+                    size as i32,
+                    0,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    face.as_ptr() as *const std::ffi::c_void,
+                );
+            }
+            let target = gl::TEXTURE_CUBE_MAP;
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_R, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(
+                target,
+                gl::TEXTURE_MIN_FILTER,
+                gl::LINEAR_MIPMAP_LINEAR as i32,
+            );
+            gl::TexParameteri(target, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+            gl::GenerateMipmap(target);
+        }
+        GlCube { id }
+    }
+
+    pub fn bind(&self, unit: u32) {
+        unsafe {
+            gl::ActiveTexture(gl::TEXTURE0 + unit);
+            gl::BindTexture(gl::TEXTURE_CUBE_MAP, self.id);
+        }
+    }
+}
+
+impl Drop for GlCube {
+    fn drop(&mut self) {
+        unsafe { gl::DeleteTextures(1, &self.id) };
+    }
+}
+
+pub fn set_mat3x4_array(loc: i32, values: &[f32]) {
+    unsafe {
+        gl::UniformMatrix3x4fv(loc, (values.len() / 12) as i32, gl::FALSE, values.as_ptr());
+    }
+}

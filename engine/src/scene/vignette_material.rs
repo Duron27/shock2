@@ -1,10 +1,9 @@
 extern crate gl;
 use crate::engine::EngineRenderContext;
+use crate::gfx;
+use crate::gfx::Program as ShaderProgram;
 use crate::scene::Material;
-use crate::shader_program::ShaderProgram;
 
-use c_string::*;
-use cgmath::prelude::*;
 use cgmath::{Matrix4, Vector3};
 use once_cell::sync::OnceCell;
 use std::any::Any;
@@ -85,15 +84,15 @@ const FRAGMENT_SHADER_SOURCE: &str = r#"
 "#;
 
 struct Uniforms {
-    world_loc: i32,
-    view_loc: i32,
-    projection_loc: i32,
-    color_loc: i32,
-    intensity_loc: i32,
-    inner_radius_loc: i32,
-    outer_radius_loc: i32,
-    grid_cells_loc: i32,
-    wave_phase_loc: i32,
+    world_loc: gfx::Uniform,
+    view_loc: gfx::Uniform,
+    projection_loc: gfx::Uniform,
+    color_loc: gfx::Uniform,
+    intensity_loc: gfx::Uniform,
+    inner_radius_loc: gfx::Uniform,
+    outer_radius_loc: gfx::Uniform,
+    grid_cells_loc: gfx::Uniform,
+    wave_phase_loc: gfx::Uniform,
 }
 
 static SHADER_PROGRAM: OnceCell<(ShaderProgram, Uniforms)> = OnceCell::new();
@@ -132,53 +131,25 @@ impl Material for VignetteMaterial {
         self.has_initialized
     }
 
-    fn initialize(&mut self, is_opengl_es: bool) {
+    fn initialize(&mut self, _is_opengl_es: bool) {
         let _ = SHADER_PROGRAM.get_or_init(|| {
-            let vertex_shader = crate::shader::build(
-                VERTEX_SHADER_SOURCE,
-                crate::shader::ShaderType::Vertex,
-                is_opengl_es,
-            );
+            let vertex_shader = VERTEX_SHADER_SOURCE;
 
-            let fragment_shader = crate::shader::build(
-                FRAGMENT_SHADER_SOURCE,
-                crate::shader::ShaderType::Fragment,
-                is_opengl_es,
-            );
+            let fragment_shader = FRAGMENT_SHADER_SOURCE;
 
-            unsafe {
-                let shader = crate::shader_program::link(&vertex_shader, &fragment_shader);
-                let uniforms = Uniforms {
-                    world_loc: gl::GetUniformLocation(shader.gl_id, c_str!("world").as_ptr()),
-                    view_loc: gl::GetUniformLocation(shader.gl_id, c_str!("view").as_ptr()),
-                    projection_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("projection").as_ptr(),
-                    ),
-                    color_loc: gl::GetUniformLocation(shader.gl_id, c_str!("color").as_ptr()),
-                    intensity_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("intensity").as_ptr(),
-                    ),
-                    inner_radius_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("innerRadius").as_ptr(),
-                    ),
-                    wave_phase_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("wavePhase").as_ptr(),
-                    ),
-                    grid_cells_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("gridCells").as_ptr(),
-                    ),
-                    outer_radius_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("outerRadius").as_ptr(),
-                    ),
-                };
-                (shader, uniforms)
-            }
+            let shader = gfx::Program::new(&vertex_shader, &fragment_shader);
+            let uniforms = Uniforms {
+                world_loc: shader.uniform("world"),
+                view_loc: shader.uniform("view"),
+                projection_loc: shader.uniform("projection"),
+                color_loc: shader.uniform("color"),
+                intensity_loc: shader.uniform("intensity"),
+                inner_radius_loc: shader.uniform("innerRadius"),
+                wave_phase_loc: shader.uniform("wavePhase"),
+                grid_cells_loc: shader.uniform("gridCells"),
+                outer_radius_loc: shader.uniform("outerRadius"),
+            };
+            (shader, uniforms)
         });
 
         self.has_initialized = true;
@@ -212,26 +183,19 @@ impl Material for VignetteMaterial {
         _lights: &crate::scene::light::LightArray,
     ) -> bool {
         let (shader_program, uniforms) = SHADER_PROGRAM.get().expect("shader not compiled");
-        unsafe {
-            gl::UseProgram(shader_program.gl_id);
+        shader_program.bind();
 
-            let projection = render_context.projection_matrix;
-            gl::UniformMatrix4fv(uniforms.world_loc, 1, gl::FALSE, world_matrix.as_ptr());
-            crate::multiview::bind_view_projection(
-                uniforms.view_loc,
-                uniforms.projection_loc,
-                &view_matrix,
-                &projection,
-                render_context,
-                true,
-            );
-            gl::Uniform3fv(uniforms.color_loc, 1, self.color.as_ptr());
-            gl::Uniform1f(uniforms.intensity_loc, self.intensity);
-            gl::Uniform1f(uniforms.inner_radius_loc, self.inner_radius);
-            gl::Uniform1f(uniforms.outer_radius_loc, self.outer_radius);
-            gl::Uniform1f(uniforms.grid_cells_loc, self.grid_cells);
-            gl::Uniform1f(uniforms.wave_phase_loc, self.wave_phase);
-        }
+        let projection = render_context.projection_matrix;
+        gfx::set_mat4(uniforms.world_loc, &world_matrix);
+        gfx::set_mat4(uniforms.view_loc, &view_matrix);
+        gfx::set_mat4(uniforms.projection_loc, &projection);
+        gfx::set_vec3(uniforms.color_loc, *AsRef::<[f32; 3]>::as_ref(&self.color));
+        gfx::set_f32(uniforms.intensity_loc, self.intensity);
+        gfx::set_f32(uniforms.inner_radius_loc, self.inner_radius);
+        gfx::set_f32(uniforms.outer_radius_loc, self.outer_radius);
+        gfx::set_f32(uniforms.grid_cells_loc, self.grid_cells);
+        gfx::set_f32(uniforms.wave_phase_loc, self.wave_phase);
+
         true
     }
 }

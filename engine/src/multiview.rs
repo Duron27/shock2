@@ -2,7 +2,7 @@
 //! submitted once and its vertex shader run per eye layer. Process-wide,
 //! because shader programs are compiled once and shared: enable it before the
 //! first draw. Off (the default) leaves shaders and uniforms exactly as before.
-use cgmath::{Array, Matrix, Matrix4, SquareMatrix, vec4};
+use cgmath::{Matrix4, SquareMatrix, vec4};
 use gl::types::{GLenum, GLint, GLsizei, GLuint};
 use std::sync::OnceLock;
 
@@ -95,45 +95,6 @@ impl Views {
     }
 }
 
-/// Upload a draw's `view` / `projection` uniforms; a location of -1 skips it.
-/// Single-view this is exactly the two plain uploads. Under multiview a
-/// `camera` draw takes each eye's projection from `Views`, not `projection`.
-///
-/// # Safety
-/// Requires a current GL context with the draw's program in use.
-pub(crate) unsafe fn bind_view_projection(
-    view_loc: GLint,
-    projection_loc: GLint,
-    view: &Matrix4<f32>,
-    projection: &Matrix4<f32>,
-    context: &crate::EngineRenderContext,
-    camera: bool,
-) {
-    unsafe {
-        match context.multiview {
-            None => {
-                gl::UniformMatrix4fv(view_loc, 1, gl::FALSE, view.as_ptr());
-                gl::UniformMatrix4fv(projection_loc, 1, gl::FALSE, projection.as_ptr());
-            }
-            Some(views) => {
-                let (v, p) = views.uniforms(view, projection, camera);
-                gl::UniformMatrix4fv(
-                    view_loc,
-                    VIEW_COUNT as GLsizei,
-                    gl::FALSE,
-                    v.as_ptr().cast(),
-                );
-                gl::UniformMatrix4fv(
-                    projection_loc,
-                    VIEW_COUNT as GLsizei,
-                    gl::FALSE,
-                    p.as_ptr().cast(),
-                );
-            }
-        }
-    }
-}
-
 /// Multiview declarations for one shader, inserted right after `#version`
 /// (an `#extension` must precede every non-preprocessor token).
 pub(crate) fn shader_header(vertex: bool) -> &'static str {
@@ -204,27 +165,6 @@ fn per_eye_name(decl: &str) -> Option<&str> {
         .iter()
         .any(|&(t, n)| t == ty && n == name)
         .then_some(name)
-}
-
-/// Upload the eye position derived from `view` (each eye's under multiview).
-///
-/// # Safety
-/// Requires a current GL context with the draw's program in use.
-pub(crate) unsafe fn bind_eye(
-    loc: GLint,
-    view: &Matrix4<f32>,
-    context: &crate::EngineRenderContext,
-) {
-    let eye = |v: &Matrix4<f32>| crate::scene::material::eye_position(v);
-    unsafe {
-        match context.multiview {
-            None => gl::Uniform3fv(loc, 1, eye(view).as_ptr()),
-            Some(views) => {
-                let eyes = views.eye_from_view.map(|e| eye(&(e * view)));
-                gl::Uniform3fv(loc, VIEW_COUNT as GLsizei, eyes.as_ptr().cast());
-            }
-        }
-    }
 }
 
 #[cfg(test)]

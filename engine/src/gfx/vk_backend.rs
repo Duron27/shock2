@@ -212,6 +212,8 @@ struct BufferObj {
     buffer: vk::Buffer,
     alloc: Allocation,
     size: u64,
+    /// In host-visible memory (written in place) rather than device-local.
+    host: bool,
 }
 
 struct ImageObj {
@@ -220,6 +222,8 @@ struct ImageObj {
     alloc: Allocation,
     sampling: Sampling,
     mips: u32,
+    /// 1, or 6 for a cube.
+    layers: u32,
 }
 
 #[derive(Default, Clone)]
@@ -233,6 +237,7 @@ struct Slot {
 struct SamplerBinding {
     binding: u32,
     unit: u32,
+    cube: bool,
 }
 
 struct ProgramObj {
@@ -350,14 +355,21 @@ struct State {
     layout_ids: HashMap<VertexLayout, u32>,
     zero_buffer: u32,
     white: u32,
+    white_cube: u32,
     frames: Vec<FrameRes>,
     /// Frames submitted so far.
     submitted: u64,
     garbage: Vec<(u64, Garbage)>,
+    /// Copies recorded since the last flush, and the staging they read.
+    uploads: Option<vk::CommandBuffer>,
+    staging: Vec<(vk::Buffer, Allocation)>,
+    staging_bytes: u64,
     recording: Option<Recording>,
     gl: GlState,
     program: Option<u32>,
+    /// Texture units, each holding a 2D and a cube binding as GL's do.
     units: [Option<u32>; MAX_UNITS],
+    cube_units: [Option<u32>; MAX_UNITS],
 }
 
 thread_local! {
@@ -403,13 +415,18 @@ pub fn install(ctx: &crate::vk::VkContext) {
         layout_ids: HashMap::new(),
         zero_buffer: 0,
         white: 0,
+        white_cube: 0,
         frames: (0..FRAMES).map(|_| FrameRes::default()).collect(),
         submitted: 0,
         garbage: Vec::new(),
+        uploads: None,
+        staging: Vec::new(),
+        staging_bytes: 0,
         recording: None,
         gl: GlState::default(),
         program: None,
         units: [None; MAX_UNITS],
+        cube_units: [None; MAX_UNITS],
     };
     state.zero_buffer = state.create_buffer(&[0u8; 16], vk::BufferUsageFlags::VERTEX_BUFFER);
     state.white = state.create_texture(
@@ -422,6 +439,7 @@ pub fn install(ctx: &crate::vk::VkContext) {
             wrap: true,
         },
     );
+    state.white_cube = state.create_cube(1, &[255; 24]);
     STATE.with(|s| *s.borrow_mut() = Some(state));
     super::set_backend(super::Backend::Vulkan);
 }
@@ -431,6 +449,7 @@ pub fn shutdown() {
     let Some(mut s) = STATE.with(|s| s.borrow_mut().take()) else {
         return;
     };
+    s.flush_uploads();
     let d = s.dev.device.clone();
     unsafe {
         for (_, g) in s.garbage.drain(..) {
@@ -491,6 +510,7 @@ pub fn begin_frame(
     slot: usize,
 ) {
     with(|s| {
+        s.flush_uploads();
         // Frames before `submitted - (FRAMES - 1)` are complete.
         let done_before = s.submitted.saturating_sub(FRAMES as u64 - 1);
         let mut keep = Vec::new();
@@ -535,6 +555,8 @@ pub fn begin_frame(
 /// Stop recording; the renderer submits the frame next.
 pub fn end_frame() {
     with(|s| {
+        // Textures and meshes made while recording are drawn this frame.
+        s.flush_uploads();
         if s.recording.take().is_some() {
             s.submitted += 1;
         }
@@ -558,6 +580,19 @@ impl State {
     }
 
     fn raw_buffer(&mut self, size: u64, usage: vk::BufferUsageFlags) -> (vk::Buffer, Allocation) {
+        self.raw_buffer_in(
+            size,
+            usage,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+    }
+
+    fn raw_buffer_in(
+        &mut self,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        flags: vk::MemoryPropertyFlags,
+    ) -> (vk::Buffer, Allocation) {
         let d = &self.dev.device;
         let buffer = unsafe {
             d.create_buffer(
@@ -570,20 +605,16 @@ impl State {
         }
         .expect("vkCreateBuffer");
         let req = unsafe { d.get_buffer_memory_requirements(buffer) };
-        let alloc = self.alloc.alloc(
-            &self.dev,
-            req,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            true,
-        );
+        let alloc = self.alloc.alloc(&self.dev, req, flags, true);
         unsafe { d.bind_buffer_memory(buffer, alloc.memory, alloc.offset) }
             .expect("vkBindBufferMemory");
         (buffer, alloc)
     }
 
+    /// A host-visible buffer holding `bytes`, for data rewritten often.
     fn create_buffer(&mut self, bytes: &[u8], usage: vk::BufferUsageFlags) -> u32 {
         let size = bytes.len() as u64;
-        let (buffer, alloc) = self.raw_buffer(size, usage);
+        let (buffer, alloc) = self.raw_buffer(size, usage | vk::BufferUsageFlags::TRANSFER_DST);
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), alloc.mapped, bytes.len());
         }
@@ -594,21 +625,67 @@ impl State {
                 buffer,
                 alloc,
                 size,
+                host: true,
             },
         );
         id
     }
 
-    fn drop_buffer(&mut self, id: u32) {
-        if let Some(b) = self.buffers.remove(&id) {
-            self.retire(Garbage::Buffer(b.buffer, b.alloc));
+    /// A device-local buffer holding `bytes`, copied in by the next flush.
+    fn create_static_buffer(&mut self, bytes: &[u8], usage: vk::BufferUsageFlags) -> u32 {
+        let size = bytes.len() as u64;
+        let (buffer, alloc) = self.raw_buffer_in(
+            size,
+            usage | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        );
+        if size > 0 {
+            let staging = self.stage(bytes);
+            let cmd = self.upload_commands();
+            unsafe {
+                self.dev.device.cmd_copy_buffer(
+                    cmd,
+                    staging,
+                    buffer,
+                    &[vk::BufferCopy {
+                        src_offset: 0,
+                        dst_offset: 0,
+                        size,
+                    }],
+                );
+            }
         }
+        let id = self.id();
+        self.buffers.insert(
+            id,
+            BufferObj {
+                buffer,
+                alloc,
+                size,
+                host: false,
+            },
+        );
+        self.maybe_flush();
+        id
     }
 
-    /// Record and run commands now, waiting for them to finish.
-    fn one_shot(&mut self, record: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
+    /// A staging buffer holding `bytes`, freed by the next flush.
+    fn stage(&mut self, bytes: &[u8]) -> vk::Buffer {
+        let (buffer, alloc) =
+            self.raw_buffer(bytes.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), alloc.mapped, bytes.len()) };
+        self.staging.push((buffer, alloc));
+        self.staging_bytes += bytes.len() as u64;
+        buffer
+    }
+
+    /// The open upload command buffer, begun if need be.
+    fn upload_commands(&mut self) -> vk::CommandBuffer {
+        if let Some(cmd) = self.uploads {
+            return cmd;
+        }
         let d = &self.dev.device;
-        unsafe {
+        let cmd = unsafe {
             let cmd = d
                 .allocate_command_buffers(
                     &vk::CommandBufferAllocateInfo::builder()
@@ -623,7 +700,41 @@ impl State {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )
             .expect("vkBeginCommandBuffer");
-            record(d, cmd);
+            cmd
+        };
+        self.uploads = Some(cmd);
+        cmd
+    }
+
+    /// Keep loading from piling up unbounded staging memory.
+    fn maybe_flush(&mut self) {
+        if self.staging_bytes > 64 << 20 {
+            self.flush_uploads();
+        }
+    }
+
+    /// Submit the recorded uploads and wait for them, so anything drawn
+    /// afterwards reads the uploaded data.
+    fn flush_uploads(&mut self) {
+        let Some(cmd) = self.uploads.take() else {
+            return;
+        };
+        let d = &self.dev.device;
+        unsafe {
+            // Uploaded data is visible to every later command on the queue.
+            let barrier = vk::MemoryBarrier::builder()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ)
+                .build();
+            d.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            );
             d.end_command_buffer(cmd).expect("vkEndCommandBuffer");
             let fence = d
                 .create_fence(&vk::FenceCreateInfo::default(), None)
@@ -640,6 +751,17 @@ impl State {
             d.destroy_fence(fence, None);
             d.free_command_buffers(self.upload_pool, &cmds);
         }
+        for (buffer, alloc) in std::mem::take(&mut self.staging) {
+            unsafe { self.dev.device.destroy_buffer(buffer, None) };
+            self.alloc.free(alloc);
+        }
+        self.staging_bytes = 0;
+    }
+
+    fn drop_buffer(&mut self, id: u32) {
+        if let Some(b) = self.buffers.remove(&id) {
+            self.retire(Garbage::Buffer(b.buffer, b.alloc));
+        }
     }
 
     fn create_texture(
@@ -651,6 +773,30 @@ impl State {
         sampling: Sampling,
     ) -> u32 {
         let rgba = to_rgba(format, pixels);
+        self.create_image(width, height, 1, &rgba, sampling)
+    }
+
+    /// A cube from six RGBA8 faces (+X, -X, +Y, -Y, +Z, -Z), mipmapped and
+    /// clamped as GL's cube maps here are.
+    fn create_cube(&mut self, size: u32, faces: &[u8]) -> u32 {
+        let sampling = Sampling {
+            filter: Filter::LinearMipmap,
+            wrap: false,
+        };
+        self.create_image(size, size, 6, faces, sampling)
+    }
+
+    /// `layers` 1 (a 2D texture) or 6 (a cube); `rgba` holds each layer in
+    /// turn, rows top-first.
+    fn create_image(
+        &mut self,
+        width: u32,
+        height: u32,
+        layers: u32,
+        rgba: &[u8],
+        sampling: Sampling,
+    ) -> u32 {
+        let cube = layers == 6;
         let mips = if sampling.filter == Filter::LinearMipmap {
             32 - width.max(height).max(1).leading_zeros()
         } else {
@@ -668,7 +814,12 @@ impl State {
                         depth: 1,
                     })
                     .mip_levels(mips)
-                    .array_layers(1)
+                    .array_layers(layers)
+                    .flags(if cube {
+                        vk::ImageCreateFlags::CUBE_COMPATIBLE
+                    } else {
+                        vk::ImageCreateFlags::empty()
+                    })
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
                     .usage(
@@ -692,7 +843,11 @@ impl State {
             d.create_image_view(
                 &vk::ImageViewCreateInfo::builder()
                     .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .view_type(if cube {
+                        vk::ImageViewType::CUBE
+                    } else {
+                        vk::ImageViewType::TYPE_2D
+                    })
                     .format(vk::Format::R8G8B8A8_UNORM)
                     .subresource_range(range(0, mips)),
                 None,
@@ -708,9 +863,10 @@ impl State {
                 alloc,
                 sampling,
                 mips,
+                layers,
             },
         );
-        self.upload(id, 0, 0, width, height, &rgba, true, (width, height));
+        self.upload(id, 0, 0, width, height, rgba, true, (width, height));
         id
     }
 
@@ -728,14 +884,14 @@ impl State {
         fresh: bool,
         size: (u32, u32),
     ) {
-        let (staging, staging_alloc) =
-            self.raw_buffer(rgba.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC);
-        unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), staging_alloc.mapped, rgba.len()) };
-        let (image, mips) = {
+        let staging = self.stage(rgba);
+        let (image, mips, faces) = {
             let i = &self.images[&id];
-            (i.image, i.mips)
+            (i.image, i.mips, i.layers)
         };
-        self.one_shot(|d, cmd| unsafe {
+        let cmd = self.upload_commands();
+        let d = &self.dev.device;
+        unsafe {
             let from = if fresh {
                 vk::ImageLayout::UNDEFINED
             } else {
@@ -758,7 +914,7 @@ impl State {
                     buffer_offset: 0,
                     buffer_row_length: 0,
                     buffer_image_height: 0,
-                    image_subresource: layers(0),
+                    image_subresource: layers(0, faces),
                     image_offset: vk::Offset3D {
                         x: x as i32,
                         y: y as i32,
@@ -790,9 +946,9 @@ impl State {
                     image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[vk::ImageBlit {
-                        src_subresource: layers(level - 1),
+                        src_subresource: layers(level - 1, faces),
                         src_offsets: [vk::Offset3D::default(), vk::Offset3D { x: w, y: h, z: 1 }],
-                        dst_subresource: layers(level),
+                        dst_subresource: layers(level, faces),
                         dst_offsets: [vk::Offset3D::default(), vk::Offset3D { x: nw, y: nh, z: 1 }],
                     }],
                     vk::Filter::LINEAR,
@@ -815,9 +971,8 @@ impl State {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             );
-        });
-        unsafe { self.dev.device.destroy_buffer(staging, None) };
-        self.alloc.free(staging_alloc);
+        }
+        self.maybe_flush();
     }
 
     fn sampler(&mut self, sampling: Sampling) -> vk::Sampler {
@@ -1138,20 +1293,24 @@ impl State {
                 ));
             }
         }
-        let sampler_units: Vec<(u32, u32)> = self.programs[program_id as usize]
+        let sampler_units: Vec<(u32, u32, bool)> = self.programs[program_id as usize]
             .samplers
             .iter()
-            .map(|s| (s.binding, s.unit))
+            .map(|s| (s.binding, s.unit, s.cube))
             .collect();
         let mut image_writes = Vec::new();
-        for (binding, unit) in sampler_units {
-            let image = self
-                .units
+        for (binding, unit, cube) in sampler_units {
+            let (units, fallback) = if cube {
+                (&self.cube_units, self.white_cube)
+            } else {
+                (&self.units, self.white)
+            };
+            let image = units
                 .get(unit as usize)
                 .copied()
                 .flatten()
                 .filter(|id| self.images.contains_key(id))
-                .unwrap_or(self.white);
+                .unwrap_or(fallback);
             let (view, sampling) = {
                 let i = &self.images[&image];
                 (i.view, i.sampling)
@@ -1331,16 +1490,16 @@ fn range(base_mip: u32, mips: u32) -> vk::ImageSubresourceRange {
         base_mip_level: base_mip,
         level_count: mips,
         base_array_layer: 0,
-        layer_count: 1,
+        layer_count: vk::REMAINING_ARRAY_LAYERS,
     }
 }
 
-fn layers(mip: u32) -> vk::ImageSubresourceLayers {
+fn layers(mip: u32, count: u32) -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers {
         aspect_mask: vk::ImageAspectFlags::COLOR,
         mip_level: mip,
         base_array_layer: 0,
-        layer_count: 1,
+        layer_count: count,
     }
 }
 
@@ -1435,17 +1594,22 @@ pub fn create_program(vertex: &str, fragment: &str) -> u32 {
             }
         }
         let mut samplers = Vec::new();
-        for (name, &(binding, in_vertex, in_fragment)) in &linked.samplers {
+        for (name, use_) in &linked.samplers {
+            let binding = use_.binding;
             let mut stages = vk::ShaderStageFlags::empty();
-            if in_vertex {
+            if use_.vertex {
                 stages |= vk::ShaderStageFlags::VERTEX;
             }
-            if in_fragment {
+            if use_.fragment {
                 stages |= vk::ShaderStageFlags::FRAGMENT;
             }
             let i = slot_for(name, &mut slots);
             slots[i].sampler = Some(samplers.len());
-            samplers.push(SamplerBinding { binding, unit: 0 });
+            samplers.push(SamplerBinding {
+                binding,
+                unit: 0,
+                cube: use_.cube,
+            });
             set_bindings.push(
                 vk::DescriptorSetLayoutBinding::builder()
                     .binding(binding)
@@ -1494,12 +1658,19 @@ pub fn create_program(vertex: &str, fragment: &str) -> u32 {
 
 pub const NO_UNIFORM: u32 = u32::MAX;
 
+/// A uniform handle: the name's slot, and in the top 8 bits the array
+/// element it starts at (GL's `name[3]` locations).
 pub fn uniform(program: u32, name: &str) -> u32 {
-    // GL names array uniforms both `name` and `name[0]`.
-    let name = name.strip_suffix("[0]").unwrap_or(name);
-    with(|s| s.programs[program as usize].names.get(name).copied())
+    let (base, element) = match name.strip_suffix(']').and_then(|n| n.rsplit_once('[')) {
+        Some((base, index)) => match index.parse::<u32>() {
+            Ok(i) if i < 256 => (base, i),
+            _ => return NO_UNIFORM,
+        },
+        None => (name, 0),
+    };
+    with(|s| s.programs[program as usize].names.get(base).copied())
         .flatten()
-        .unwrap_or(NO_UNIFORM)
+        .map_or(NO_UNIFORM, |slot| slot | (element << 24))
 }
 
 pub fn bind_program(program: u32) {
@@ -1515,14 +1686,16 @@ fn write_uniform(uniform: u32, words: &[u32], rows: usize, columns: usize) {
     with(|s| {
         let Some(program) = s.program else { return };
         let p = &mut s.programs[program as usize];
-        let Some(slot) = p.slots.get(uniform as usize) else {
+        let first = (uniform >> 24) as usize;
+        let Some(slot) = p.slots.get((uniform & 0xff_ffff) as usize) else {
             return;
         };
         for &(block, m) in &slot.members {
             let bytes = &mut p.blocks[block];
             let per_element = rows * columns;
-            for (e, element) in words.chunks(per_element).enumerate().take(m.count as usize) {
-                let base = m.offset as usize + e * m.array_stride as usize;
+            let room = (m.count as usize).saturating_sub(first);
+            for (e, element) in words.chunks(per_element).enumerate().take(room) {
+                let base = m.offset as usize + (first + e) * m.array_stride as usize;
                 for c in 0..columns {
                     let at = base + c * m.matrix_stride as usize;
                     for r in 0..rows {
@@ -1551,6 +1724,15 @@ pub fn set_matrices(uniform: u32, values: &[f32], size: usize) {
     write_uniform(uniform, &bits(values), size, size);
 }
 
+pub fn set_ivec(uniform: u32, values: &[i32], components: usize) {
+    let words: Vec<u32> = values.iter().map(|&i| i as u32).collect();
+    write_uniform(uniform, &words, components, 1);
+}
+
+pub fn set_mat3x4(uniform: u32, values: &[f32]) {
+    write_uniform(uniform, &bits(values), 4, 3);
+}
+
 pub fn set_ints(uniform: u32, values: &[i32]) {
     if uniform == NO_UNIFORM {
         return;
@@ -1559,7 +1741,7 @@ pub fn set_ints(uniform: u32, values: &[i32]) {
     let sampler = with(|s| {
         let program = s.program?;
         let p = &mut s.programs[program as usize];
-        let i = p.slots.get(uniform as usize)?.sampler?;
+        let i = p.slots.get((uniform & 0xff_ffff) as usize)?.sampler?;
         p.samplers[i].unit = *values.first()? as u32;
         Some(())
     })
@@ -1674,12 +1856,13 @@ pub struct VkMesh {
 impl VkMesh {
     pub fn new(bytes: &[u8], layout: &VertexLayout, indices: Option<&[u32]>) -> VkMesh {
         with_state(|s| {
-            let vertices = s.create_buffer(bytes, vk::BufferUsageFlags::VERTEX_BUFFER);
+            // Device-local until the first update shows the mesh is dynamic.
+            let vertices = s.create_static_buffer(bytes, vk::BufferUsageFlags::VERTEX_BUFFER);
             let indices = indices.map(|i| {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(i.as_ptr() as *const u8, std::mem::size_of_val(i))
                 };
-                s.create_buffer(bytes, vk::BufferUsageFlags::INDEX_BUFFER)
+                s.create_static_buffer(bytes, vk::BufferUsageFlags::INDEX_BUFFER)
             });
             VkMesh {
                 vertices: std::cell::Cell::new(vertices),
@@ -1695,16 +1878,32 @@ impl VkMesh {
         with(|s| {
             let old = self.vertices.get();
             let Some(b) = s.buffers.get(&old) else { return };
-            let size = b.size as usize;
-            let mut contents = vec![0u8; size];
-            if bytes.len() < size {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(b.alloc.mapped, contents.as_mut_ptr(), size)
-                };
-            }
+            let (size, old_host, old_buffer, old_mapped) =
+                (b.size as usize, b.host, b.buffer, b.alloc.mapped);
             let n = bytes.len().min(size);
+            let mut contents = vec![0u8; size];
+            if n < size && old_host {
+                unsafe { std::ptr::copy_nonoverlapping(old_mapped, contents.as_mut_ptr(), size) };
+            }
             contents[..n].copy_from_slice(&bytes[..n]);
             let new = s.create_buffer(&contents, vk::BufferUsageFlags::VERTEX_BUFFER);
+            if n < size && !old_host {
+                // Keep the tail the update does not cover, GPU to GPU.
+                let new_buffer = s.buffers[&new].buffer;
+                let cmd = s.upload_commands();
+                unsafe {
+                    s.dev.device.cmd_copy_buffer(
+                        cmd,
+                        old_buffer,
+                        new_buffer,
+                        &[vk::BufferCopy {
+                            src_offset: n as u64,
+                            dst_offset: n as u64,
+                            size: (size - n) as u64,
+                        }],
+                    );
+                }
+            }
             s.drop_buffer(old);
             self.vertices.set(new);
         });
@@ -1737,6 +1936,44 @@ impl Drop for VkMesh {
             }
         });
     }
+}
+
+/// A cube map's image. Dropping it retires it.
+pub struct VkCube {
+    id: u32,
+}
+
+impl VkCube {
+    pub fn new(size: u32, faces: &[u8]) -> VkCube {
+        VkCube {
+            id: with_state(|s| s.create_cube(size, faces)),
+        }
+    }
+
+    pub fn bind(&self, unit: u32) {
+        with(|s| {
+            if let Some(u) = s.cube_units.get_mut(unit as usize) {
+                *u = Some(self.id);
+            }
+        });
+    }
+}
+
+impl Drop for VkCube {
+    fn drop(&mut self) {
+        retire_image(self.id);
+    }
+}
+
+fn retire_image(id: u32) {
+    let _ = STATE.try_with(|state| {
+        if let Ok(mut state) = state.try_borrow_mut()
+            && let Some(s) = state.as_mut()
+            && let Some(i) = s.images.remove(&id)
+        {
+            s.retire(Garbage::Image(i.image, i.view, i.alloc));
+        }
+    });
 }
 
 /// A texture's image. Dropping it retires it.
@@ -1782,14 +2019,7 @@ impl VkTexture {
 
 impl Drop for VkTexture {
     fn drop(&mut self) {
-        let _ = STATE.try_with(|state| {
-            if let Ok(mut state) = state.try_borrow_mut()
-                && let Some(s) = state.as_mut()
-                && let Some(i) = s.images.remove(&self.id)
-            {
-                s.retire(Garbage::Image(i.image, i.view, i.alloc));
-            }
-        });
+        retire_image(self.id);
     }
 }
 

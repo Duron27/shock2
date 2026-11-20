@@ -1,13 +1,12 @@
 extern crate gl;
 
 use crate::engine::EngineRenderContext;
+use crate::gfx;
+use crate::gfx::Program as ShaderProgram;
 use crate::scene::Material;
-use crate::shader_program::ShaderProgram;
-use c_string::*;
-use cgmath::{Matrix, Matrix4};
+use cgmath::Matrix4;
 use once_cell::sync::OnceCell;
 use std::any::Any;
-use std::ffi::CString;
 
 // Debug material that visualizes normals as RGB colors for validation
 const VERTEX_SHADER_SOURCE: &str = r#"
@@ -66,19 +65,11 @@ impl Material for DebugNormalMaterial {
         self.initialized
     }
 
-    fn initialize(&mut self, is_opengl_es: bool) {
+    fn initialize(&mut self, _is_opengl_es: bool) {
         SHADER.get_or_init(|| {
-            let vertex_shader = crate::shader::build(
-                VERTEX_SHADER_SOURCE,
-                crate::shader::ShaderType::Vertex,
-                is_opengl_es,
-            );
-            let fragment_shader = crate::shader::build(
-                FRAGMENT_SHADER_SOURCE,
-                crate::shader::ShaderType::Fragment,
-                is_opengl_es,
-            );
-            crate::shader_program::link(&vertex_shader, &fragment_shader)
+            let vertex_shader = VERTEX_SHADER_SOURCE;
+            let fragment_shader = FRAGMENT_SHADER_SOURCE;
+            gfx::Program::new(&vertex_shader, &fragment_shader)
         });
         self.initialized = true;
     }
@@ -93,29 +84,17 @@ impl Material for DebugNormalMaterial {
     ) -> bool {
         let shader = SHADER.get().expect("Shader should be initialized");
 
-        unsafe {
-            gl::UseProgram(shader.gl_id);
+        shader.bind();
 
-            // Set uniforms
-            let world_loc = gl::GetUniformLocation(shader.gl_id, c_str!("world").as_ptr());
-            let view_loc = gl::GetUniformLocation(shader.gl_id, c_str!("view").as_ptr());
-            let projection_loc =
-                gl::GetUniformLocation(shader.gl_id, c_str!("projection").as_ptr());
+        // Set uniforms
+        let world_loc = shader.uniform("world");
+        let view_loc = shader.uniform("view");
+        let projection_loc = shader.uniform("projection");
 
-            gl::UniformMatrix4fv(world_loc, 1, gl::FALSE, world_matrix.as_ptr() as *const f32);
-            crate::multiview::bind_view_projection(
-                view_loc,
-                projection_loc,
-                &view_matrix,
-                &render_context.projection_matrix,
-                render_context,
-                true,
-            );
+        gfx::set_mat4(world_loc, world_matrix);
+        gfx::set_mat4(view_loc, &view_matrix);
+        gfx::set_mat4(projection_loc, &render_context.projection_matrix);
 
-            // Bind texture (even though we don't use it, keeps interface consistent)
-            gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-        }
         true
     }
 
@@ -190,19 +169,11 @@ impl Material for DebugNormalSkinnedMaterial {
         self.initialized
     }
 
-    fn initialize(&mut self, is_opengl_es: bool) {
+    fn initialize(&mut self, _is_opengl_es: bool) {
         SKINNED_SHADER.get_or_init(|| {
-            let vertex_shader = crate::shader::build(
-                SKINNED_VERTEX_SHADER_SOURCE,
-                crate::shader::ShaderType::Vertex,
-                is_opengl_es,
-            );
-            let fragment_shader = crate::shader::build(
-                SKINNED_FRAGMENT_SHADER_SOURCE,
-                crate::shader::ShaderType::Fragment,
-                is_opengl_es,
-            );
-            crate::shader_program::link(&vertex_shader, &fragment_shader)
+            let vertex_shader = SKINNED_VERTEX_SHADER_SOURCE;
+            let fragment_shader = SKINNED_FRAGMENT_SHADER_SOURCE;
+            gfx::Program::new(&vertex_shader, &fragment_shader)
         });
         self.initialized = true;
     }
@@ -217,34 +188,22 @@ impl Material for DebugNormalSkinnedMaterial {
     ) -> bool {
         let shader = SKINNED_SHADER.get().expect("Shader should be initialized");
 
-        unsafe {
-            gl::UseProgram(shader.gl_id);
+        shader.bind();
 
-            let world_loc = gl::GetUniformLocation(shader.gl_id, c_str!("world").as_ptr());
-            let view_loc = gl::GetUniformLocation(shader.gl_id, c_str!("view").as_ptr());
-            let projection_loc =
-                gl::GetUniformLocation(shader.gl_id, c_str!("projection").as_ptr());
+        let world_loc = shader.uniform("world");
+        let view_loc = shader.uniform("view");
+        let projection_loc = shader.uniform("projection");
 
-            gl::UniformMatrix4fv(world_loc, 1, gl::FALSE, world_matrix.as_ptr() as *const f32);
-            crate::multiview::bind_view_projection(
-                view_loc,
-                projection_loc,
-                &view_matrix,
-                &render_context.projection_matrix,
-                render_context,
-                true,
-            );
+        gfx::set_mat4(world_loc, world_matrix);
+        gfx::set_mat4(view_loc, &view_matrix);
+        gfx::set_mat4(projection_loc, &render_context.projection_matrix);
 
-            for i in 0..skinning_data.len() {
-                let name = format!("bone_matrices[{i}]");
-                let c_str = CString::new(name).unwrap();
-                let loc = gl::GetUniformLocation(shader.gl_id, c_str.as_ptr());
-                gl::UniformMatrix4fv(loc, 1, gl::FALSE, skinning_data[i].as_ptr());
-            }
-
-            gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, 0);
+        for i in 0..skinning_data.len() {
+            let name = format!("bone_matrices[{i}]");
+            let loc = shader.uniform(&name);
+            gfx::set_mat4(loc, &skinning_data[i]);
         }
+
         true
     }
 

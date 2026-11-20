@@ -69,19 +69,17 @@ void main() {
 "#;
 
 pub(crate) struct Uniforms {
-    enabled: i32,
-    texture: i32,
-    origin: i32,
+    enabled: crate::gfx::Uniform,
+    texture: crate::gfx::Uniform,
+    origin: crate::gfx::Uniform,
 }
 
 impl Uniforms {
-    pub fn new(program: u32) -> Self {
-        unsafe {
-            Self {
-                enabled: gl::GetUniformLocation(program, c"selfDepthEnabled".as_ptr()),
-                texture: gl::GetUniformLocation(program, c"selfDepthTexture".as_ptr()),
-                origin: gl::GetUniformLocation(program, c"selfDepthOrigin".as_ptr()),
-            }
+    pub fn new(program: &crate::gfx::Program) -> Self {
+        Self {
+            enabled: program.uniform("selfDepthEnabled"),
+            texture: program.uniform("selfDepthTexture"),
+            origin: program.uniform("selfDepthOrigin"),
         }
     }
 
@@ -90,14 +88,15 @@ impl Uniforms {
             Phase::Test(mask) => Some(mask),
             _ => None,
         };
+        use crate::gfx;
+        gfx::set_i32(self.enabled, i32::from(mask.is_some()));
         unsafe {
-            gl::Uniform1i(self.enabled, i32::from(mask.is_some()));
             // With no mask, point at diffuse unit 0, never at the texture being
             // rendered into. Even an untaken shader branch must avoid feedback.
             // Under multiview the sampler is a sampler2DArray, and two sampler
             // types on one unit fail every draw, so it keeps its own unit; the
             // capture pass unbinds that unit, which avoids feedback instead.
-            gl::Uniform1i(
+            gfx::set_i32(
                 self.texture,
                 if mask.is_some() || crate::multiview::is_enabled() {
                     TEXTURE_UNIT as i32
@@ -108,7 +107,7 @@ impl Uniforms {
             if let Some(mask) = mask {
                 gl::ActiveTexture(gl::TEXTURE0 + TEXTURE_UNIT);
                 gl::BindTexture(texture_target(), mask.texture);
-                gl::Uniform2i(self.origin, mask.origin[0], mask.origin[1]);
+                gfx::set_ivec2(self.origin, mask.origin);
                 gl::ActiveTexture(gl::TEXTURE0);
             }
         }

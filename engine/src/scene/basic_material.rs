@@ -5,14 +5,13 @@ use std::ops::Deref;
 use super::incidence::{IncidencePass, IncidenceUniforms};
 use super::shine::{Shine, ShineUniforms};
 use crate::engine::EngineRenderContext;
+use crate::gfx;
+use crate::gfx::Program as ShaderProgram;
 use crate::scene::Material;
-use crate::shader_program::ShaderProgram;
 
 use super::material::Glow;
 use crate::texture::TextureTrait;
-use c_string::*;
 use cgmath::Matrix4;
-use cgmath::prelude::*;
 
 use once_cell::sync::OnceCell;
 
@@ -192,31 +191,31 @@ struct UnifiedUniforms {
     render_pass: super::render_pass::Uniforms,
     shine: ShineUniforms,
     // Basic transformation matrices
-    world_loc: i32,
-    view_loc: i32,
-    projection_loc: i32,
-    normal_matrix_loc: i32,
+    world_loc: gfx::Uniform,
+    view_loc: gfx::Uniform,
+    projection_loc: gfx::Uniform,
+    normal_matrix_loc: gfx::Uniform,
 
     // Material properties
-    emissivity_loc: i32,
-    glow_loc: i32,
-    glow_rect_loc: i32,
-    lit_scale_loc: i32,
-    ambient_intensity_loc: i32,
-    transparency_loc: i32,
-    additive_unlit_loc: i32,
-    unlit_loc: i32,
+    emissivity_loc: gfx::Uniform,
+    glow_loc: gfx::Uniform,
+    glow_rect_loc: gfx::Uniform,
+    lit_scale_loc: gfx::Uniform,
+    ambient_intensity_loc: gfx::Uniform,
+    transparency_loc: gfx::Uniform,
+    additive_unlit_loc: gfx::Uniform,
+    unlit_loc: gfx::Uniform,
 
     // Spotlight array uniforms (6 spotlights)
-    spotlight_pos_loc: [i32; 6],
-    spotlight_color_intensity_loc: [i32; 6],
-    spotlight_direction_loc: [i32; 6],
-    spotlight_inner_angle_loc: [i32; 6],
-    spotlight_outer_angle_loc: [i32; 6],
-    spotlight_range_loc: [i32; 6],
-    ambient_light_loc: i32,
-    light_falloff_mode_loc: i32,
-    lambert_wrap_loc: i32,
+    spotlight_pos_loc: [gfx::Uniform; 6],
+    spotlight_color_intensity_loc: [gfx::Uniform; 6],
+    spotlight_direction_loc: [gfx::Uniform; 6],
+    spotlight_inner_angle_loc: [gfx::Uniform; 6],
+    spotlight_outer_angle_loc: [gfx::Uniform; 6],
+    spotlight_range_loc: [gfx::Uniform; 6],
+    ambient_light_loc: gfx::Uniform,
+    light_falloff_mode_loc: gfx::Uniform,
+    lambert_wrap_loc: gfx::Uniform,
 }
 
 static UNIFIED_SHADER_PROGRAM: OnceCell<(ShaderProgram, UnifiedUniforms)> = OnceCell::new();
@@ -272,127 +271,106 @@ where
         } else {
             self.diffuse_texture.bind0(render_context);
         }
-        unsafe {
-            gl::UseProgram(shader_program.gl_id);
-            uniforms.world_wave.bind(render_context.world_wave);
-            uniforms.self_depth.bind(render_context.self_depth);
-            uniforms
-                .incidence
-                .bind(self.incidence.as_ref(), render_context, view_matrix);
-            uniforms
-                .shine
-                .bind(self.shine.as_ref(), lights, render_context, view_matrix);
+        shader_program.bind();
+        uniforms.world_wave.bind(render_context.world_wave);
+        uniforms.self_depth.bind(render_context.self_depth);
+        uniforms
+            .incidence
+            .bind(self.incidence.as_ref(), render_context, view_matrix);
+        uniforms
+            .shine
+            .bind(self.shine.as_ref(), lights, render_context, view_matrix);
 
-            uniforms.render_pass.bind(
-                self.render_pass.as_ref(),
-                render_context,
-                view_matrix,
-                1.0 - self.transparency,
-            );
-            let projection = render_context.projection_matrix;
+        uniforms.render_pass.bind(
+            self.render_pass.as_ref(),
+            render_context,
+            view_matrix,
+            1.0 - self.transparency,
+        );
+        let projection = render_context.projection_matrix;
 
-            // Set basic transformation matrices
-            gl::UniformMatrix4fv(uniforms.world_loc, 1, gl::FALSE, world_matrix.as_ptr());
-            crate::multiview::bind_view_projection(
-                uniforms.view_loc,
-                uniforms.projection_loc,
-                &view_matrix,
-                &projection,
-                render_context,
-                true,
-            );
-            let normal_matrix = crate::scene::material::normal_matrix(world_matrix);
-            gl::UniformMatrix3fv(
-                uniforms.normal_matrix_loc,
-                1,
-                gl::FALSE,
-                normal_matrix.as_ptr(),
-            );
+        // Set basic transformation matrices
+        gfx::set_mat4(uniforms.world_loc, &world_matrix);
+        gfx::set_mat4(uniforms.view_loc, &view_matrix);
+        gfx::set_mat4(uniforms.projection_loc, &projection);
+        let normal_matrix = crate::scene::material::normal_matrix(world_matrix);
+        gfx::set_mat3(uniforms.normal_matrix_loc, &normal_matrix);
 
-            // Set material properties
-            gl::Uniform1i(uniforms.additive_unlit_loc, i32::from(self.additive_unlit));
-            gl::Uniform1i(uniforms.unlit_loc, i32::from(self.unlit));
-            gl::Uniform1f(uniforms.transparency_loc, self.transparency);
-            let (emission, lit_scale) = super::material::emission_and_lit_scale(
-                self.emissivity,
-                self.emissivity_scale,
-                self.full_bright,
-            );
-            gl::Uniform1f(uniforms.emissivity_loc, emission);
-            let Glow { color, uv_rect } = self.glow;
-            gl::Uniform3f(uniforms.glow_loc, color.x, color.y, color.z);
-            gl::Uniform4f(
-                uniforms.glow_rect_loc,
-                uv_rect.x,
-                uv_rect.y,
-                uv_rect.z,
-                uv_rect.w,
-            );
-            gl::Uniform1f(uniforms.lit_scale_loc, lit_scale);
-            gl::Uniform1f(
-                uniforms.ambient_intensity_loc,
-                if self.fixed_ambient {
-                    1.0
-                } else {
-                    lights.ambient_intensity(render_context.ambient_light_intensity)
-                },
-            );
+        // Set material properties
+        gfx::set_i32(uniforms.additive_unlit_loc, i32::from(self.additive_unlit));
+        gfx::set_i32(uniforms.unlit_loc, i32::from(self.unlit));
+        gfx::set_f32(uniforms.transparency_loc, self.transparency);
+        let (emission, lit_scale) = super::material::emission_and_lit_scale(
+            self.emissivity,
+            self.emissivity_scale,
+            self.full_bright,
+        );
+        gfx::set_f32(uniforms.emissivity_loc, emission);
+        let Glow { color, uv_rect } = self.glow;
+        gfx::set_vec3(uniforms.glow_loc, [color.x, color.y, color.z]);
+        gfx::set_vec4(
+            uniforms.glow_rect_loc,
+            [uv_rect.x, uv_rect.y, uv_rect.z, uv_rect.w],
+        );
+        gfx::set_f32(uniforms.lit_scale_loc, lit_scale);
+        gfx::set_f32(
+            uniforms.ambient_intensity_loc,
+            if self.fixed_ambient {
+                1.0
+            } else {
+                lights.ambient_intensity(render_context.ambient_light_intensity)
+            },
+        );
 
-            // How this array's lights behave: what an unlit surface shows, and
-            // how the lights fall off.
-            gl::Uniform3f(
-                uniforms.ambient_light_loc,
-                lights.ambient.x,
-                lights.ambient.y,
-                lights.ambient.z,
-            );
-            gl::Uniform1f(uniforms.lambert_wrap_loc, lights.lambert_wrap);
-            let falloff_modes = lights.falloff.map(|mode| match mode {
-                crate::scene::light::LightFalloff::Smooth => 0,
-                crate::scene::light::LightFalloff::InverseDistance => 1,
-            });
-            gl::Uniform1iv(uniforms.light_falloff_mode_loc, 6, falloff_modes.as_ptr());
+        // How this array's lights behave: what an unlit surface shows, and
+        // how the lights fall off.
+        gfx::set_vec3(
+            uniforms.ambient_light_loc,
+            [lights.ambient.x, lights.ambient.y, lights.ambient.z],
+        );
+        gfx::set_f32(uniforms.lambert_wrap_loc, lights.lambert_wrap);
+        let falloff_modes = lights.falloff.map(|mode| match mode {
+            crate::scene::light::LightFalloff::Smooth => 0,
+            crate::scene::light::LightFalloff::InverseDistance => 1,
+        });
+        gfx::set_i32_array(uniforms.light_falloff_mode_loc, &falloff_modes);
 
-            // Set spotlight array uniforms
-            for i in 0..6 {
-                if let Some(light) = lights.get_light(i) {
-                    let pos = light.position();
-                    let color_intensity = light.color_intensity();
-                    let direction = light.direction();
+        // Set spotlight array uniforms
+        for i in 0..6 {
+            if let Some(light) = lights.get_light(i) {
+                let pos = light.position();
+                let color_intensity = light.color_intensity();
+                let direction = light.direction();
 
-                    gl::Uniform3f(uniforms.spotlight_pos_loc[i], pos.x, pos.y, pos.z);
-                    gl::Uniform4f(
-                        uniforms.spotlight_color_intensity_loc[i],
+                gfx::set_vec3(uniforms.spotlight_pos_loc[i], [pos.x, pos.y, pos.z]);
+                gfx::set_vec4(
+                    uniforms.spotlight_color_intensity_loc[i],
+                    [
                         color_intensity.x,
                         color_intensity.y,
                         color_intensity.z,
                         color_intensity.w,
-                    );
-                    gl::Uniform3f(
-                        uniforms.spotlight_direction_loc[i],
-                        direction.x,
-                        direction.y,
-                        direction.z,
-                    );
-                    gl::Uniform1f(
-                        uniforms.spotlight_inner_angle_loc[i],
-                        light.inner_cone_angle(),
-                    );
-                    gl::Uniform1f(
-                        uniforms.spotlight_outer_angle_loc[i],
-                        light.outer_cone_angle(),
-                    );
-                    gl::Uniform1f(uniforms.spotlight_range_loc[i], light.range());
-                } else {
-                    // Disable this light slot by setting intensity to 0
-                    gl::Uniform4f(
-                        uniforms.spotlight_color_intensity_loc[i],
-                        0.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                    );
-                }
+                    ],
+                );
+                gfx::set_vec3(
+                    uniforms.spotlight_direction_loc[i],
+                    [direction.x, direction.y, direction.z],
+                );
+                gfx::set_f32(
+                    uniforms.spotlight_inner_angle_loc[i],
+                    light.inner_cone_angle(),
+                );
+                gfx::set_f32(
+                    uniforms.spotlight_outer_angle_loc[i],
+                    light.outer_cone_angle(),
+                );
+                gfx::set_f32(uniforms.spotlight_range_loc[i], light.range());
+            } else {
+                // Disable this light slot by setting intensity to 0
+                gfx::set_vec4(
+                    uniforms.spotlight_color_intensity_loc[i],
+                    [0.0, 0.0, 0.0, 0.0],
+                );
             }
         }
     }
@@ -452,220 +430,106 @@ where
         self.has_initialized
     }
 
-    fn initialize(&mut self, is_opengl_es: bool) {
+    fn initialize(&mut self, _is_opengl_es: bool) {
         let build = |capture| {
             // Build and compile unified shader program with 6-spotlight support
-            let vertex_shader = crate::shader::build(
-                &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat(),
-                crate::shader::ShaderType::Vertex,
-                is_opengl_es,
+            let vertex_shader =
+                &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
+
+            let fragment_shader = &format!(
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                include_str!("flashlight.glsl"),
+                super::self_depth::GLSL,
+                super::incidence::GLSL,
+                super::environment::GLSL,
+                super::shine::GLSL,
+                super::render_pass::GLSL,
+                if capture {
+                    super::self_depth::FRAGMENT
+                } else {
+                    UNIFIED_FRAGMENT_SHADER_SOURCE
+                }
             );
 
-            let fragment_shader = crate::shader::build(
-                &format!(
-                    "{}\n{}\n{}\n{}\n{}\n{}\n{}",
-                    include_str!("flashlight.glsl"),
-                    super::self_depth::GLSL,
-                    super::incidence::GLSL,
-                    super::environment::GLSL,
-                    super::shine::GLSL,
-                    super::render_pass::GLSL,
-                    if capture {
-                        super::self_depth::FRAGMENT
-                    } else {
-                        UNIFIED_FRAGMENT_SHADER_SOURCE
-                    }
-                ),
-                crate::shader::ShaderType::Fragment,
-                is_opengl_es,
-            );
+            let shader = gfx::Program::new(&vertex_shader, &fragment_shader);
 
-            unsafe {
-                let shader = crate::shader_program::link(&vertex_shader, &fragment_shader);
+            // Get uniform locations for all shader variables
+            let uniforms = UnifiedUniforms {
+                world_wave: crate::scene::world_wave::Uniforms::new(&shader),
+                self_depth: super::self_depth::Uniforms::new(&shader),
+                incidence: IncidenceUniforms::new(&shader),
+                render_pass: super::render_pass::Uniforms::new(&shader),
+                shine: ShineUniforms::new(&shader),
+                // Basic transformation matrices
+                world_loc: shader.uniform("world"),
+                view_loc: shader.uniform("view"),
+                projection_loc: shader.uniform("projection"),
+                normal_matrix_loc: shader.uniform("normalMatrix"),
 
-                // Get uniform locations for all shader variables
-                let uniforms = UnifiedUniforms {
-                    world_wave: crate::scene::world_wave::Uniforms::new(shader.gl_id),
-                    self_depth: super::self_depth::Uniforms::new(shader.gl_id),
-                    incidence: IncidenceUniforms::new(shader.gl_id),
-                    render_pass: super::render_pass::Uniforms::new(shader.gl_id),
-                    shine: ShineUniforms::new(shader.gl_id),
-                    // Basic transformation matrices
-                    world_loc: gl::GetUniformLocation(shader.gl_id, c_str!("world").as_ptr()),
-                    view_loc: gl::GetUniformLocation(shader.gl_id, c_str!("view").as_ptr()),
-                    projection_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("projection").as_ptr(),
-                    ),
-                    normal_matrix_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("normalMatrix").as_ptr(),
-                    ),
+                // Material properties
+                ambient_intensity_loc: shader.uniform("ambientIntensity"),
+                emissivity_loc: shader.uniform("emissivity"),
+                glow_loc: shader.uniform("glow"),
+                glow_rect_loc: shader.uniform("glowRect"),
+                lit_scale_loc: shader.uniform("litScale"),
+                unlit_loc: shader.uniform("unlit"),
+                additive_unlit_loc: shader.uniform("additiveUnlit"),
+                transparency_loc: shader.uniform("transparency"),
 
-                    // Material properties
-                    ambient_intensity_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("ambientIntensity").as_ptr(),
-                    ),
-                    emissivity_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("emissivity").as_ptr(),
-                    ),
-                    glow_loc: gl::GetUniformLocation(shader.gl_id, c_str!("glow").as_ptr()),
-                    glow_rect_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("glowRect").as_ptr(),
-                    ),
-                    lit_scale_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("litScale").as_ptr(),
-                    ),
-                    unlit_loc: gl::GetUniformLocation(shader.gl_id, c_str!("unlit").as_ptr()),
-                    additive_unlit_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("additiveUnlit").as_ptr(),
-                    ),
-                    transparency_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("transparency").as_ptr(),
-                    ),
-
-                    // Spotlight array uniforms (6 spotlights)
-                    spotlight_pos_loc: [
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightPos[0]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightPos[1]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightPos[2]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightPos[3]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightPos[4]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightPos[5]").as_ptr()),
-                    ],
-                    spotlight_color_intensity_loc: [
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightColorIntensity[0]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightColorIntensity[1]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightColorIntensity[2]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightColorIntensity[3]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightColorIntensity[4]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightColorIntensity[5]").as_ptr(),
-                        ),
-                    ],
-                    spotlight_direction_loc: [
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightDirection[0]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightDirection[1]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightDirection[2]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightDirection[3]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightDirection[4]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightDirection[5]").as_ptr(),
-                        ),
-                    ],
-                    spotlight_inner_angle_loc: [
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightInnerAngle[0]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightInnerAngle[1]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightInnerAngle[2]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightInnerAngle[3]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightInnerAngle[4]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightInnerAngle[5]").as_ptr(),
-                        ),
-                    ],
-                    spotlight_outer_angle_loc: [
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightOuterAngle[0]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightOuterAngle[1]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightOuterAngle[2]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightOuterAngle[3]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightOuterAngle[4]").as_ptr(),
-                        ),
-                        gl::GetUniformLocation(
-                            shader.gl_id,
-                            c_str!("spotlightOuterAngle[5]").as_ptr(),
-                        ),
-                    ],
-                    spotlight_range_loc: [
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightRange[0]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightRange[1]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightRange[2]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightRange[3]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightRange[4]").as_ptr()),
-                        gl::GetUniformLocation(shader.gl_id, c_str!("spotlightRange[5]").as_ptr()),
-                    ],
-                    ambient_light_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("ambientLight").as_ptr(),
-                    ),
-                    light_falloff_mode_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("lightFalloffMode[0]").as_ptr(),
-                    ),
-                    lambert_wrap_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("lambertWrap").as_ptr(),
-                    ),
-                };
-                (shader, uniforms)
-            }
+                // Spotlight array uniforms (6 spotlights)
+                spotlight_pos_loc: [
+                    shader.uniform("spotlightPos[0]"),
+                    shader.uniform("spotlightPos[1]"),
+                    shader.uniform("spotlightPos[2]"),
+                    shader.uniform("spotlightPos[3]"),
+                    shader.uniform("spotlightPos[4]"),
+                    shader.uniform("spotlightPos[5]"),
+                ],
+                spotlight_color_intensity_loc: [
+                    shader.uniform("spotlightColorIntensity[0]"),
+                    shader.uniform("spotlightColorIntensity[1]"),
+                    shader.uniform("spotlightColorIntensity[2]"),
+                    shader.uniform("spotlightColorIntensity[3]"),
+                    shader.uniform("spotlightColorIntensity[4]"),
+                    shader.uniform("spotlightColorIntensity[5]"),
+                ],
+                spotlight_direction_loc: [
+                    shader.uniform("spotlightDirection[0]"),
+                    shader.uniform("spotlightDirection[1]"),
+                    shader.uniform("spotlightDirection[2]"),
+                    shader.uniform("spotlightDirection[3]"),
+                    shader.uniform("spotlightDirection[4]"),
+                    shader.uniform("spotlightDirection[5]"),
+                ],
+                spotlight_inner_angle_loc: [
+                    shader.uniform("spotlightInnerAngle[0]"),
+                    shader.uniform("spotlightInnerAngle[1]"),
+                    shader.uniform("spotlightInnerAngle[2]"),
+                    shader.uniform("spotlightInnerAngle[3]"),
+                    shader.uniform("spotlightInnerAngle[4]"),
+                    shader.uniform("spotlightInnerAngle[5]"),
+                ],
+                spotlight_outer_angle_loc: [
+                    shader.uniform("spotlightOuterAngle[0]"),
+                    shader.uniform("spotlightOuterAngle[1]"),
+                    shader.uniform("spotlightOuterAngle[2]"),
+                    shader.uniform("spotlightOuterAngle[3]"),
+                    shader.uniform("spotlightOuterAngle[4]"),
+                    shader.uniform("spotlightOuterAngle[5]"),
+                ],
+                spotlight_range_loc: [
+                    shader.uniform("spotlightRange[0]"),
+                    shader.uniform("spotlightRange[1]"),
+                    shader.uniform("spotlightRange[2]"),
+                    shader.uniform("spotlightRange[3]"),
+                    shader.uniform("spotlightRange[4]"),
+                    shader.uniform("spotlightRange[5]"),
+                ],
+                ambient_light_loc: shader.uniform("ambientLight"),
+                light_falloff_mode_loc: shader.uniform("lightFalloffMode[0]"),
+                lambert_wrap_loc: shader.uniform("lambertWrap"),
+            };
+            (shader, uniforms)
         };
         UNIFIED_SHADER_PROGRAM.get_or_init(|| build(false));
         SELF_DEPTH_SHADER_PROGRAM.get_or_init(|| build(true));

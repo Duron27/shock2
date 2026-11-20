@@ -468,6 +468,8 @@ pub fn main() {
     let start_time = last_time;
 
     let mut _frame = 0;
+    let mut fps_frames = 0u32;
+    let mut fps_since = std::time::Instant::now();
     let mut input_mapper = DesktopInputMapper::new();
 
     // Tracks whether the OS cursor is currently visible (Normal) vs captured
@@ -620,6 +622,20 @@ pub fn main() {
         game.finish_render(view, projection_matrix, screen_size);
 
         _frame += 1;
+        // SHOCK2_FPS=1: average frame time once a second.
+        if std::env::var_os("SHOCK2_FPS").is_some() {
+            fps_frames += 1;
+            let elapsed = fps_since.elapsed().as_secs_f32();
+            if elapsed >= 1.0 {
+                println!(
+                    "SHOCK2_FPS {:.1} fps {:.2} ms",
+                    fps_frames as f32 / elapsed,
+                    elapsed * 1000.0 / fps_frames as f32
+                );
+                fps_frames = 0;
+                fps_since = std::time::Instant::now();
+            }
+        }
 
         scene.extend(per_eye_scene);
 

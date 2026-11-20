@@ -1,4 +1,5 @@
 //! A visual-only displacement shared by world meshes and their depth passes.
+use crate::gfx;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldWave {
@@ -32,25 +33,25 @@ vec4 waveWorldPosition(vec4 position) {
 "#;
 
 pub(crate) struct Uniforms {
-    wave: i32,
+    wave: gfx::Uniform,
 }
 
 impl Uniforms {
-    pub fn new(program: u32) -> Self {
+    pub fn new(program: &gfx::Program) -> Self {
         Self {
-            wave: unsafe { gl::GetUniformLocation(program, c"worldWave".as_ptr()) },
+            wave: program.uniform("worldWave"),
         }
     }
 
     pub fn bind(&self, wave: WorldWave) {
-        unsafe {
-            gl::Uniform4f(
-                self.wave,
+        gfx::set_vec4(
+            self.wave,
+            [
                 wave.offset_per_height.x,
                 wave.offset_per_height.y,
                 wave.offset_per_height.z,
                 wave.origin_y,
-            )
-        };
+            ],
+        );
     }
 }

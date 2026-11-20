@@ -2,8 +2,9 @@
 //! identical `INCIDENCE` passes over its diffuse; composing them in the same
 //! fragment gives the stacked result without re-drawing (and re-skinning) the
 //! mesh once per pass. Shared by static and skinned shaders.
+use crate::gfx;
 use crate::{engine::EngineRenderContext, scene::light::LightArray, texture::TextureTrait};
-use cgmath::{Matrix4, Vector3, prelude::*};
+use cgmath::{Matrix4, Vector3};
 use std::rc::Rc;
 
 /// How each authored pass composites onto the one below it.
@@ -181,27 +182,25 @@ const ENVIRONMENT_UNIT: u32 = 4;
 const VEINS_UNIT: u32 = 5;
 
 pub(crate) struct ShineUniforms {
-    enabled: i32,
-    mask: i32,
-    ramp: i32,
-    eye: i32,
-    tint: i32,
-    unlit: i32,
-    alpha_blend: i32,
-    passes: i32,
-    specular: i32,
-    environment: i32,
-    reflection: i32,
-    veins: i32,
-    vein_strength: i32,
-    vein_sharpness: i32,
-    vein_scale: i32,
+    enabled: gfx::Uniform,
+    mask: gfx::Uniform,
+    ramp: gfx::Uniform,
+    eye: gfx::Uniform,
+    tint: gfx::Uniform,
+    unlit: gfx::Uniform,
+    alpha_blend: gfx::Uniform,
+    passes: gfx::Uniform,
+    specular: gfx::Uniform,
+    environment: gfx::Uniform,
+    reflection: gfx::Uniform,
+    veins: gfx::Uniform,
+    vein_strength: gfx::Uniform,
+    vein_sharpness: gfx::Uniform,
+    vein_scale: gfx::Uniform,
 }
 impl ShineUniforms {
-    pub fn new(program: u32) -> Self {
-        let loc = |name: &str| unsafe {
-            gl::GetUniformLocation(program, std::ffi::CString::new(name).unwrap().as_ptr())
-        };
+    pub fn new(program: &gfx::Program) -> Self {
+        let loc = |name: &str| program.uniform(name);
         Self {
             enabled: loc("shineEnabled"),
             mask: loc("shineMask"),
@@ -247,46 +246,44 @@ impl ShineUniforms {
         view: &Matrix4<f32>,
         strengths: (f32, f32),
     ) {
-        unsafe {
-            gl::Uniform1i(self.enabled, i32::from(shine.is_some()));
-            gl::Uniform1i(self.mask, MASK_UNIT as i32);
-            gl::Uniform1i(self.ramp, RAMP_UNIT as i32);
-            gl::Uniform1i(self.environment, ENVIRONMENT_UNIT as i32);
-            gl::Uniform1i(self.veins, VEINS_UNIT as i32);
-            // Unsampled when disabled: the branch is uniform across the draw.
-            let Some(shine) = shine else {
-                return;
-            };
-            shine.mask.bind_to(context, MASK_UNIT);
-            shine.ramp.bind_to(context, RAMP_UNIT);
-            crate::multiview::bind_eye(self.eye, view, context);
-            gl::Uniform3fv(self.tint, 1, shine.tint.as_ptr());
-            gl::Uniform1i(self.unlit, i32::from(shine.unlit));
-            gl::Uniform1i(
-                self.alpha_blend,
-                i32::from(shine.blend == ShineBlend::Alpha),
-            );
-            gl::Uniform1f(self.passes, shine.passes as f32);
-            let tuning = match shine.veins {
-                Some(VeinProfile::Growth) => lights.growth_veins,
-                Some(VeinProfile::Weapon) => lights.weapon_veins,
-                None => VeinTuning::default(),
-            };
-            gl::Uniform1f(self.specular, strengths.0 * tuning.specular);
-            let reflection = match &lights.environment {
-                Some(environment) => {
-                    environment.bind_to(ENVIRONMENT_UNIT);
-                    strengths.1
-                }
-                None => 0.0,
-            };
-            gl::Uniform1f(self.reflection, reflection);
-            gl::Uniform1f(self.vein_strength, tuning.strength);
-            if tuning.strength > 0.0 {
-                super::veins::shared_vein_texture().bind_to(context, VEINS_UNIT);
-                gl::Uniform1f(self.vein_scale, shine.vein_scale);
-                gl::Uniform1f(self.vein_sharpness, tuning.sharpness);
+        gfx::set_i32(self.enabled, i32::from(shine.is_some()));
+        gfx::set_i32(self.mask, MASK_UNIT as i32);
+        gfx::set_i32(self.ramp, RAMP_UNIT as i32);
+        gfx::set_i32(self.environment, ENVIRONMENT_UNIT as i32);
+        gfx::set_i32(self.veins, VEINS_UNIT as i32);
+        // Unsampled when disabled: the branch is uniform across the draw.
+        let Some(shine) = shine else {
+            return;
+        };
+        shine.mask.bind_to(context, MASK_UNIT);
+        shine.ramp.bind_to(context, RAMP_UNIT);
+        gfx::set_vec3(self.eye, crate::scene::material::eye_position(view).into());
+        gfx::set_vec3(self.tint, *AsRef::<[f32; 3]>::as_ref(&shine.tint));
+        gfx::set_i32(self.unlit, i32::from(shine.unlit));
+        gfx::set_i32(
+            self.alpha_blend,
+            i32::from(shine.blend == ShineBlend::Alpha),
+        );
+        gfx::set_f32(self.passes, shine.passes as f32);
+        let tuning = match shine.veins {
+            Some(VeinProfile::Growth) => lights.growth_veins,
+            Some(VeinProfile::Weapon) => lights.weapon_veins,
+            None => VeinTuning::default(),
+        };
+        gfx::set_f32(self.specular, strengths.0 * tuning.specular);
+        let reflection = match &lights.environment {
+            Some(environment) => {
+                environment.bind_to(ENVIRONMENT_UNIT);
+                strengths.1
             }
+            None => 0.0,
+        };
+        gfx::set_f32(self.reflection, reflection);
+        gfx::set_f32(self.vein_strength, tuning.strength);
+        if tuning.strength > 0.0 {
+            super::veins::shared_vein_texture().bind_to(context, VEINS_UNIT);
+            gfx::set_f32(self.vein_scale, shine.vein_scale);
+            gfx::set_f32(self.vein_sharpness, tuning.sharpness);
         }
     }
 }

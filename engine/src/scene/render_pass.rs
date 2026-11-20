@@ -1,9 +1,10 @@
 //! Authored material-pass state shared by rigid and skinned model shaders.
+use crate::gfx;
 use crate::{
     engine::EngineRenderContext,
     texture::{CubeTexture, TextureTrait},
 };
-use cgmath::{Matrix4, Vector3, prelude::*};
+use cgmath::{Matrix4, Vector3};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,25 +131,23 @@ vec4 applyMaterialPass(vec4 lit, vec4 texel, vec3 position, vec3 normal) {
 "#;
 
 pub(crate) struct Uniforms {
-    enabled: i32,
-    color: i32,
-    alpha: i32,
-    force_opaque: i32,
-    alpha_test: i32,
-    shaded: i32,
-    mipmap_bias: i32,
-    incidence: i32,
-    ramp: i32,
-    max_distance: i32,
-    eye: i32,
-    cube_enabled: i32,
-    cube: i32,
+    enabled: gfx::Uniform,
+    color: gfx::Uniform,
+    alpha: gfx::Uniform,
+    force_opaque: gfx::Uniform,
+    alpha_test: gfx::Uniform,
+    shaded: gfx::Uniform,
+    mipmap_bias: gfx::Uniform,
+    incidence: gfx::Uniform,
+    ramp: gfx::Uniform,
+    max_distance: gfx::Uniform,
+    eye: gfx::Uniform,
+    cube_enabled: gfx::Uniform,
+    cube: gfx::Uniform,
 }
 impl Uniforms {
-    pub fn new(program: u32) -> Self {
-        let loc = |name: &str| unsafe {
-            gl::GetUniformLocation(program, std::ffi::CString::new(name).unwrap().as_ptr())
-        };
+    pub fn new(program: &gfx::Program) -> Self {
+        let loc = |name: &str| program.uniform(name);
         Self {
             enabled: loc("materialPassEnabled"),
             color: loc("materialPassColor"),
@@ -172,28 +171,26 @@ impl Uniforms {
         view: &Matrix4<f32>,
         opacity: f32,
     ) {
-        unsafe {
-            gl::Uniform1i(self.enabled, i32::from(pass.is_some()));
-            // Sampler types must use distinct units even when their branch is disabled.
-            gl::Uniform1i(self.ramp, 1);
-            gl::Uniform1i(self.cube, 7);
-            if let Some(p) = pass {
-                gl::Uniform3fv(self.color, 1, p.color.as_ptr());
-                gl::Uniform1f(self.alpha, p.vertex_alpha(opacity));
-                gl::Uniform1i(self.force_opaque, i32::from(p.force_opaque));
-                gl::Uniform1i(self.alpha_test, i32::from(p.alpha_test));
-                gl::Uniform1i(self.shaded, i32::from(p.shaded));
-                gl::Uniform1f(self.mipmap_bias, p.mipmap_bias);
-                gl::Uniform1i(self.incidence, i32::from(p.incidence.is_some()));
-                if let Some((ramp, distance)) = &p.incidence {
-                    ramp.bind1(context);
-                    gl::Uniform1f(self.max_distance, *distance);
-                }
-                crate::multiview::bind_eye(self.eye, view, context);
-                gl::Uniform1i(self.cube_enabled, i32::from(p.cube.is_some()));
-                if let Some(cube) = &p.cube {
-                    cube.bind_to(7);
-                }
+        gfx::set_i32(self.enabled, i32::from(pass.is_some()));
+        // Sampler types must use distinct units even when their branch is disabled.
+        gfx::set_i32(self.ramp, 1);
+        gfx::set_i32(self.cube, 7);
+        if let Some(p) = pass {
+            gfx::set_vec3(self.color, *AsRef::<[f32; 3]>::as_ref(&p.color));
+            gfx::set_f32(self.alpha, p.vertex_alpha(opacity));
+            gfx::set_i32(self.force_opaque, i32::from(p.force_opaque));
+            gfx::set_i32(self.alpha_test, i32::from(p.alpha_test));
+            gfx::set_i32(self.shaded, i32::from(p.shaded));
+            gfx::set_f32(self.mipmap_bias, p.mipmap_bias);
+            gfx::set_i32(self.incidence, i32::from(p.incidence.is_some()));
+            if let Some((ramp, distance)) = &p.incidence {
+                ramp.bind1(context);
+                gfx::set_f32(self.max_distance, *distance);
+            }
+            gfx::set_vec3(self.eye, crate::scene::material::eye_position(view).into());
+            gfx::set_i32(self.cube_enabled, i32::from(p.cube.is_some()));
+            if let Some(cube) = &p.cube {
+                cube.bind_to(7);
             }
         }
     }

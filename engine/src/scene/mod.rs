@@ -50,9 +50,6 @@ pub use quad_unit::{QuadUnit, create as create_quad_unit};
 pub mod plane;
 pub use plane::{Plane, create_with_uv_scale as create_plane_with_uv_scale};
 
-pub mod cube_indexed;
-pub use cube_indexed::CubeIndexed;
-
 pub mod mesh;
 pub use mesh::Mesh;
 

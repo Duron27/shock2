@@ -1,7 +1,8 @@
 //! An optional view-angle lookup for an additive material pass. Shared by
 //! static and skinned shaders so the ramp has one interpretation.
+use crate::gfx;
 use crate::{engine::EngineRenderContext, texture::TextureTrait};
-use cgmath::{Matrix4, Vector3, prelude::*};
+use cgmath::{Matrix4, Vector3};
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -31,18 +32,16 @@ vec4 applyIncidence(vec4 lit, vec4 texel, vec3 position, vec3 normal) {
 "#;
 
 pub(crate) struct IncidenceUniforms {
-    enabled: i32,
-    ramp: i32,
-    eye: i32,
-    tint: i32,
-    unlit: i32,
-    geometric_normal: i32,
+    enabled: gfx::Uniform,
+    ramp: gfx::Uniform,
+    eye: gfx::Uniform,
+    tint: gfx::Uniform,
+    unlit: gfx::Uniform,
+    geometric_normal: gfx::Uniform,
 }
 impl IncidenceUniforms {
-    pub fn new(program: u32) -> Self {
-        let loc = |name: &str| unsafe {
-            gl::GetUniformLocation(program, std::ffi::CString::new(name).unwrap().as_ptr())
-        };
+    pub fn new(program: &gfx::Program) -> Self {
+        let loc = |name: &str| program.uniform(name);
         Self {
             enabled: loc("incidenceEnabled"),
             ramp: loc("incidenceRamp"),
@@ -58,16 +57,14 @@ impl IncidenceUniforms {
         context: &EngineRenderContext,
         view: &Matrix4<f32>,
     ) {
-        unsafe {
-            gl::Uniform1i(self.enabled, i32::from(pass.is_some()));
-            gl::Uniform1i(self.ramp, 1);
-            if let Some(pass) = pass {
-                pass.ramp.bind1(context);
-                crate::multiview::bind_eye(self.eye, view, context);
-                gl::Uniform3fv(self.tint, 1, pass.tint.as_ptr());
-                gl::Uniform1i(self.unlit, i32::from(pass.unlit));
-                gl::Uniform1i(self.geometric_normal, i32::from(pass.geometric_normal));
-            }
+        gfx::set_i32(self.enabled, i32::from(pass.is_some()));
+        gfx::set_i32(self.ramp, 1);
+        if let Some(pass) = pass {
+            pass.ramp.bind1(context);
+            gfx::set_vec3(self.eye, crate::scene::material::eye_position(view).into());
+            gfx::set_vec3(self.tint, *AsRef::<[f32; 3]>::as_ref(&pass.tint));
+            gfx::set_i32(self.unlit, i32::from(pass.unlit));
+            gfx::set_i32(self.geometric_normal, i32::from(pass.geometric_normal));
         }
     }
 }
