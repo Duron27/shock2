@@ -2935,6 +2935,8 @@ pub struct MissionCore {
     healing_pulses: HashMap<EntityId, f32>,
     /// Seconds since each amp's overload cast, while its red flash lasts.
     overload_glows: HashMap<EntityId, f32>,
+    /// See [`crate::muzzle_lighting::ExplosionClasses`].
+    explosion_light_classes: crate::muzzle_lighting::ExplosionClasses,
     pub entity_info: Arc<SystemShock2EntityInfo>,
     pub physics: PhysicsWorld,
     pub script_world: ScriptWorld,
@@ -4006,6 +4008,7 @@ impl MissionCore {
             environment: crate::environment_map::load(asset_cache, &mission),
             level_name: mission,
             multimodal: game_options.multimodal,
+            explosion_light_classes: Default::default(),
             entity_info: entity_info_rc.clone(),
             template_to_particle_riders,
             template_to_particle_attachees,
@@ -16068,13 +16071,16 @@ impl MissionCore {
                     .map(Into::into),
             );
         }
+        let hierarchy = ss2_entity_info::get_hierarchy(&self.entity_info);
         lights.extend(
-            crate::muzzle_lighting::flash_lights(
-                &self.world,
-                ss2_entity_info::get_hierarchy(&self.entity_info),
-            )
-            .into_iter()
-            .map(Into::into),
+            crate::muzzle_lighting::flash_lights(&self.world, hierarchy)
+                .into_iter()
+                .chain(crate::muzzle_lighting::explosion_lights(
+                    &self.world,
+                    hierarchy,
+                    &self.explosion_light_classes,
+                ))
+                .map(Into::into),
         );
         lights
     }
