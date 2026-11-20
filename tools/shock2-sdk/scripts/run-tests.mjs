@@ -28,7 +28,8 @@ if (process.env.SHOCK2_E2E === "1" && !process.env.SHOCK2_RUNTIME_BINARY) {
 // the runtime and the open handles would keep the file alive anyway:
 // --test-force-exit ends the file once its tests are done, and the SDK's exit
 // hook kills the runtimes it still owns.
-const args = ["--test-force-exit", ...process.argv.slice(2)];
+const skipVr = fileURLToPath(new URL("./skip-vr.mjs", import.meta.url));
+const args = ["--test-force-exit", "--import", skipVr, ...process.argv.slice(2)];
 if (!args.some(arg => arg === "--test-timeout" || arg.startsWith("--test-timeout="))) {
   args.unshift(`--test-timeout=${process.env.SHOCK2_TEST_TIMEOUT_MS || 600_000}`);
 }

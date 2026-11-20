@@ -240,6 +240,18 @@ export function formatCrashOutput(logLines: string[]): string {
  * await using game = await GameServer.launch({ mission: "medsci1.mis" });
  * ```
  */
+/**
+ * Thrown by `GameServer.launch` for a `--vr` launch: this branch builds a
+ * flatscreen-only runtime with no VR presentation. The e2e runner turns it
+ * into a skip (scripts/skip-vr.mjs), so VR-only tests do not read as failures.
+ */
+export class VrUnavailableError extends Error {
+  override name = "VrUnavailableError";
+  constructor() {
+    super("VR presentation was removed on the flatscreen-only branch");
+  }
+}
+
 export class GameServer extends Game implements AsyncDisposable {
   private constructor(
     client: HttpClient,
@@ -303,6 +315,7 @@ export class GameServer extends Game implements AsyncDisposable {
    * binds it or exits with `failed to bind`, and the error says so.
    */
   static async launch(options: LaunchOptions): Promise<GameServer> {
+    if (options.debugFlags?.includes("--vr")) throw new VrUnavailableError();
     const repoRoot = options.repoRoot ?? findRepoRoot(process.cwd());
     if (repoRoot === undefined) {
       throw new Error(
