@@ -828,9 +828,50 @@ pub(super) fn flat_melee_hit(
                 },
             },
         };
-        return Effect::Multiple(vec![damage, super::charmable::player_damage(target), sound]);
+        let blood = flesh_hit_spang(world, target, hit_point, aim.forward);
+        return Effect::Multiple(vec![
+            damage,
+            super::charmable::player_damage(target),
+            sound,
+            blood,
+        ]);
     }
     Effect::NoEffect
+}
+
+/// "Standard Blood Spang": the wound effect a bullet leaves on a hybrid.
+const BLOOD_SPANG: i32 = -366;
+
+/// A landed swing on flesh bleeds like a bullet wound does. Not authored:
+/// melee weapons carry no spang links, so the original showed nothing; added
+/// for the horror look, and so a clubbed body bleeds onto the walls and floor
+/// (`blood_spatter`) just like a shot one.
+fn flesh_hit_spang(
+    world: &World,
+    target: EntityId,
+    hit_point: cgmath::Point3<f32>,
+    forward: cgmath::Vector3<f32>,
+) -> Effect {
+    let flesh = world
+        .borrow::<View<dark::properties::PropMaterial>>()
+        .ok()
+        .and_then(|materials| materials.get(target).ok().and_then(|m| m.tag()))
+        .is_some_and(|tag| tag.starts_with("flesh"));
+    if !flesh {
+        return Effect::NoEffect;
+    }
+    let back = -forward.normalize();
+    Effect::CreateEntity {
+        template_id: BLOOD_SPANG,
+        position: hit_point + back * 0.02,
+        orientation: get_rotation_from_forward_vector(back)
+            * Quaternion::from_axis_angle(cgmath::vec3(0.0, 1.0, 0.0), Deg(90.0)),
+        root_transform: Matrix4::from_scale(1.0),
+        options: CreateEntityOptions {
+            transient_fx: true,
+            ..CreateEntityOptions::default()
+        },
+    }
 }
 
 /// An empty-clip dry fire: no projectile or muzzle flash, just the weapon's
@@ -1478,6 +1519,27 @@ mod tests {
     /// `event:collision` + `weapontype:wrench` + `material:fleshtarget` ->
     /// `hwrefle*`; before this the flat path returned damage alone and
     /// hitting a creature made no sound at all.
+    #[test]
+    fn a_melee_hit_on_flesh_bleeds_and_on_metal_does_not() {
+        use cgmath::vec3;
+        let mut world = World::new();
+        let flesh = world.add_entity(dark::properties::PropMaterial("Material Flesh".to_owned()));
+        let metal = world.add_entity(dark::properties::PropMaterial("Material Metal".to_owned()));
+        let at = point3(1.0, 2.0, 3.0);
+        let forward = vec3(0.0, 0.0, 1.0);
+        assert!(matches!(
+            flesh_hit_spang(&world, flesh, at, forward),
+            Effect::CreateEntity {
+                template_id: BLOOD_SPANG,
+                ..
+            }
+        ));
+        assert!(matches!(
+            flesh_hit_spang(&world, metal, at, forward),
+            Effect::NoEffect
+        ));
+    }
+
     #[test]
     fn a_flat_melee_hit_plays_the_weapon_impact_schema() {
         use crate::physics::{CollisionGroup, PhysicsWorld};
