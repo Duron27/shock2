@@ -23,6 +23,8 @@ const VIRTUAL_W: f32 = 640.0;
 const VIRTUAL_H: f32 = 480.0;
 
 const CROSSHAIR_SIZE: f32 = 32.0;
+/// The aim dot shown before the cyber interface is installed, in canvas px.
+const PLAIN_DOT: f32 = 2.0;
 const CROSSHAIR: Rect = Rect::new(
     VIRTUAL_W / 2.0 - CROSSHAIR_SIZE / 2.0,
     VIRTUAL_H / 2.0 - CROSSHAIR_SIZE / 2.0,
@@ -71,8 +73,12 @@ const OVERLOAD_METER: Rect = Rect::new(
 /// crosshair overlay off while the cursor is up (`ShockOverlayMouseMode`),
 /// and the bottom readouts move to the interface
 /// canvas - so in use mode this draws neither.
+///
+/// Without the cyber interface (Earth, through training) there are no
+/// cybernetic readouts at all: only a tiny black aim dot.
 pub(crate) fn build_flat_hud_canvas(
     use_mode: bool,
+    interface: bool,
     bio: &BioReadout,
     psi_charge: Option<RuntimePropPsiCharge>,
     ammo_readout: &AmmoReadout,
@@ -83,6 +89,30 @@ pub(crate) fn build_flat_hud_canvas(
     message_font: &dyn engine::Font,
 ) -> UiCanvas {
     let mut canvas = UiCanvas::new(vec2(VIRTUAL_W, VIRTUAL_H));
+
+    if !interface {
+        if !use_mode {
+            canvas.fill(
+                Rect::new(
+                    VIRTUAL_W / 2.0 - PLAIN_DOT / 2.0,
+                    VIRTUAL_H / 2.0 - PLAIN_DOT / 2.0,
+                    PLAIN_DOT,
+                    PLAIN_DOT,
+                ),
+                [0, 0, 0],
+            );
+        }
+        message_line::emit(
+            &mut canvas,
+            message_line::flat_origin(use_mode),
+            messages,
+            message_font,
+        );
+        if let Some(shown) = banner {
+            banner::emit(&mut canvas, banner::flat_center(), &shown.text, shown.alpha);
+        }
+        return canvas;
+    }
 
     if !use_mode {
         super::reticle::emit(
@@ -171,8 +201,10 @@ pub(crate) fn create_flat_hud(
     fov_y_degrees: f32,
 ) -> Vec<SceneObject> {
     let message_font = crate::ui::resolve_font(asset_cache, message_line::FONT);
+    let interface = crate::cyber_interface::installed(world);
     let mut canvas = build_flat_hud_canvas(
         use_mode,
+        interface,
         &BioReadout::from_world(world),
         get_wielded_psi_charge(world),
         // The compact gauge has no clickable controls: the pointer only exists
@@ -184,7 +216,7 @@ pub(crate) fn create_flat_hud(
         fov_y_degrees,
         message_font.as_ref().as_ref(),
     );
-    if !use_mode {
+    if !use_mode && interface {
         super::hazards::emit(
             &mut canvas,
             super::hazards::SCREEN_ORIGIN,
@@ -193,7 +225,7 @@ pub(crate) fn create_flat_hud(
     }
     if let Some(seconds) = crate::security_alarm::status(world)
         .hud_seconds()
-        .filter(|_| !use_mode)
+        .filter(|_| !use_mode && interface)
     {
         super::alarm_panel::emit(&mut canvas, super::alarm_panel::FLAT_ORIGIN, seconds);
     }
@@ -218,6 +250,7 @@ mod tests {
     ) -> UiCanvas {
         super::build_flat_hud_canvas(
             use_mode,
+            true,
             bio,
             psi_charge,
             ammo_readout,
@@ -378,6 +411,30 @@ mod tests {
                 placed.x + placed.w <= AMMO_GAUGE.x + AMMO_GAUGE.w,
                 "{placed:?} right of AMMOBACK"
             );
+        }
+    }
+
+    #[test]
+    fn without_the_interface_only_a_tiny_black_dot_is_drawn() {
+        let canvas = super::build_flat_hud_canvas(
+            false,
+            false,
+            &BioReadout::default(),
+            None,
+            &readout(Some(12), None, None, false),
+            &[],
+            None,
+            crate::hud::reticle::ReticleState::default(),
+            crate::DEFAULT_FOV_DEG,
+            &message_line::tests::StubFont,
+        );
+        assert_eq!(canvas.elements().len(), 1);
+        match &canvas.elements()[0] {
+            crate::ui::UiElement::Fill { size, color, .. } => {
+                assert_eq!(*color, [0, 0, 0]);
+                assert!(size.x <= 3.0 && size.y <= 3.0);
+            }
+            other => panic!("expected the aim dot, got {other:?}"),
         }
     }
 

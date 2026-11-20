@@ -15644,9 +15644,10 @@ impl MissionCore {
                 highlighted.push(*target);
             }
         }
-        // Flat's fixed name frame yields to the inventory bar in use mode.
-        // VR keeps item names attached to their brackets.
-        if self.flat_ui.strip_entity().is_none() {
+        // Flat's fixed name frame yields to the inventory bar in use mode. It
+        // is a cyber-interface readout, so it is absent until the interface is
+        // installed (Earth's halls), like the rest of the HUD.
+        if self.flat_ui.strip_entity().is_none() && crate::cyber_interface::installed(&self.world) {
             // One name frame, independent of damage flashes.
             let rollover = self
                 .name_strip_world_pick(options)
