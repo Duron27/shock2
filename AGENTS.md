@@ -828,6 +828,9 @@ World and model textures are mipmapped with 8x anisotropy by default
 (`TextureOptions::default`); atlases and per-frame video stay single-level.
 - Muzzle flashes and explosions add short point lights
   (`shock2vr/src/muzzle_lighting.rs`).
+- Bloody footprints (`shock2vr/src/blood_tracks.rs`): the player or any
+  creature walking through a floor blood decal leaves fading boot prints
+  for several steps. Cosmetic, capped at 400, not saved.
 
 Authored `P$AnimLight` Flicker/Random/SemiRandom lamps animate per Dark's
 timer (faithful, not part of the above).

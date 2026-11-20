@@ -28,6 +28,7 @@ mod melee_lighting;
 mod melee_swing;
 pub mod message_trace;
 mod muzzle_lighting;
+mod blood_tracks;
 pub mod object_lighting;
 pub mod particle_effects;
 mod particle_group;

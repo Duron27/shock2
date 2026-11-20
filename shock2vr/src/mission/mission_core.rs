@@ -2937,6 +2937,7 @@ pub struct MissionCore {
     overload_glows: HashMap<EntityId, f32>,
     /// See [`crate::muzzle_lighting::ExplosionClasses`].
     explosion_light_classes: crate::muzzle_lighting::ExplosionClasses,
+    blood_tracks: crate::blood_tracks::BloodTracks,
     pub entity_info: Arc<SystemShock2EntityInfo>,
     pub physics: PhysicsWorld,
     pub script_world: ScriptWorld,
@@ -4009,6 +4010,7 @@ impl MissionCore {
             level_name: mission,
             multimodal: game_options.multimodal,
             explosion_light_classes: Default::default(),
+            blood_tracks: Default::default(),
             entity_info: entity_info_rc.clone(),
             template_to_particle_riders,
             template_to_particle_attachees,
@@ -5214,6 +5216,23 @@ impl MissionCore {
             );
             self.physics
                 .recover_live_creatures_swept_off_support(&living_creatures);
+
+            // Bloody footprints: the player (whose pawn origin is at the
+            // feet) and every living creature.
+            let movers = {
+                let transforms = self.world.borrow::<View<RuntimePropTransform>>().unwrap();
+                std::iter::once((player_id, new_character_pos))
+                    .chain(living_creatures.iter().filter_map(|id| {
+                        transforms.get(*id).ok().map(|t| (*id, t.0.w.truncate()))
+                    }))
+                    .collect::<Vec<_>>()
+            };
+            self.blood_tracks.update(
+                &self.world,
+                &self.physics,
+                ss2_entity_info::get_hierarchy(&self.entity_info),
+                &movers,
+            );
         }
 
         // Clear one-shot forces - but only after a step actually consumed
@@ -15717,6 +15736,7 @@ impl MissionCore {
         }
         if options.render_particles {
             scene.extend(self.water_feedback.render());
+            scene.extend(self.blood_tracks.render(object_lights.as_ref()));
             for (weapon, sprite, particles) in &self.barrel_smoke {
                 let tag = Rc::new(engine::scene::SceneObjectDebugTag {
                     entity_id: Some(weapon.inner()),
