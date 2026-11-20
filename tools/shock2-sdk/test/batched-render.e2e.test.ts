@@ -2,9 +2,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { GameServer } from "../src/index.js";
 
+// A --visible window draws every stepped frame so it can be watched; these
+// tests assert the hidden runtime's draw-only-the-last-frame batching.
+const skipReason = process.env.SHOCK2_E2E !== "1"
+  ? true
+  : (process.env.SHOCK2_RUNTIME_FLAGS ?? "").split(/\s+/).includes("--visible")
+    ? "hidden-step batching; SHOCK2_RUNTIME_FLAGS has --visible"
+    : false;
+
 for (const vr of [false, true]) {
   test(`batched and single-frame stepping reach identical gameplay state (${vr ? "VR" : "flat"})`, {
-    skip: process.env.SHOCK2_E2E !== "1", timeout: 180_000,
+    skip: skipReason, timeout: 180_000,
   }, async () => {
     const states = [];
     for (const batchSize of [1, 1200]) {
@@ -40,7 +48,7 @@ for (const vr of [false, true]) {
   });
 
   test(`hidden stepping draws the final frame while advancing every tick (${vr ? "VR" : "flat"})`, {
-    skip: process.env.SHOCK2_E2E !== "1", timeout: 180_000,
+    skip: skipReason, timeout: 180_000,
   }, async () => {
     await using game = await GameServer.launch({
       mission: "debug_weapons", debugFlags: vr ? ["--vr"] : [],
