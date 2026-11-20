@@ -262,9 +262,6 @@ impl DebugScene {
 }
 
 impl GameScene for DebugScene {
-    fn render_debug_body(&mut self, assets: &mut AssetCache) -> Vec<SceneObject> {
-        self.core.render_debug_body(assets)
-    }
     fn cancel_transient_input(&mut self) {
         self.core.cancel_transient_input();
     }
@@ -513,9 +510,6 @@ impl<H> HookedDebugScene<H> {
 }
 
 impl<H: DebugSceneHooks> GameScene for HookedDebugScene<H> {
-    fn render_debug_body(&mut self, assets: &mut AssetCache) -> Vec<SceneObject> {
-        self.core.render_debug_body(assets)
-    }
     fn cancel_transient_input(&mut self) {
         self.core.cancel_transient_input();
     }

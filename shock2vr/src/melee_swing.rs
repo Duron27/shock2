@@ -13,8 +13,7 @@ pub(crate) struct SwingLatch {
     sound: SwingSound,
 }
 
-impl SwingLatch {
-}
+impl SwingLatch {}
 
 /// A whoosh marks crossing the damage-speed gate, once until the hand slows.
 /// The lower rearm point keeps tracking noise around the gate from chattering.

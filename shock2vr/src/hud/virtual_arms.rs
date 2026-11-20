@@ -197,21 +197,6 @@ pub(crate) fn glove_band_frame(root: Matrix4<f32>) -> Matrix4<f32> {
         * Matrix4::from_scale(crate::dev_params::get(crate::dev_params::GLOVE_BAND_SCALE))
 }
 
-/// Pinky side of the same bracelet. Rendering and grab
-/// targeting share this frame, including the thicker palm side of the glove.
-pub(crate) fn implant_socket_frame(
-    root: Matrix4<f32>,
-    hand: Handedness,
-    palm_lift: f32,
-) -> Matrix4<f32> {
-    let side = if hand == Handedness::Left { -1.0 } else { 1.0 };
-    root * Matrix4::from_translation(vec3(
-        side * (BIO_BAND_RADIUS + 0.008),
-        -0.015,
-        -palm_lift * 0.5,
-    )) * Matrix4::from_angle_y(Deg(side * 90.0))
-}
-
 /// Wrist-frame +Z points out of the glove's back; +Y points toward its fingers.
 /// Bio faces dorsally, scaled alike in x and z so it can bend around the
 /// wrist. Ammo caps the cuff opening and faces back along the forearm,

@@ -243,11 +243,6 @@ pub trait PlayerInteraction {
         Vec::new()
     }
 
-    /// Forearm sockets use the same calibrated, collision-resolved wrists as the HUD.
-    fn implant_socket_frames(&self, _world: &World) -> [Option<Matrix4<f32>>; 2] {
-        [None; 2]
-    }
-
     /// Hand-mounted spotlights (`hand_spotlights` dev param).
     fn hand_spotlights(&self, _options: &GameOptions) -> Vec<SpotLight> {
         Vec::new()
@@ -310,14 +305,6 @@ pub trait PlayerInteraction {
         self.holding_hand(entity_id).is_some()
     }
 
-    /// Body-slot retrieval cannot share a hand with support or climbing.
-    fn hand_available_for_body_slot(&self, _hand: Handedness) -> bool {
-        false
-    }
-
-    /// Available body-slot contents, resolved by the same pass that owns retrieval.
-    fn set_body_anticipation(&mut self, _targets: [Option<EntityId>; 2]) {}
-
     /// Hands a VR UI panel is listening to this frame; they ease into a point.
     fn set_ui_point(&mut self, _hands: [bool; 2]) {}
 
@@ -329,17 +316,6 @@ pub trait PlayerInteraction {
 
     /// Permanent body tools reserve hands without inventing inventory entities.
     fn reserve_body_tool_hands(&mut self, _reserved: [bool; 2]) {}
-
-    /// Current tracked palms in pawn space, using the same calibrated glove
-    /// kinematics as fitted items and support grips. Missing rigs are disarmed.
-    fn body_palm_positions(&self, _input: &InputContext) -> [Option<Vector3<f32>>; 2] {
-        [None; 2]
-    }
-
-    /// Final visible glove cuffs, in world space (left, right).
-    fn body_wrist_frames(&self) -> [Option<Matrix4<f32>>; 2] {
-        [None; 2]
-    }
 
     /// Wield `entity_id` as the first-person weapon (flat); no-op for VR.
     fn wield(&mut self, _entity_id: EntityId) -> Vec<VirtualHandEffect> {
@@ -2295,80 +2271,6 @@ fn unstage_library_entry(
 }
 
 impl PlayerInteraction for VrInteraction {
-    fn body_wrist_frames(&self) -> [Option<Matrix4<f32>>; 2] {
-        let mut glove = self.glove_renderer.borrow_mut();
-        let Some(Some(renderer)) = glove.as_mut() else {
-            return [None; 2];
-        };
-        let tracked = self.hand_poses();
-        std::array::from_fn(|i| {
-            let pose = self.visual_hands[i].unwrap_or(tracked[i]);
-            (self.body_hand_tracking[i] && pose.is_tracked()).then(|| {
-                Matrix4::from_translation(pose.position)
-                    * Matrix4::from(pose.rotation)
-                    * renderer.wrist_frame(if i == 0 {
-                        Handedness::Left
-                    } else {
-                        Handedness::Right
-                    })
-            })
-        })
-    }
-
-    fn implant_socket_frames(&self, world: &World) -> [Option<Matrix4<f32>>; 2] {
-        use crate::hud::virtual_arms::{
-            BIO_BAND_RADIUS, glove_band_frame, glove_palm_lift, implant_socket_frame,
-        };
-        let mut glove = self.glove_renderer.borrow_mut();
-        let Some(Some(renderer)) = glove.as_mut() else {
-            return [None; 2];
-        };
-        let tracked = self.hand_poses();
-        std::array::from_fn(|i| {
-            let pose = self.visual_hands[i].unwrap_or(tracked[i]);
-            if !pose.is_tracked() {
-                return None;
-            }
-            let hand = if i == 0 {
-                Handedness::Left
-            } else {
-                Handedness::Right
-            };
-            let held = crate::wielded_weapon::held_by_hand(world, hand);
-            let (root, lift) = if crate::virtual_hand::shows_hand_visual(world, held) {
-                (
-                    glove_band_frame(
-                        Matrix4::from_translation(pose.position)
-                            * Matrix4::from(pose.rotation)
-                            * renderer.wrist_frame(hand),
-                    ),
-                    glove_palm_lift(),
-                )
-            } else {
-                let (wrist, radius) = held
-                    .filter(|&amp| crate::wielded_weapon::is_psi_amp(world, amp))
-                    .and_then(|amp| crate::psi_amp_readout::wrist(world, amp, hand))?;
-                (wrist * Matrix4::from_scale(radius / BIO_BAND_RADIUS), 0.0)
-            };
-            Some(implant_socket_frame(root, hand, lift))
-        })
-    }
-
-    fn body_palm_positions(&self, input: &InputContext) -> [Option<Vector3<f32>>; 2] {
-        let Some(rig) = &self.grip_kinematics else {
-            return [None; 2];
-        };
-        let hands = [&input.left_hand, &input.right_hand];
-        std::array::from_fn(|i| {
-            let pose = GripPose {
-                position: hands[i].position,
-                rotation: hands[i].rotation,
-            };
-            (pose.is_tracked() && input.pose_tracking.is_none_or(|p| p.head && p.hands[i]))
-                .then(|| pose.point(rig[i].palm_in_world()))
-        })
-    }
-
     fn set_body_tool_device(&mut self, device: bool) {
         self.body_tool_device = device;
     }
@@ -2390,19 +2292,6 @@ impl PlayerInteraction for VrInteraction {
 
     fn reserve_body_tool_hands(&mut self, reserved: [bool; 2]) {
         self.body_tool_hands = reserved;
-    }
-
-    fn hand_available_for_body_slot(&self, hand: Handedness) -> bool {
-        let i = crate::vr_config::hand_slot(hand);
-        let held = if i == 0 {
-            self.left_hand.get_held_entity()
-        } else {
-            self.right_hand.get_held_entity()
-        };
-        held.is_none()
-            && !self.body_tool_hands[i]
-            && !self.support_blocked[i]
-            && !self.hand_climb.grips().any(|(h, _)| h == hand)
     }
     fn fit_held_items(
         &mut self,
@@ -2869,10 +2758,6 @@ impl PlayerInteraction for VrInteraction {
 
     fn set_ui_point(&mut self, hands: [bool; 2]) {
         self.ui_point = hands;
-    }
-
-    fn set_body_anticipation(&mut self, targets: [Option<EntityId>; 2]) {
-        self.body_anticipation = targets;
     }
 
     fn maintenance_previews(&self, world: &World) -> Vec<String> {
@@ -3795,31 +3680,6 @@ mod tests {
     use dark::properties::{FrobFlag, PropFrobInfo, PropModelName};
 
     use super::*;
-    #[test]
-    fn body_contacts_rotate_the_calibrated_palm_and_reject_missing_tracking() {
-        use cgmath::{Deg, Rotation3};
-        let mut interaction = VrInteraction::new();
-        let mut input = InputContext::default();
-        assert_eq!(interaction.body_palm_positions(&input), [None; 2]);
-        interaction.grip_kinematics =
-            Some(std::array::from_fn(|_| crate::vr_grip::GripKinematics {
-                fingers: std::array::from_fn(|_| Vec::new()),
-                palm: vec3(0.0, 0.0, -0.08),
-                normal: Vector3::unit_x(),
-            }));
-        input.right_hand.position = vec3(1.0, 2.0, 3.0);
-        input.right_hand.rotation = Quaternion::from_angle_y(Deg(90.0));
-        let palm = interaction.body_palm_positions(&input)[1].unwrap();
-        assert!((palm - vec3(0.92, 2.0, 3.0)).magnitude() < 0.0001);
-        input.pose_tracking = Some(crate::input_context::PoseTracking {
-            head: true,
-            hands: [true, false],
-        });
-        assert!(interaction.body_palm_positions(&input)[1].is_none());
-        input.pose_tracking = None;
-        input.right_hand.rotation = Quaternion::new(0.0, 0.0, 0.0, 0.0);
-        assert!(interaction.body_palm_positions(&input)[1].is_none());
-    }
 
     use crate::{
         input_context::InputContext,
@@ -3858,40 +3718,6 @@ mod tests {
             support_enabled: true,
             reserved_releases: &[],
         }
-    }
-
-    #[test]
-    fn body_anticipation_is_visual_only_and_clears_on_tracking_loss() {
-        let mut world = World::new();
-        let entity = grabbable(&mut world);
-        let physics = PhysicsWorld::new();
-        let mut input = InputContext::default();
-        input.left_hand.rotation = identity();
-        input.right_hand.rotation = identity();
-        let mut interaction = VrInteraction::new();
-        // Updating suppressed hands sets the tracked transform without inventing a target.
-        interaction.right_hand = interaction.right_hand.update_suppressed(
-            vec3(0.0, 0.0, 0.0),
-            identity(),
-            &input.right_hand,
-        );
-        interaction.set_body_anticipation([None, Some(entity)]);
-        for _ in 0..30 {
-            interaction.update_anticipation(&context(&world, &physics, &input));
-        }
-        let feedback = interaction.hand_feedback_diagnostics();
-        assert!(feedback["anticipation"][1]["curls"][2].as_f64().unwrap() > 0.45);
-        assert_eq!(interaction.held_entities(), (None, None));
-        assert_eq!(input.right_hand.squeeze_value, 0.0);
-        input.pose_tracking = Some(crate::input_context::PoseTracking {
-            head: true,
-            hands: [true, false],
-        });
-        interaction.update_anticipation(&context(&world, &physics, &input));
-        assert_eq!(
-            interaction.hand_feedback_diagnostics()["anticipation"][1]["curls"],
-            serde_json::json!([0.0, 0.0, 0.0, 0.0, 0.0])
-        );
     }
 
     #[test]

@@ -201,200 +201,6 @@ const LOAD_EVENT_PUMP_ENTITY_INTERVAL: usize = 32;
 /// so a per-hand array built here reads correctly wherever it is consumed.
 use crate::vr_config::hand_slot;
 
-/// Advance the VR grab swallow one frame, per hand (see
-/// [`MissionCore::vr_squeeze_swallow`]).
-///
-/// `claims` is "the cyber interface owns this hand's squeeze right now" - its
-/// ray is on the panel with the interface up. The latch turns that instant into
-/// a gesture: once set it holds until the squeeze is released, so a squeeze
-/// begun on the panel cannot reach the world by sliding off the panel edge or
-/// by the mode closing under it. It also drops the moment the hand is holding
-/// something, because a hand that just took an item off the panel must see its
-/// own squeeze again - masking it would read as a release.
-///
-/// Pure, so the rule is exercised directly rather than through a whole mission.
-fn update_squeeze_swallow(
-    latched: &mut [bool; 2],
-    squeezing: [bool; 2],
-    hand_empty: [bool; 2],
-    claims: [bool; 2],
-) {
-    for slot in 0..latched.len() {
-        if !squeezing[slot] || !hand_empty[slot] {
-            latched[slot] = false;
-        } else if claims[slot] {
-            latched[slot] = true;
-        }
-    }
-}
-
-/// Which hands must not see their own trigger this frame, while the VR cyber
-/// interface is up (see [`MissionCore::vr_trigger_swallow`]).
-///
-/// The trigger is overloaded: for a hand holding a weapon it is fire, and for
-/// an empty hand it is the universal world "interact" (`MessagePayload::Frob`)
-/// - the two diverge in `VirtualHand::update`, between the `Grabbing` arm's
-/// `held_trigger_press_payload` and `handle_empty_hand_state`. Safing the
-/// weapon while the interface is up must therefore not be done by zeroing both
-/// triggers, or it takes the interact gesture with it and the player cannot
-/// frob a door or an item with the panel open. So the mask is per hand, and
-/// keyed on what that hand holds:
-///
-/// - A hand whose ray is on the panel is a UI pointer this frame: its trigger
-///   is the UI click and must not also reach through into the world.
-/// - A hand holding a wieldable weapon is safed - it stays wielded and visible
-///   but cannot fire.
-/// - Any other hand off the panel keeps its own trigger, so an empty hand can
-///   still Frob the world and a held consumable still works.
-///
-/// This is the per-frame decision only; [`latch_trigger_safe`] freezes it for
-/// the length of a pull, and the caller ORs in `vr_trigger_swallow` afterwards.
-///
-/// Pure, so the matrix is exercised directly rather than through a mission.
-fn trigger_safe_mask(use_mode: bool, on_panel: [bool; 2], holds_weapon: [bool; 2]) -> [bool; 2] {
-    let mut mask = [false; 2];
-    if use_mode {
-        for slot in 0..mask.len() {
-            mask[slot] = on_panel[slot] || holds_weapon[slot];
-        }
-    }
-    mask
-}
-
-/// Freeze each hand's trigger mask for the length of one pull.
-///
-/// [`trigger_safe_mask`] is a per-frame decision, but a trigger pull is a
-/// *gesture*, and `VirtualHand` edge-detects it (`prev.trigger_value < 0.5 &&
-/// input > 0.5`). A mask that flips mid-pull therefore manufactures a brand new
-/// press out of a trigger the player never released - and `on_panel` really
-/// does flip mid-pull, because the panel is head-anchored: a head turn alone
-/// slides it out from under a motionless hand.
-///
-/// Both directions are bugs without this latch. A UI click begun on the panel
-/// would become a world `Frob` the moment the ray slipped off the edge (the
-/// hazard [`update_squeeze_swallow`] already guards for the squeeze). And a
-/// `Frob` begun off the panel would be re-fired every time the ray swept back
-/// across the panel, because masking a hand mid-pull makes
-/// `handle_empty_hand_state` clear its `last_frobbed_entity` debounce - worse
-/// for a held consumable, whose `Grabbing` arm has no debounce at all and would
-/// spend one item per crossing.
-///
-/// So the decision taken when the trigger crossed the threshold is the decision
-/// that pull keeps until it is released. `None` means "no pull in flight".
-fn latch_trigger_safe(
-    latched: &mut [Option<bool>; 2],
-    pressed: [bool; 2],
-    mask: [bool; 2],
-) -> [bool; 2] {
-    let mut effective = mask;
-    for slot in 0..effective.len() {
-        if pressed[slot] {
-            effective[slot] = *latched[slot].get_or_insert(mask[slot]);
-        } else {
-            latched[slot] = None;
-        }
-    }
-    effective
-}
-
-/// Which held entities are being released onto the cyber interface's inventory
-/// strip this frame, and so belong in the backpack rather than on the floor.
-///
-/// `VirtualHand` knows exactly one release: opening the hand ejects the item as
-/// a loose world prop, and offers it to whatever the release raycast hit (that
-/// is how a physical container is fed). The strip cannot be hit by that ray -
-/// it is a head-anchored UI quad with no collider - so a release over it would
-/// otherwise land the item on the floor in front of the player. This turns that
-/// release into the deposit the player meant.
-///
-/// Pure, so the rule is exercised directly rather than through a mission.
-fn strip_deposit_entities(
-    on_strip: [bool; 2],
-    held: [Option<EntityId>; 2],
-    releasing: [bool; 2],
-) -> Vec<EntityId> {
-    (0..held.len())
-        .filter(|&slot| on_strip[slot] && releasing[slot])
-        .filter_map(|slot| held[slot])
-        .collect()
-}
-
-/// Rewrite a release claimed by the inventory strip or shoulder backpack, from the world
-/// drop `VirtualHand` emitted into the backpack deposit the player meant.
-///
-/// Each claimed item's `DropItem` - the world drop itself, which restores its
-/// world refs and rebuilds its physics body - becomes the `Drop` message its
-/// scripts are always owed on leaving the hand (the world-model restore and
-/// psi-charge cancel that [`VirtualHandEffect::StoreItem`] documents a *held*
-/// store must be paired with), followed by the store itself. Both stay hand
-/// effects so they are applied in `process_virtual_hand_effects`, in the same
-/// frame and at the same point the drop they replace would have been - the
-/// `Drop` therefore still reaches this frame's `script_world.update`.
-///
-/// `collect` routes downloads through their collecting Frob instead of storing
-/// inert pickup objects in the backpack.
-///
-/// `store` pairs each stored item with its targeted or reserved inventory cell,
-/// when one resolved - the deposit becomes a [`VirtualHandEffect::StoreItemAtCell`]
-/// there, falling back to the first-free [`VirtualHandEffect::StoreItem`]
-/// only when no cell resolved.
-///
-/// The `ProvideForConsumption` offer goes too. It is what the hand offers to
-/// whatever its release raycast hit, and because the panel is not physical
-/// that ray reaches straight through it - so a container standing behind the
-/// interface would otherwise take the item as well and the deposit would land
-/// twice. Everything else the hand emitted this frame is untouched.
-fn rewrite_inventory_release(
-    effects: &mut Vec<VirtualHandEffect>,
-    store: &[(EntityId, Option<(usize, usize)>)],
-    collect: &[EntityId],
-) {
-    if store.is_empty() && collect.is_empty() {
-        return;
-    }
-    let claimed = |entity_id: &EntityId| {
-        store.iter().any(|(item, _)| item == entity_id) || collect.contains(entity_id)
-    };
-    let mut rewritten = Vec::with_capacity(effects.len());
-    for effect in effects.drain(..) {
-        match effect {
-            VirtualHandEffect::DropItem { entity_id, .. } if claimed(&entity_id) => {
-                rewritten.push(VirtualHandEffect::OutMessage {
-                    message: Message {
-                        to: entity_id,
-                        payload: MessagePayload::Drop,
-                    },
-                });
-                rewritten.push(if collect.contains(&entity_id) {
-                    VirtualHandEffect::OutMessage {
-                        message: Message {
-                            to: entity_id,
-                            payload: MessagePayload::Frob,
-                        },
-                    }
-                } else {
-                    match store.iter().find(|(item, _)| *item == entity_id) {
-                        Some((_, Some(cell))) => VirtualHandEffect::StoreItemAtCell {
-                            entity_id,
-                            cell: *cell,
-                        },
-                        _ => VirtualHandEffect::StoreItem { entity_id },
-                    }
-                });
-            }
-            VirtualHandEffect::OutMessage {
-                message:
-                    Message {
-                        payload: MessagePayload::ProvideForConsumption { entity },
-                        ..
-                    },
-            } if claimed(&entity) => {}
-            kept => rewritten.push(kept),
-        }
-    }
-    *effects = rewritten;
-}
-
 /// Retail's inventory-full announcement, emitted only on a refused attempt.
 fn backpack_full_feedback(entity_id: EntityId) -> Effect {
     game_log!(
@@ -487,26 +293,6 @@ fn pickup_feedback(
             spatial: false,
         },
     ]
-}
-
-/// Whether the player's backpack can actually take `dropped_entity_id` right
-/// now.
-///
-/// This is exactly [`move_live_entity_into_container`]'s success condition for
-/// a live item: a container without `Links` has nowhere to record the new
-/// `Contains`, and a full grid with nothing to merge into leaves the item
-/// unplaced. Claiming a release the backpack cannot accept would suppress the
-/// world drop for an item that then lands nowhere at all, so the claim is
-/// gated on it and an unusable/full backpack simply leaves the ordinary world
-/// drop alone (the VR "held item can't stay mid-air" fallback).
-fn backpack_accepts_deposit(world: &World, dropped_entity_id: EntityId) -> bool {
-    let Ok(inventory_entity) = world
-        .borrow::<UniqueView<PlayerInfo>>()
-        .map(|player| player.inventory_entity_id)
-    else {
-        return false;
-    };
-    container_can_accept_item(world, inventory_entity, dropped_entity_id)
 }
 
 /// The use-mode ("cyber interface") open/close sting: the shipped gamesys's
@@ -755,9 +541,6 @@ fn rebase_pawn_overlay(
         object.set_transform(pawn_to_world * object.get_transform());
     }
 }
-
-#[cfg(test)]
-mod vr_backpack_panel_tests {}
 
 fn is_realtime_crumple(frame_count: f32) -> bool {
     // `humdieup1` is an authored "already dead" pose: three frames with no
@@ -1287,44 +1070,6 @@ fn find_mergeable_stack_anywhere(
         (item.entity != dropped_entity_id && can_combine(world, item.entity, dropped_entity_id))
             .then_some(item.entity)
     })
-}
-
-/// Whether `container_entity_id` can accept a deposit of `dropped_entity_id`
-/// right now, without mutating anything: the container exists (has `Links` to
-/// record the transfer) and either has a free cell for the item's authored
-/// footprint or holds a stack it can merge into instead. Mirrors
-/// [`move_live_entity_into_container`]/[`MissionCore::drop_entity_into_container`]'s
-/// success condition for a live item, so a release can be pre-checked before
-/// it is claimed as a store (see [`backpack_accepts_deposit`]).
-fn container_can_accept_item(
-    world: &World,
-    container_entity_id: EntityId,
-    dropped_entity_id: EntityId,
-) -> bool {
-    if !world
-        .borrow::<View<Links>>()
-        .is_ok_and(|links| links.get(container_entity_id).is_ok())
-    {
-        return false;
-    }
-    let grid = crate::inventory::grid_for(world, container_entity_id);
-    let mut occupied =
-        crate::inventory::Inventory::from_container(world, container_entity_id, grid);
-    // See `move_live_entity_into_container_at_slot`: a re-grab can still show
-    // the dropped entity occupying its own old cell here.
-    occupied.remove_entity(dropped_entity_id);
-    let dims = world
-        .borrow::<View<dark::properties::PropInventoryDimensions>>()
-        .ok()
-        .and_then(|v| v.get(dropped_entity_id).ok().map(|d| (d.width, d.height)))
-        .unwrap_or((1, 1));
-    if occupied
-        .first_free_slot(dims.0 as usize, dims.1 as usize)
-        .is_some()
-    {
-        return true;
-    }
-    find_mergeable_stack_anywhere(world, container_entity_id, dropped_entity_id).is_some()
 }
 
 /// Shared placement body for [`move_live_entity_into_container`] and
@@ -2054,41 +1799,6 @@ mod capacity_enforcement_tests {
             find_mergeable_stack_anywhere(&world, container, dropped),
             None
         );
-    }
-
-    /// The composed capacity check a release is gated on: a full container
-    /// with no mergeable stack cannot accept the deposit.
-    #[test]
-    fn container_can_accept_item_is_false_when_full_and_unmergeable() {
-        let (mut world, container) = full_container();
-        let dropped = world.add_entity((PropHasRefs(false),));
-
-        assert!(!container_can_accept_item(&world, container, dropped));
-    }
-
-    /// ...but a full container that holds a matching stack still accepts it,
-    /// via the merge fallback rather than a free cell.
-    #[test]
-    fn container_can_accept_item_is_true_when_full_but_mergeable() {
-        let (mut world, container) = full_container();
-        let occupant = world
-            .borrow::<View<Links>>()
-            .unwrap()
-            .get(container)
-            .unwrap()
-            .to_links[0]
-            .to_entity_id
-            .unwrap()
-            .0;
-        world.add_component(occupant, PropCombineType("MedPatch".to_owned()));
-        world.add_component(occupant, PropStackCount(1));
-        let dropped = world.add_entity((
-            PropHasRefs(false),
-            PropCombineType("MedPatch".to_owned()),
-            PropStackCount(1),
-        ));
-
-        assert!(container_can_accept_item(&world, container, dropped));
     }
 }
 
@@ -3295,7 +3005,6 @@ pub struct MissionCore {
     psi_drain_trails: Vec<crate::psi_visuals::DrainTrail>,
     projectile_trails: crate::projectile_trail::ProjectileTrails,
     psi_pull: Option<crate::psi_pull::Flight>,
-    free_hand_psi_pull: crate::vr_psi_pull::FreeHandPull,
     psi_pull_aim: Vec<EntityId>,
     /// Per hand (left, right): the held item and the release target that will
     /// accept it. Flat uses the right slot for the use-mode cursor item.
@@ -3489,33 +3198,7 @@ pub struct MissionCore {
     /// (rule 5 of the vr-ui-design skill).
     vr_use_mode_pointer: Option<crate::ui::FrontendPointerPass>,
 
-    /// VR grab swallow, per hand (indexed by [`hand_slot`]): while the cyber
-    /// interface masks a hand's squeeze, that hand keeps seeing a released
-    /// squeeze until the player actually lets go. World grabbing is
-    /// *level*-triggered (`VirtualHand` grabs whenever the squeeze is down), so
-    /// without this a squeeze begun on the panel would grab whatever the ray
-    /// hits the instant it slipped off the panel edge - or the moment the mode
-    /// closed. Cleared as soon as the hand releases, or as soon as it is
-    /// holding something: a hand that just took an item off the panel must see
-    /// its own squeeze again, or the eventual release would not drop it.
-    vr_squeeze_swallow: [bool; 2],
-
-    /// The trigger-safe decision in flight for each hand (indexed by
-    /// [`hand_slot`]), or `None` when that hand's trigger is released. The
-    /// squeeze counterpart above latches because grabbing is *level*-triggered;
-    /// this one latches because firing and frobbing are *edge*-triggered, so a
-    /// mask that changes under a held trigger fabricates a press the player
-    /// never made. See [`latch_trigger_safe`].
-    vr_trigger_safe_latch: [Option<bool>; 2],
-
-    shoulder_backpack: super::shoulder_backpack::ShoulderBackpack,
-    holsters: super::holsters::Holsters,
-    chest_slots: super::holsters::Holsters,
     rapier_feedback: crate::rapier::RapierFeedback,
-    debug_body: super::debug_body::DebugBody,
-    implant_sockets: super::implant_sockets::Sockets,
-    ammo_pouch: super::ammo_pouch::AmmoPouch,
-    personal_card: super::personal_card::PersonalCard,
     device_panel: Option<crate::ui::WorldPanel>,
     device_scan_pose: Option<(Vector3<f32>, Quaternion<f32>)>,
     device_pointer_gate: super::mfd_device::PointerGate,
@@ -3523,8 +3206,6 @@ pub struct MissionCore {
     device_inspect_only: bool,
     device_scanner: super::mfd_device::Scanner,
     device_beam: Option<(Vector3<f32>, Vector3<f32>)>,
-    body_hand_contacts: [Option<Vector3<f32>>; 2],
-    download_release_disarmed: [bool; 2],
 
     /// Flat-mode MFD panel host: the object-bound panel opened on frob, its
     /// canvas rendering, and the pointer -> GUIHover input mapping. VR uses
@@ -4451,7 +4132,6 @@ impl MissionCore {
                 crate::particle_effects::particle_frames(asset_cache, "NDsmk"),
             ),
             psi_pull: None,
-            free_hand_psi_pull: Default::default(),
             psi_pull_aim: Vec::new(),
             tool_ready: [None; 2],
             bracket_hints: Vec::new(),
@@ -4498,18 +4178,7 @@ impl MissionCore {
             vr_use_mode_head: crate::ui::world_dim::UNTRACKED_HEAD,
             vr_trigger_swallow: false,
             vr_use_mode_pointer: None,
-            vr_squeeze_swallow: [false; 2],
-            vr_trigger_safe_latch: [None; 2],
-            shoulder_backpack: Default::default(),
-            body_hand_contacts: [None; 2],
-            download_release_disarmed: [false; 2],
-            holsters: Default::default(),
-            chest_slots: super::holsters::Holsters::chest(),
             rapier_feedback: Default::default(),
-            debug_body: Default::default(),
-            implant_sockets: Default::default(),
-            ammo_pouch: Default::default(),
-            personal_card: Default::default(),
             device_panel: None,
             device_scan_pose: None,
             device_pointer_gate: Default::default(),
@@ -5392,10 +5061,7 @@ impl MissionCore {
         // correction on top of a body that has already absorbed the last one.
         // A scripted top-out owns the body outright, so the hands do nothing
         // while one runs and cannot take a fresh hold part-way over the lip.
-        self.interaction.reserve_body_tool_hands([
-            self.personal_card.hand == Some(0),
-            self.personal_card.hand == Some(1),
-        ]);
+        self.interaction.reserve_body_tool_hands([false, false]);
         if !tick.elapsed.is_zero() && self.climb_exit_teleport.is_some() {
             self.interaction.suspend_hand_climb(input_context);
         }
@@ -6239,17 +5905,7 @@ impl MissionCore {
         let device_opted_in = super::mfd_device::enabled(&game_options.experimental_features);
         let device_enabled = device_opted_in && interface;
         self.interaction.set_body_tool_device(device_enabled);
-        let device_hand = self.personal_card.hand.filter(|i| {
-            device_enabled
-                && !psi_projected
-                && !self.use_mode
-                && self.player_is_alive()
-                && self.player_controls_enabled
-                && input_context
-                    .pose_tracking
-                    .is_none_or(|p| p.head && p.hands[*i])
-                && [&input_context.left_hand, &input_context.right_hand][*i].squeeze_value >= 0.5
-        });
+        let device_hand: Option<usize> = None;
         self.flat_ui.psionic_projection = psi_projected;
         let device_active = psi_projected
             || device_hand.is_some()
@@ -6269,9 +5925,6 @@ impl MissionCore {
         }
         if self.flat_ui.device != device_active {
             // Stowing must not replay the scanner's held trigger as a world frob.
-            if !device_active && let Some(hand) = self.personal_card.hand {
-                self.vr_trigger_safe_latch[hand] = Some(true);
-            }
             self.flat_ui.close();
             self.flat_ui.utilities = Default::default();
             self.flat_ui.guard_held_press();
@@ -6401,123 +6054,14 @@ impl MissionCore {
             }
         }
 
-        // Per-hand arbitration (cyber-interface plan, owner decision 4): a hand
-        // whose ray is ON the panel is a UI pointer this frame; a hand off it
-        // stays an ordinary `VirtualHand` for world grab/drop. Note this is
-        // *every* hand on the panel, not just the one driving the point - an
-        // idle hand resting on the panel is not the pointer, but its squeeze
-        // must still not reach through the panel into the world.
         let (left_hand_held, right_hand_held) = self.interaction.held_entities();
-        let hand_empty = [left_hand_held.is_none(), right_hand_held.is_none()];
-        let mut on_panel = [false; 2];
-        // The strip specifically, for the release-deposit below: apart from
-        // the paperdoll holster wells, the rest of the canvas is not a drop
-        // target, so a release there stays an ordinary world drop.
-        let on_strip = [false; 2];
-        // The strip cell each on-strip hand's ray currently lands on, for the
-        // release-deposit below - retail drops the item into the cell the
-        // player is pointing at rather than always the first free one.
-        let strip_cell: [Option<(usize, usize)>; 2] = [None; 2];
-        // The paperdoll holster well each hand's ray lands on (storage slot),
-        // for the release-to-holster below.
-        let holster_well: [Option<usize>; 2] = [None; 2];
-        if let Some(pass) = self.vr_use_mode_pointer.as_ref() {
-            for ray in pass.rays.iter() {
-                let Some(_canvas_hit) = ray.canvas_hit else {
-                    continue;
-                };
-                on_panel[hand_slot(ray.handedness)] = true;
-                // Stated locally rather than leaned on: the pointer pass only
-                // exists in VR use mode, but the deposit below reads
-                // `held_entities()`, whose slot 0 is the *wielded weapon* in
-                // flat - so the VR gate must be visible where the claim is
-                // made, not two indirections away.
-            }
-        }
-        let squeezing = [
-            input_context.left_hand.squeeze_value > crate::ui::VR_TRIGGER_THRESHOLD,
-            input_context.right_hand.squeeze_value > crate::ui::VR_TRIGGER_THRESHOLD,
-        ];
-        update_squeeze_swallow(
-            &mut self.vr_squeeze_swallow,
-            squeezing,
-            hand_empty,
-            [
-                (self.use_mode || self.flat_ui.device) && on_panel[0],
-                (self.use_mode || self.flat_ui.device) && on_panel[1],
-            ],
-        );
+        let held = [left_hand_held, right_hand_held];
+        let hands_input = input_context;
 
-        // VR weapon-safe: while the cyber interface is up (and until a trigger
-        // held across its exit is released) a wielding hand sees a zeroed
-        // trigger, so the weapon cannot fire - it stays wielded and visible.
-        // The analog of the flat runtime's mouse-ownership swallow latch. The
-        // mask is per hand (see `trigger_safe_mask`) because the trigger is
-        // also the world interact gesture: a hand that is neither pointing at
-        // the panel nor holding a weapon keeps its trigger, so the player can
-        // still frob doors and items with the interface open. Squeezes are
-        // masked only per the latch above, so a squeeze on an inventory slot
-        // pulls the item into that hand (the panel emits `GrabEntity`) without
-        // also grabbing whatever the hand was aimed at.
-        let holds_weapon = [left_hand_held, right_hand_held].map(|held| {
-            held.is_some_and(|entity_id| {
-                crate::virtual_hand::is_wieldable_weapon(&self.world, entity_id)
-            })
-        });
-        // Decide, latch for the length of the pull, then OR in the
-        // across-exit swallow - which is deliberately *outside* the latch, so
-        // closing the interface under a held trigger always safes it.
-        let pressed = [
-            input_context.left_hand.trigger_value > crate::ui::VR_TRIGGER_THRESHOLD,
-            input_context.right_hand.trigger_value > crate::ui::VR_TRIGGER_THRESHOLD,
-        ];
-        if self.flat_ui.utilities.is_inspecting() && !self.flat_ui.device {
-            // Selection owns both triggers even off-panel. Upgrade an ongoing
-            // pull to safe and retain that decision until physical release,
-            // so cancelling inspection cannot consume a held hypo mid-pull.
-            self.vr_trigger_safe_latch = [Some(true); 2];
-        }
-        if psi_projected {
-            if let Some(hand) = psi_hand {
-                on_panel[hand_slot(hand)] = true;
-            }
-        }
-        let mut trigger_safe = latch_trigger_safe(
-            &mut self.vr_trigger_safe_latch,
-            pressed,
-            if self.flat_ui.device {
-                on_panel
-            } else {
-                trigger_safe_mask(self.use_mode, on_panel, holds_weapon)
-            },
-        );
-        for safe in trigger_safe.iter_mut() {
-            *safe |= self.vr_trigger_swallow;
-        }
-        let weapon_safe_input = (false
-            && (trigger_safe.iter().any(|safe| *safe)
-                || self.vr_squeeze_swallow.iter().any(|latched| *latched)))
-        .then(|| {
-            let mut safe = input_context.clone();
-            if trigger_safe[hand_slot(crate::vr_config::Handedness::Left)] {
-                safe.left_hand.trigger_value = 0.0;
-            }
-            if trigger_safe[hand_slot(crate::vr_config::Handedness::Right)] {
-                safe.right_hand.trigger_value = 0.0;
-            }
-            if self.vr_squeeze_swallow[hand_slot(crate::vr_config::Handedness::Left)] {
-                safe.left_hand.squeeze_value = 0.0;
-            }
-            if self.vr_squeeze_swallow[hand_slot(crate::vr_config::Handedness::Right)] {
-                safe.right_hand.squeeze_value = 0.0;
-            }
-            safe
-        });
-        let hands_input = weapon_safe_input.as_ref().unwrap_or(input_context);
-
-        // VR body slots have no flat input surface. On a flat load, return
+        // Saves from the VR build may hold items in body slots, which flat has no
+        // input surface for. Return
         // their exact entities to the backpack, or visibly drop them if full.
-        if game_options.presentation_mode == crate::PresentationMode::Flat {
+        {
             let stored = super::holsters::occupants(&self.world);
             for entity in stored.into_iter().flatten() {
                 let inventory = self
@@ -6544,729 +6088,6 @@ impl MissionCore {
             }
         }
 
-        let held = [left_hand_held, right_hand_held];
-        // Body contacts use a calibrated palm sphere, not the aim origin at
-        // the back of the glove. Keep the original input for weapon controls.
-        let mut body_input = hands_input.clone();
-        self.body_hand_contacts = self.interaction.body_palm_positions(hands_input);
-        let socket_frames = self.interaction.implant_socket_frames(&self.world);
-        let socket_palms = std::array::from_fn(|i| {
-            crate::virtual_hand::hand_world_position(
-                player_pos,
-                player_rot,
-                self.body_hand_contacts[i].unwrap_or(
-                    [
-                        input_context.left_hand.position,
-                        input_context.right_hand.position,
-                    ][i],
-                ),
-            )
-        });
-        let implant_actions = self.implant_sockets.update(
-            &self.world,
-            hands_input,
-            held,
-            socket_palms,
-            socket_frames,
-            std::array::from_fn(|i| {
-                held[i].is_some_and(|id| crate::implants::kind(&self.world, id).is_some())
-                    || self.interaction.hand_available_for_body_slot(
-                        [crate::Handedness::Left, crate::Handedness::Right][i],
-                    )
-            }),
-            false && !self.use_mode && self.player_is_alive() && self.player_controls_enabled,
-        );
-        for (i, hand) in [&mut body_input.left_hand, &mut body_input.right_hand]
-            .into_iter()
-            .enumerate()
-        {
-            // A reachable implant owns the grip before shoulder/belt gestures can queue a draw.
-            if self.implant_sockets.reserved[i] {
-                hand.rotation = Quaternion::new(0.0, 0.0, 0.0, 0.0);
-            } else if let Some(palm) = self.body_hand_contacts[i] {
-                hand.position = palm;
-            } else {
-                hand.rotation = Quaternion::new(0.0, 0.0, 0.0, 0.0);
-            }
-        }
-        let inventory = self
-            .world
-            .borrow::<UniqueView<PlayerInfo>>()
-            .unwrap()
-            .inventory_entity_id;
-        let shoulders_enabled =
-            false && !self.use_mode && self.player_is_alive() && self.player_controls_enabled;
-        // Skip the inventory walk whenever the shoulders are inactive.
-        let shoulder_weapons = if shoulders_enabled {
-            super::shoulder_backpack::weapons(&self.world, inventory)
-        } else {
-            [None; 2]
-        };
-        self.shoulder_backpack.stocked = shoulder_weapons.map(|weapon| weapon.is_some());
-        let mut shoulder_releases = self.shoulder_backpack.update(
-            &body_input,
-            held,
-            shoulders_enabled,
-            tick.elapsed.as_secs_f32(),
-        );
-        self.holsters.shoulder_priority = self.shoulder_backpack.near;
-        self.ammo_pouch.shoulder_priority = self.shoulder_backpack.near;
-        let pouch_weapons = std::array::from_fn(|i| {
-            held[1 - i].filter(|gun| self.magazine_capacity(*gun).is_some())
-        });
-        self.holsters.pouch_priority = pouch_weapons.map(|weapon| weapon.is_some());
-        self.holsters.near_other_target =
-            std::array::from_fn(|i| self.ammo_pouch.near[i] || self.chest_slots.near[i].is_some());
-        self.holsters.load_poses(asset_cache);
-        // Belt, holsters and chest mounts are cyber-interface gear (hidden on Earth).
-        let body_gear = false
-            && self.player_is_alive()
-            && self.player_controls_enabled
-            && crate::cyber_interface::installed(&self.world);
-        let holster_posed = held.map(|entity| {
-            entity.is_some_and(|entity| {
-                self.holsters
-                    .poses
-                    .for_entity(&self.world, entity)
-                    .is_some()
-            })
-        });
-        // Last frame's tracked squeeze, for the paperdoll release edge below.
-        let gripped = self.holsters.pressed_item;
-        let holster_actions = self.holsters.update(
-            &body_input,
-            held,
-            [
-                crate::vr_config::Handedness::Left,
-                crate::vr_config::Handedness::Right,
-            ]
-            .map(|hand| self.interaction.hand_available_for_body_slot(hand)),
-            super::holsters::occupants(&self.world),
-            super::holsters::SLOT_COUNT,
-            held.map(|entity| {
-                entity.is_some_and(|entity| {
-                    crate::virtual_hand::is_wieldable_weapon(&self.world, entity)
-                })
-            }),
-            holster_posed,
-            body_gear,
-            tick.elapsed.as_secs_f32(),
-        );
-        self.chest_slots.body_pose = self.holsters.body_pose;
-        // Chest mounts are small, deliberate targets; with the chest on the
-        // body plane they sit inside the broad shoulder zone, so the shoulder
-        // yields to them below rather than the reverse.
-        self.chest_slots.shoulder_priority =
-            std::array::from_fn(|i| self.holsters.near[i].is_some());
-        let chest_contents = self.chest_slots.occupants(&self.world);
-        self.chest_slots.matching_slots = held.map(|item| {
-            chest_contents.map(|stored| {
-                item.zip(stored).is_some_and(|(item, stored)| {
-                    super::holsters::Holsters::same_chest_kind(&self.world, stored, item)
-                })
-            })
-        });
-        let mut chest_actions = self.chest_slots.update(
-            &body_input,
-            held,
-            [crate::Handedness::Left, crate::Handedness::Right]
-                .map(|hand| self.interaction.hand_available_for_body_slot(hand)),
-            self.chest_slots.occupants(&self.world),
-            super::holsters::SLOT_COUNT,
-            held.map(|item| item.is_some()),
-            held.map(|item| {
-                item.is_some_and(|id| {
-                    super::holsters::Holsters::accepts_chest_item(&self.world, id)
-                })
-            }),
-            body_gear,
-            tick.elapsed.as_secs_f32(),
-        );
-        for i in 0..2 {
-            if self.chest_slots.near[i].is_some() {
-                shoulder_releases[i] = false;
-                self.shoulder_backpack.near[i] = false;
-                self.shoulder_backpack.entered[i] = false;
-                self.shoulder_backpack.draws[i] = None;
-            }
-        }
-        // Releasing a held item over a paperdoll holster well stores it there.
-        // The ray crosses the strip, so this must claim the release before the
-        // strip deposit would; the claim then flows through the physical
-        // holster's Store/Refuse handling below.
-        let holster_actions = super::holsters::paperdoll_actions(
-            if body_gear { holster_well } else { [None; 2] },
-            held,
-            // A real release edge, as the thigh holster requires: a grip held
-            // open by a retain or restore never squeezed, so it never claims.
-            // Downloads and logs keep their collecting release.
-            std::array::from_fn(|i| {
-                held[i].is_some_and(|entity| {
-                    gripped[i] == Some(entity)
-                        && [&hands_input.left_hand, &hands_input.right_hand][i].squeeze_value
-                            < crate::ui::VR_TRIGGER_THRESHOLD
-                        && chest_actions[i].is_none()
-                        && !crate::scripts::script_util::is_always_collected(&self.world, entity)
-                        && !crate::scripts::script_util::is_download_pickup(&self.world, entity)
-                })
-            }),
-            holster_posed,
-            super::holsters::occupants(&self.world),
-            holster_actions,
-        );
-        for (i, action) in holster_actions.iter().enumerate() {
-            // Same as a refused thigh deposit: keep the item until a re-grip.
-            if let Some(super::holsters::Action::Refuse { entity }) = *action {
-                self.holsters.retained.retain(i, entity);
-            }
-        }
-        let chest_merge_targets = std::array::from_fn::<_, 2, _>(|i| {
-            held[i].and_then(|item| {
-                self.chest_slots.near[i]
-                    .and_then(|slot| chest_contents[slot])
-                    .filter(|stored| can_combine(&self.world, *stored, item))
-            })
-        });
-        let chest_requests =
-            std::array::from_fn(|i| self.chest_slots.can_store[i].then_some(held[i]).flatten());
-        let chest_capacity =
-            super::shoulder_backpack::reserve_slots(&self.world, inventory, chest_requests);
-        for (i, cell) in chest_capacity.iter().enumerate() {
-            self.chest_slots.can_store[i] &= cell.is_some() || chest_merge_targets[i].is_some();
-        }
-        self.personal_card
-            .advance_downloads(tick.elapsed.as_secs_f32());
-        self.personal_card.load_pose(asset_cache);
-        self.personal_card.device_mode = device_opted_in;
-        let returned_to_belt = self.personal_card.update(
-            &body_input,
-            self.holsters.body_pose,
-            [crate::Handedness::Left, crate::Handedness::Right].map(|hand| {
-                let i = crate::vr_config::hand_slot(hand);
-                self.interaction.hand_available_for_body_slot(hand)
-                    && holster_actions[i].is_none()
-                    && chest_actions[i].is_none()
-                    && !self.shoulder_backpack.near[i]
-            }),
-            false
-                && !self.use_mode
-                && self.player_is_alive()
-                && self.player_controls_enabled
-                && interface,
-        );
-        if returned_to_belt {
-            effects.push(crate::scripts::script_util::announce(
-                self.world
-                    .borrow::<UniqueView<PlayerInfo>>()
-                    .unwrap()
-                    .entity_id,
-                "place_item",
-            ));
-        }
-        self.personal_card
-            .sample_hand(hands_input, player_pos, player_rot);
-        self.interaction
-            .reserve_body_tool_hands(self.personal_card.blocked);
-        let pouch_available = [crate::Handedness::Left, crate::Handedness::Right].map(|hand| {
-            self.interaction.hand_available_for_body_slot(hand)
-                && !self.personal_card.blocked[crate::vr_config::hand_slot(hand)]
-        });
-        let pouch_offers = std::array::from_fn(|i| {
-            pouch_available[i]
-                .then_some(pouch_weapons[i])
-                .flatten()
-                .and_then(|gun| super::reload::reserve_clip_for_pouch(&self.world, gun))
-        });
-        self.ammo_pouch.refusal_flash =
-            (self.ammo_pouch.refusal_flash - tick.elapsed.as_secs_f32()).max(0.0);
-        let pouch_actions = self.ammo_pouch.update(
-            &body_input,
-            self.holsters.body_pose,
-            held,
-            pouch_available,
-            pouch_weapons,
-            held.map(|item| {
-                item.is_some_and(|item| {
-                    super::reload::is_ammo_clip(&self.world, item)
-                        || super::reload::is_portable_battery(&self.world, item)
-                })
-            }),
-            pouch_offers,
-            body_gear && !self.use_mode,
-        );
-        let holster_contents = super::holsters::occupants(&self.world);
-        self.interaction
-            .set_body_anticipation(std::array::from_fn(|i| {
-                if !pouch_available[i] || held[i].is_some() {
-                    return None;
-                }
-                if self.ammo_pouch.near[i] {
-                    self.ammo_pouch.offers[i].map(|offer| offer.reserve)
-                } else {
-                    self.holsters.near[i]
-                        .and_then(|slot| holster_contents[slot])
-                        .or_else(|| {
-                            self.chest_slots.near[i]
-                                .and_then(|slot| self.chest_slots.occupants(&self.world)[slot])
-                        })
-                }
-            }));
-        let shoulder_slots = self.shoulder_backpack.near_slot;
-        let mut recalls = shoulder_weapons;
-        for i in 0..2 {
-            // An empty hand only enters a stocked shoulder.
-            if self.shoulder_backpack.entered[i] && (held[i].is_some() || pouch_available[i]) {
-                effects.push(Effect::HandHaptic {
-                    hand: if i == 0 {
-                        crate::Handedness::Left
-                    } else {
-                        crate::Handedness::Right
-                    },
-                    pulse: crate::haptics::SHOULDER_READY,
-                });
-            }
-        }
-        for i in 0..2 {
-            if !pouch_available[i] {
-                continue;
-            }
-            if let Some(slot) = self.shoulder_backpack.draws[i] {
-                if let Some(entity) = recalls[slot].take() {
-                    effects.push(Effect::GrabEntity {
-                        entity_id: entity,
-                        hand: if i == 0 {
-                            crate::Handedness::Left
-                        } else {
-                            crate::Handedness::Right
-                        },
-                        current_parent_id: Some(inventory),
-                    });
-                    self.vr_trigger_safe_latch[i] = Some(true);
-                    effects.push(Effect::ShowMessage {
-                        text: "Weapon drawn from backpack".to_owned(),
-                    });
-                }
-            }
-        }
-        for i in 0..2 {
-            self.ammo_pouch.refused[i] &= self.shoulder_backpack.keep_grip(i);
-            shoulder_releases[i] |= matches!(
-                pouch_actions[i],
-                Some(super::ammo_pouch::Action::Return { .. })
-            );
-        }
-        let merge_returns = std::array::from_fn::<_, 2, _>(|i| {
-            // Shoulder stows are untargeted deposits too. Reserve a matching
-            // stack before a free cell, just as returning ammo to the pouch
-            // does; otherwise the cell-targeted release bypasses auto-stacking.
-            if !shoulder_releases[i] {
-                return None;
-            }
-            let inventory = self
-                .world
-                .borrow::<UniqueView<PlayerInfo>>()
-                .unwrap()
-                .inventory_entity_id;
-            let item = held[i]?;
-            let target = find_mergeable_stack_anywhere(&self.world, inventory, item)?;
-            let grid = crate::inventory::grid_for(&self.world, inventory);
-            let contents =
-                crate::inventory::Inventory::from_container(&self.world, inventory, grid);
-            contents
-                .all_items()
-                .find(|item| item.entity == target)
-                .map(|item| (item.x, item.y))
-        });
-        let shoulder_collect = std::array::from_fn::<_, 2, _>(|i| {
-            shoulder_releases[i]
-                && held[i].is_some_and(|entity| {
-                    crate::scripts::script_util::is_always_collected(&self.world, entity)
-                        || crate::scripts::script_util::is_download_pickup(&self.world, entity)
-                })
-        });
-        let shoulder_cells = if (0..2).any(|i| {
-            (shoulder_releases[i]
-                && held[i].is_some_and(|entity| backpack_accepts_deposit(&self.world, entity)))
-                || matches!(
-                    chest_actions[i],
-                    Some(super::holsters::Action::Store { .. })
-                )
-        }) {
-            let inventory = self
-                .world
-                .borrow::<UniqueView<PlayerInfo>>()
-                .unwrap()
-                .inventory_entity_id;
-            super::shoulder_backpack::reserve_slots(
-                &self.world,
-                inventory,
-                std::array::from_fn(|i| {
-                    ((shoulder_releases[i] && !shoulder_collect[i] && merge_returns[i].is_none())
-                        || (chest_merge_targets[i].is_none()
-                            && matches!(
-                                chest_actions[i],
-                                Some(super::holsters::Action::Store { .. })
-                            )))
-                    .then_some(held[i])
-                    .flatten()
-                }),
-            )
-        } else {
-            [None; 2]
-        };
-        for i in 0..2 {
-            if let Some(super::holsters::Action::Store { entity, .. }) = chest_actions[i] {
-                if shoulder_cells[i].is_none() && chest_merge_targets[i].is_none() {
-                    self.chest_slots.retained.retain(i, entity);
-                    chest_actions[i] = Some(super::holsters::Action::Refuse { entity });
-                }
-            }
-        }
-        let mut shoulder_input = hands_input.clone();
-        for (i, hand) in [
-            &mut shoulder_input.left_hand,
-            &mut shoulder_input.right_hand,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if !held[i].is_some_and(|entity| {
-                crate::scripts::script_util::is_download_pickup(&self.world, entity)
-            }) {
-                self.download_release_disarmed[i] = false;
-                continue;
-            }
-            let tracked = crate::vr_support::GripPose {
-                position: hand.position,
-                rotation: hand.rotation,
-            }
-            .is_tracked()
-                && input_context
-                    .pose_tracking
-                    .is_none_or(|p| p.head && p.hands[i])
-                && hand.squeeze_value.is_finite();
-            if !tracked {
-                self.download_release_disarmed[i] = true;
-            } else if hand.squeeze_value >= 0.5 {
-                self.download_release_disarmed[i] = false;
-            }
-            if self.download_release_disarmed[i] {
-                hand.squeeze_value = 1.0;
-            }
-        }
-
-        for i in 0..2 {
-            if shoulder_releases[i] {
-                let accepted = shoulder_collect[i]
-                    || shoulder_cells[i].is_some()
-                    || merge_returns[i].is_some();
-                if !accepted {
-                    self.shoulder_backpack.retain(i, held[i].unwrap());
-                    self.ammo_pouch.refused[i] = matches!(
-                        pouch_actions[i],
-                        Some(super::ammo_pouch::Action::Return { .. })
-                    );
-                    if self.ammo_pouch.refused[i] {
-                        self.ammo_pouch.refusal_flash = 0.35;
-                    }
-                }
-                effects.push(Effect::ShowMessage {
-                    text: if shoulder_collect[i] {
-                        "Collected".to_owned()
-                    } else if accepted {
-                        "Stored in backpack".to_owned()
-                    } else {
-                        "Backpack full — item kept in hand. Squeeze to re-grip.".to_owned()
-                    },
-                });
-                if !accepted
-                    && !held[i].is_some_and(|entity| {
-                        crate::scripts::script_util::is_download_pickup(&self.world, entity)
-                    })
-                {
-                    effects.push(backpack_full_feedback(held[i].unwrap()));
-                }
-                tracing::info!(hand = i, entity = ?held[i], accepted, "shoulder backpack release");
-            }
-            if let Some(action) = holster_actions[i] {
-                use super::holsters::Action;
-                let refused = matches!(action, Action::Refuse { .. });
-                effects.push(Effect::ShowMessage {
-                    text: match action {
-                        Action::Store { .. } => "Weapon holstered",
-                        Action::Retrieve { .. } => "Weapon drawn",
-                        Action::Refuse { .. } => {
-                            "Holster occupied or item has no holster pose. Use a shoulder for other weapons. Squeeze to re-grip."
-                        }
-                    }
-                    .to_owned(),
-                });
-                if !matches!(action, Action::Store { .. }) {
-                    effects.push(Effect::PlaySound {
-                        handle: AudioHandle::new(),
-                        name: if refused { "repfail" } else { "bset" }.to_owned(),
-                        source: held[i],
-                        spatial: false,
-                    });
-                }
-                if matches!(action, Action::Retrieve { .. }) {
-                    let hand = if i == 0 {
-                        &mut shoulder_input.left_hand
-                    } else {
-                        &mut shoulder_input.right_hand
-                    };
-                    hand.squeeze_value = 0.0;
-                    hand.trigger_value = 0.0;
-                    self.vr_trigger_safe_latch[i] = Some(true);
-                }
-            }
-            if let Some(action) = chest_actions[i] {
-                use super::holsters::Action;
-                if matches!(action, Action::Refuse { .. }) {
-                    self.chest_slots.flash_refusal(i);
-                }
-                if !matches!(action, Action::Store { .. }) {
-                    let refused = matches!(action, Action::Refuse { .. });
-                    effects.push(Effect::ShowMessage { text: if refused {
-                        "Chest slot unavailable, item incompatible, or backpack full. Squeeze to re-grip."
-                    } else { "Item drawn from chest" }.to_owned() });
-                    effects.push(Effect::PlaySound {
-                        handle: AudioHandle::new(),
-                        name: if refused { "repfail" } else { "bset" }.to_owned(),
-                        source: held[i],
-                        spatial: false,
-                    });
-                    effects.push(Effect::HandHaptic {
-                        hand: [crate::Handedness::Left, crate::Handedness::Right][i],
-                        pulse: crate::haptics::HapticPulse {
-                            amplitude: if refused { 0.6 } else { 0.3 },
-                            duration_ms: if refused { 100 } else { 40 },
-                        },
-                    });
-                }
-                if matches!(action, Action::Retrieve { .. }) {
-                    self.vr_trigger_safe_latch[i] = Some(true);
-                }
-            }
-            // Only an occupied mount owns a draw; empty targets leave world
-            // grabs alone, and another hand interaction keeps its input.
-            if held[i].is_none()
-                && self.interaction.hand_available_for_body_slot(
-                    [crate::Handedness::Left, crate::Handedness::Right][i],
-                )
-                && ((self.chest_slots.near[i]
-                    .and_then(|slot| chest_contents[slot])
-                    .is_some()
-                    && [
-                        body_input.left_hand.squeeze_value,
-                        body_input.right_hand.squeeze_value,
-                    ][i] >= 0.5)
-                    || matches!(
-                        chest_actions[i],
-                        Some(super::holsters::Action::Retrieve { .. })
-                    ))
-            {
-                let hand = if i == 0 {
-                    &mut shoulder_input.left_hand
-                } else {
-                    &mut shoulder_input.right_hand
-                };
-                hand.squeeze_value = 0.0;
-                hand.trigger_value = 0.0;
-            }
-            if self.ammo_pouch.blocks_grab[i]
-                || (pouch_available[i] && self.shoulder_backpack.blocks_grab[i])
-            {
-                let hand = if i == 0 {
-                    &mut shoulder_input.left_hand
-                } else {
-                    &mut shoulder_input.right_hand
-                };
-                hand.squeeze_value = 0.0;
-                hand.trigger_value = 0.0;
-            }
-            match pouch_actions[i] {
-                Some(super::ammo_pouch::Action::Withdraw { weapon }) => {
-                    effects.push(Effect::WithdrawPouchAmmo {
-                        weapon,
-                        hand: if i == 0 {
-                            crate::Handedness::Left
-                        } else {
-                            crate::Handedness::Right
-                        },
-                    });
-                }
-                Some(super::ammo_pouch::Action::Empty) => {
-                    self.ammo_pouch.refusal_flash = 0.35;
-                    effects.push(Effect::ShowMessage {
-                        text: "No compatible ammo in reserve".to_owned(),
-                    });
-                    effects.push(Effect::PlaySound {
-                        handle: AudioHandle::new(),
-                        name: "repfail".to_owned(),
-                        source: None,
-                        spatial: false,
-                    });
-                }
-                _ => {}
-            }
-            if self.shoulder_backpack.keep_grip(i)
-                || self.holsters.retained.keep_grip(i)
-                || self.chest_slots.retained.keep_grip(i)
-            {
-                match i {
-                    0 => shoulder_input.left_hand.squeeze_value = 1.0,
-                    _ => shoulder_input.right_hand.squeeze_value = 1.0,
-                }
-            }
-        }
-        for (i, hand) in [
-            &mut shoulder_input.left_hand,
-            &mut shoulder_input.right_hand,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if self.personal_card.blocked[i] {
-                hand.squeeze_value = 0.0;
-                hand.trigger_value = 0.0;
-                hand.a_value = 0.0;
-            }
-        }
-        for (i, action) in implant_actions.iter().enumerate() {
-            let hand = if i == 0 {
-                &mut shoulder_input.left_hand
-            } else {
-                &mut shoulder_input.right_hand
-            };
-            // Body storage may retain a consumed grip from a previous frame.
-            // Held implants keep their UI-safe grip; empty socket hands remove
-            // through the explicit action, never through an ordinary world grab.
-            if self.implant_sockets.reserved[i] {
-                hand.squeeze_value = if held[i].is_some() {
-                    [&hands_input.left_hand, &hands_input.right_hand][i].squeeze_value
-                } else {
-                    0.0
-                };
-            }
-            if self.implant_sockets.retained.keep_grip(i) {
-                hand.squeeze_value = 1.0;
-            }
-            if matches!(action, Some(super::implant_sockets::Action::Remove { .. })) {
-                hand.squeeze_value = 0.0;
-            }
-            if let Some(super::implant_sockets::Action::Refuse { reason }) = action {
-                effects.push(Effect::ShowMessage {
-                    text: format!("{reason} Squeeze again to release the implant."),
-                });
-                effects.push(Effect::PlaySound {
-                    handle: AudioHandle::new(),
-                    source: None,
-                    name: "repfail".to_owned(),
-                    spatial: false,
-                });
-            }
-        }
-        let held_now = self.interaction.held_entities();
-        let pull_enabled = false
-            && crate::dev_params::get_bool(crate::dev_params::VR_FREE_HAND_PSI_PULL)
-            && !self.use_mode
-            && self.psi_carousel.is_none()
-            && self.player_is_alive()
-            && self.player_controls_enabled;
-        if let Some(effect) = self.free_hand_psi_pull.update(
-            &self.world,
-            &mut shoulder_input,
-            [held_now.0, held_now.1],
-            player_pos,
-            player_rot,
-            pull_enabled,
-            [
-                input_context.left_hand.trigger_value > 0.5,
-                input_context.right_hand.trigger_value > 0.5,
-            ],
-            |amp, position, forward| {
-                crate::psi_pull::resolve_ray(
-                    &self.world,
-                    &self.physics,
-                    amp,
-                    Point3::new(position.x, position.y, position.z),
-                    forward,
-                )
-                .is_some()
-            },
-        ) {
-            effects.push(effect);
-        }
-        let hands_input = &shoulder_input;
-
-        // Opening a hand over the inventory strip puts the item in the
-        // backpack instead of on the floor. Decided from the input the hands
-        // are about to see, so the release this claims is exactly the release
-        // `VirtualHand` performs. (A hand that is holding something never has
-        // its squeeze swallowed - `update_squeeze_swallow` drops the latch the
-        // moment the hand is full - so this cannot fire on a masked squeeze.)
-        //
-        let strip_deposits = strip_deposit_entities(
-            // A physical holster owns its release even if the hand's ray
-            // also crosses the inventory. Never give one item two owners.
-            std::array::from_fn(|i| {
-                on_strip[i] && holster_actions[i].is_none() && chest_actions[i].is_none()
-            }),
-            [left_hand_held, right_hand_held],
-            [
-                hands_input.left_hand.squeeze_value < crate::ui::VR_TRIGGER_THRESHOLD,
-                hands_input.right_hand.squeeze_value < crate::ui::VR_TRIGGER_THRESHOLD,
-            ],
-        );
-        // Downloads and logs never occupy backpack cells. The later actual
-        // release pass also claims downloads outside the strip/shoulder zones.
-        let (collect, store): (Vec<_>, Vec<_>) = strip_deposits.iter().partition(|entity_id| {
-            crate::scripts::script_util::is_always_collected(&self.world, **entity_id)
-        });
-        let mut collect: Vec<_> = collect.into_iter().copied().collect();
-        collect.extend(
-            (0..2)
-                .filter(|i| shoulder_collect[*i])
-                .filter_map(|i| held[i]),
-        );
-        // The cell the depositing hand's ray was over, for a stored item -
-        // whichever on-strip slot actually held it. `None` (a ray gone off
-        // the strip between resolving `strip_cell` and here, or generally
-        // defensive) falls back to `StoreItem`'s first-free placement.
-        let cell_for = |entity_id: EntityId| -> Option<(usize, usize)> {
-            // `strip_cell[slot]` is only ever set alongside `on_strip[slot]`
-            // (see above), so matching on it alone is enough.
-            (0..2).find_map(|slot| {
-                ([left_hand_held, right_hand_held][slot] == Some(entity_id))
-                    .then_some(strip_cell[slot])
-                    .flatten()
-            })
-        };
-        // A stored item needs backpack room, so nothing is claimed unless the
-        // backpack can actually take *that* item - a release is never
-        // suppressed into an item that lands nowhere. Checked per item (a
-        // full pack can still take a stackable that merges), so a two-hand
-        // release can claim one item and leave the other to its ordinary
-        // world drop. A collected one never enters the pack (its Frob awards
-        // and destroys it), so it is claimed either way.
-        let mut store: Vec<(EntityId, Option<(usize, usize)>)> = store
-            .into_iter()
-            .filter(|entity_id| {
-                let accepted = backpack_accepts_deposit(&self.world, **entity_id);
-                if !accepted {
-                    effects.push(backpack_full_feedback(**entity_id));
-                }
-                accepted
-            })
-            .map(|entity_id| (*entity_id, cell_for(*entity_id)))
-            .collect();
-
-        store.extend((0..2).filter_map(|i| {
-            (shoulder_releases[i] && (shoulder_cells[i].is_some() || merge_returns[i].is_some()))
-                .then_some((held[i]?, merge_returns[i].or(shoulder_cells[i])))
-        }));
-
         let neutral_eye = death_camera::EyePose::flat(
             crate::player_eye_height_for(self.player_handle.is_crouched()),
             tracked_head_rotation,
@@ -7290,26 +6111,8 @@ impl MissionCore {
                 )
             });
 
-        // VR drives two hands; flat drives a single first-person weapon
-        // controller. Both feed the same effect-processing path.
-        let reserved_releases: Vec<_> = implant_actions
-            .iter()
-            .filter_map(|action| match action {
-                Some(super::implant_sockets::Action::Install { entity, .. }) => Some(*entity),
-                _ => None,
-            })
-            .chain(store.iter().map(|(entity, _)| *entity))
-            .chain(collect.iter().copied())
-            .chain(
-                holster_actions
-                    .iter()
-                    .chain(chest_actions.iter())
-                    .filter_map(|action| match action {
-                        Some(super::holsters::Action::Store { entity, .. }) => Some(*entity),
-                        _ => None,
-                    }),
-            )
-            .collect();
+        let reserved_releases: Vec<EntityId> = Vec::new();
+
         effects.extend(self.flat_weapon_animation.advance(
             &mut self.world,
             self.interaction.viewmodel_entity(),
@@ -7353,158 +6156,7 @@ impl MissionCore {
         // like the shoulder slot's ready tick.
         let tool_ready = self.tool_ready_targets(game_options.presentation_mode);
         self.tool_ready = tool_ready;
-        self.personal_card.grip = self
-            .personal_card
-            .hand
-            .and_then(|hand| self.interaction.personal_card_grip(hand));
-        // Claim actual hand releases, anywhere, before backpack/world ownership
-        // changes. The shared rewrite preserves Drop and removes competing offers.
-        let downloads: Vec<_> = interaction_msgs
-            .iter()
-            .filter_map(|effect| match effect {
-                VirtualHandEffect::DropItem { entity_id, .. }
-                    if false
-                        && crate::scripts::script_util::is_download_pickup(
-                            &self.world,
-                            *entity_id,
-                        ) =>
-                {
-                    Some(*entity_id)
-                }
-                _ => None,
-            })
-            .collect();
-        collect.extend(downloads.iter().copied());
-        store.retain(|(entity, _)| !collect.contains(entity));
-        for entity in &downloads {
-            if let Some(slot) = held.iter().position(|held| *held == Some(*entity)) {
-                effects.extend(crate::scripts::script_util::dissolve_cue(
-                    &self.world,
-                    *entity,
-                    true,
-                ));
-                let source = [&input_context.left_hand, &input_context.right_hand][slot];
-                self.personal_card
-                    .download(crate::virtual_hand::hand_world_position(
-                        player_pos,
-                        player_rot,
-                        source.position,
-                    ));
-                effects.push(Effect::HandHaptic {
-                    hand: if slot == 0 {
-                        crate::Handedness::Left
-                    } else {
-                        crate::Handedness::Right
-                    },
-                    pulse: crate::haptics::HapticPulse {
-                        amplitude: 0.5,
-                        duration_ms: 70,
-                    },
-                });
-                effects.push(Effect::PlaySound {
-                    handle: AudioHandle::new(),
-                    source: None,
-                    name: "bset".to_owned(),
-                    spatial: false,
-                });
-            }
-        }
-        rewrite_inventory_release(&mut interaction_msgs, &store, &collect);
 
-        for (i, action) in chest_actions.into_iter().enumerate() {
-            match action {
-                Some(super::holsters::Action::Store { entity, slot }) => {
-                    interaction_msgs.retain(|effect| !matches!(effect, VirtualHandEffect::OutMessage { message }
-                        if matches!(message.payload, MessagePayload::ProvideForConsumption { entity: offered } if offered == entity)));
-                    for effect in &mut interaction_msgs {
-                        if matches!(effect, VirtualHandEffect::DropItem { entity_id, .. } if *entity_id == entity)
-                        {
-                            *effect = VirtualHandEffect::StoreChestItem {
-                                entity_id: entity,
-                                slot,
-                                cell: shoulder_cells[i],
-                                hand: i,
-                            };
-                        }
-                    }
-                }
-                Some(super::holsters::Action::Retrieve { entity, slot }) => {
-                    effects.push(Effect::WithdrawChestItem {
-                        source: entity,
-                        slot,
-                        hand: [crate::Handedness::Left, crate::Handedness::Right][i],
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        // Holstering claims only this release, including its consumption offer.
-        for (i, action) in holster_actions.into_iter().enumerate() {
-            let Some(action) = action else {
-                continue;
-            };
-            match action {
-                super::holsters::Action::Store { entity, slot } => {
-                    interaction_msgs.retain(|effect| !matches!(effect, VirtualHandEffect::OutMessage { message }
-                        if matches!(message.payload, MessagePayload::ProvideForConsumption { entity: offered } if offered == entity)));
-                    for effect in &mut interaction_msgs {
-                        if matches!(effect, VirtualHandEffect::DropItem { entity_id, .. } if *entity_id == entity)
-                        {
-                            *effect = VirtualHandEffect::HolsterItem {
-                                entity_id: entity,
-                                slot,
-                            };
-                        }
-                    }
-                }
-                super::holsters::Action::Retrieve { entity, .. } => {
-                    effects.push(Effect::GrabEntity {
-                        entity_id: entity,
-                        hand: if i == 0 {
-                            crate::vr_config::Handedness::Left
-                        } else {
-                            crate::vr_config::Handedness::Right
-                        },
-                        current_parent_id: None,
-                    });
-                }
-                super::holsters::Action::Refuse { .. } => {}
-            }
-        }
-        for (hand, action) in implant_actions.into_iter().enumerate() {
-            match action {
-                Some(super::implant_sockets::Action::Install { entity, slot }) => {
-                    interaction_msgs.retain(|effect| !matches!(effect, VirtualHandEffect::OutMessage { message }
-                        if matches!(message.payload, MessagePayload::ProvideForConsumption { entity: offered } if offered == entity)));
-                    for effect in &mut interaction_msgs {
-                        if matches!(effect, VirtualHandEffect::DropItem { entity_id, .. }
-                            | VirtualHandEffect::StoreItem { entity_id }
-                            | VirtualHandEffect::StoreItemAtCell { entity_id, .. } if *entity_id == entity)
-                        {
-                            *effect = VirtualHandEffect::InstallImplant {
-                                entity_id: entity,
-                                slot,
-                                hand,
-                            };
-                        }
-                    }
-                }
-                Some(super::implant_sockets::Action::Remove { entity }) => {
-                    effects.push(Effect::UnequipImplant { entity_id: entity });
-                    effects.push(Effect::GrabEntity {
-                        entity_id: entity,
-                        hand: if hand == 0 {
-                            crate::Handedness::Left
-                        } else {
-                            crate::Handedness::Right
-                        },
-                        current_parent_id: None,
-                    });
-                }
-                _ => {}
-            }
-        }
         // A chemical released onto a specimen that takes it is used up where
         // the hand held it, never dropped first (a drop moves it off the grip
         // and its dissolve would show elsewhere). The release goes straight
@@ -7578,30 +6230,6 @@ impl MissionCore {
         self.psi_pull_aim = self.psi_pull_aim_targets();
         self.physics
             .set_held_target_frame(player_pos, player_rot, hands_input.tracking);
-        // Remember only successful shoulder deposits, after the shared storage
-        // transition has committed real backpack ownership. Other items and
-        // refused deposits cannot overwrite a weapon shortcut.
-        if shoulder_releases.iter().any(|released| *released) {
-            let contents = crate::inventory::Inventory::from_container(
-                &self.world,
-                inventory,
-                crate::inventory::grid_for(&self.world, inventory),
-            );
-            let remembered: Vec<_> = (0..2)
-                .filter_map(|i| {
-                    let entity = held[i]?;
-                    let slot = shoulder_slots[i]?;
-                    (shoulder_releases[i]
-                        && crate::virtual_hand::is_wieldable_weapon(&self.world, entity)
-                        && contents.all_items().any(|item| item.entity == entity))
-                    .then_some((entity, slot))
-                })
-                .collect();
-            for (entity, slot) in remembered {
-                super::shoulder_backpack::remember(&mut self.world, entity, slot);
-            }
-        }
-
         // Weight is an independent VR experiment. Configure the existing held
         // drive after acquisition/fitting so all physics substeps share it.
         let (left, right) = self.interaction.held_entities();
@@ -7781,9 +6409,7 @@ impl MissionCore {
             let item = hand_items[slot]?;
             let point = ray.canvas_hit?;
             // A release over a paperdoll holster well holsters instead.
-            if !self.flat_ui.strip_contains(point)
-                || (body_gear && self.flat_ui.holster_slot_at(point).is_some())
-            {
+            if !self.flat_ui.strip_contains(point) {
                 return None;
             }
             let container = self.flat_ui.strip_entity()?;
@@ -9706,21 +8332,12 @@ impl MissionCore {
         let held = [player.left_hand_entity_id, player.right_hand_entity_id];
         drop(player);
         let mut targets = Vec::new();
-        for (hand, amp) in held.into_iter().enumerate() {
+        for amp in held {
             let Some(amp) = amp else { continue };
             if crate::psi_amp_selection::selected_power(&self.world, amp)
                 .is_some_and(|p| p.template_id == crate::psi_pull::POWER)
             {
                 targets.extend(crate::psi_pull::resolve(&self.world, &self.physics, amp));
-            }
-            if let Some((position, forward)) = self.free_hand_psi_pull.source(1 - hand, amp) {
-                targets.extend(crate::psi_pull::resolve_ray(
-                    &self.world,
-                    &self.physics,
-                    amp,
-                    Point3::new(position.x, position.y, position.z),
-                    forward,
-                ));
             }
         }
         targets
@@ -9748,16 +8365,7 @@ impl MissionCore {
             .get(&item)
             .and_then(|h| self.physics.get_position(*h));
         let destination = match flight.hand {
-            Some(hand) => self
-                .free_hand_psi_pull
-                .source(hand, flight.amp)
-                .filter(|_| {
-                    let held = self.interaction.held_entities();
-                    [held.0, held.1][hand].is_none()
-                        && crate::dev_params::get_bool(crate::dev_params::VR_FREE_HAND_PSI_PULL)
-                        && !self.use_mode
-                })
-                .map(|(position, _)| position),
+            Some(_) => None,
             None => crate::psi_pull::amp_position(&self.world, flight.amp),
         };
         let valid = self.player_is_alive()
@@ -12301,7 +10909,7 @@ impl MissionCore {
                     released,
                 } => {
                     let scanned = self.flat_ui.device
-                        && self.personal_card.last_scan == Some(entity_id)
+                        && false
                         && self
                             .world
                             .borrow::<View<PropPosition>>()
@@ -13506,23 +12114,7 @@ impl MissionCore {
                         continue;
                     }
                     let target = match hand {
-                        Some(hand) => self
-                            .free_hand_psi_pull
-                            .source(hand, amp)
-                            .filter(|_| {
-                                let held = self.interaction.held_entities();
-                                self.interaction.is_holding(amp)
-                                    && [held.0, held.1].get(hand).is_some_and(Option::is_none)
-                            })
-                            .and_then(|(position, forward)| {
-                                crate::psi_pull::resolve_ray(
-                                    &self.world,
-                                    &self.physics,
-                                    amp,
-                                    Point3::new(position.x, position.y, position.z),
-                                    forward,
-                                )
-                            }),
+                        Some(_) => None,
                         None => crate::psi_pull::resolve(&self.world, &self.physics, amp),
                     };
                     let Some(target) = target else {
@@ -18314,11 +16906,7 @@ impl MissionCore {
             let mut objects = if crate::scripts::gui::psi_hack::session(&self.world).is_some() {
                 Vec::new()
             } else {
-                super::mfd_device::body(
-                    asset_cache,
-                    super::mfd_device::body_frame(panel),
-                    self.personal_card.hand,
-                )
+                super::mfd_device::body(asset_cache, super::mfd_device::body_frame(panel), None)
             };
             let seconds = self.player_now().as_secs_f32();
             if let Some(model) = self
@@ -18656,19 +17244,6 @@ impl MissionCore {
         self.teleport_player(position)
     }
 
-    fn body_pouch_readout(&self) -> super::body_gear_feedback::PouchReadout {
-        let (left, right) = self.interaction.held_entities();
-        super::body_gear_feedback::PouchReadout::resolve(
-            &self.world,
-            [left, right],
-            [crate::Handedness::Left, crate::Handedness::Right]
-                .map(|hand| self.interaction.hand_available_for_body_slot(hand)),
-            self.ammo_pouch.near,
-            self.ammo_pouch.refused.iter().any(|refused| *refused),
-            self.ammo_pouch.enabled,
-        )
-    }
-
     fn grab_entity_into_hand(
         &mut self,
         asset_cache: &mut AssetCache,
@@ -18941,140 +17516,6 @@ impl MissionCore {
                         to: entity_id,
                     });
                 }
-                VirtualHandEffect::StoreChestItem {
-                    entity_id,
-                    slot,
-                    cell,
-                    hand,
-                } => {
-                    let inventory = self
-                        .world
-                        .borrow::<UniqueView<PlayerInfo>>()
-                        .unwrap()
-                        .inventory_entity_id;
-                    let stored = if let Some(cell) = cell {
-                        move_live_entity_into_container_at_cell(
-                            &mut self.world,
-                            inventory,
-                            entity_id,
-                            cell,
-                        )
-                        .then_some(entity_id)
-                    } else {
-                        self.chest_slots.occupants(&self.world)[slot]
-                            .filter(|stored| can_combine(&self.world, *stored, entity_id))
-                            .map(|stored| {
-                                self.merge_dropped_stack(stored, entity_id);
-                                stored
-                            })
-                    };
-                    if let Some(entity_id) = stored {
-                        self.make_un_physical(entity_id);
-                        super::holsters::Holsters::assign_chest_slot(
-                            &mut self.world,
-                            entity_id,
-                            slot,
-                        );
-                        self.script_world.dispatch(Message {
-                            to: entity_id,
-                            payload: MessagePayload::Drop,
-                        });
-                        deferred.push(crate::scripts::script_util::announce(
-                            entity_id,
-                            "place_item",
-                        ));
-                        deferred.push(Effect::HandHaptic {
-                            hand: [crate::Handedness::Left, crate::Handedness::Right][hand],
-                            pulse: crate::haptics::HapticPulse {
-                                amplitude: 0.4,
-                                duration_ms: 55,
-                            },
-                        });
-                    } else {
-                        // Capacity can change through another effect in the same frame.
-                        // Recover the exact entity into its original hand.
-                        self.chest_slots.retained.retain(hand, entity_id);
-                        self.chest_slots.flash_refusal(hand);
-                        deferred.push(Effect::GrabEntity {
-                            entity_id,
-                            hand: [crate::Handedness::Left, crate::Handedness::Right][hand],
-                            current_parent_id: None,
-                        });
-                        deferred.push(backpack_full_feedback(entity_id));
-                    }
-                }
-                VirtualHandEffect::HolsterItem { entity_id, slot } => {
-                    self.holster(entity_id, slot);
-                    deferred.push(crate::scripts::script_util::announce(
-                        entity_id,
-                        "place_item",
-                    ));
-                    self.script_world.dispatch(Message {
-                        to: entity_id,
-                        payload: MessagePayload::Drop,
-                    });
-                }
-                VirtualHandEffect::InstallImplant {
-                    entity_id,
-                    slot,
-                    hand,
-                } => {
-                    let inventory = self
-                        .world
-                        .borrow::<UniqueView<PlayerInfo>>()
-                        .unwrap()
-                        .inventory_entity_id;
-                    let valid = crate::implants::validate_socket(&self.world, entity_id, slot);
-                    if valid.is_ok()
-                        && self
-                            .drop_entity_into_container(inventory, entity_id)
-                            .is_some()
-                    {
-                        // Preserve the normal Drop-before-equip order in the script queue.
-                        self.script_world.dispatch(Message {
-                            to: entity_id,
-                            payload: MessagePayload::Drop,
-                        });
-                        self.script_world.dispatch(Message {
-                            to: entity_id,
-                            payload: MessagePayload::EquipImplant { slot: slot as u8 },
-                        });
-                        deferred.push(Effect::HandHaptic {
-                            hand: if hand == 0 {
-                                crate::Handedness::Left
-                            } else {
-                                crate::Handedness::Right
-                            },
-                            pulse: crate::haptics::HapticPulse {
-                                amplitude: 0.4,
-                                duration_ms: 60,
-                            },
-                        });
-                        deferred.push(Effect::PlaySound {
-                            handle: AudioHandle::new(),
-                            source: None,
-                            name: "bset".to_owned(),
-                            spatial: false,
-                        });
-                    } else {
-                        self.implant_sockets.retained.retain(hand, entity_id);
-                        deferred.push(Effect::GrabEntity {
-                            entity_id,
-                            hand: if hand == 0 {
-                                crate::Handedness::Left
-                            } else {
-                                crate::Handedness::Right
-                            },
-                            current_parent_id: None,
-                        });
-                        deferred.push(Effect::ShowMessage {
-                            text: format!(
-                                "{} Squeeze again to release the implant.",
-                                valid.err().unwrap_or("The backpack is full.")
-                            ),
-                        });
-                    }
-                }
                 VirtualHandEffect::StoreItem { entity_id }
                 | VirtualHandEffect::StoreWorldPickup { entity_id } => {
                     // A merge destroys entity_id. Resolve authored name/count
@@ -19104,25 +17545,6 @@ impl MissionCore {
                         } else {
                             deferred.extend(feedback);
                         }
-                    } else {
-                        deferred.push(backpack_full_feedback(entity_id));
-                        self.restore_refused_store_to_world(entity_id);
-                    }
-                }
-                VirtualHandEffect::StoreItemAtCell { entity_id, cell } => {
-                    let inventory_entity = self
-                        .world
-                        .borrow::<UniqueView<PlayerInfo>>()
-                        .map(|player| player.inventory_entity_id)
-                        .ok();
-                    let stored = inventory_entity.is_some_and(|inventory_entity| {
-                        self.drop_entity_into_container_at_cell(inventory_entity, entity_id, cell)
-                    });
-                    if stored {
-                        deferred.push(crate::scripts::script_util::announce(
-                            inventory_entity.unwrap(),
-                            "place_item",
-                        ));
                     } else {
                         deferred.push(backpack_full_feedback(entity_id));
                         self.restore_refused_store_to_world(entity_id);
@@ -21044,43 +19466,11 @@ impl crate::game_scene::DebuggableScene for MissionCore {
         let mut feedback = self.interaction.hand_feedback_diagnostics();
         if let Some(object) = feedback.as_object_mut() {
             object.insert("rapiers".to_owned(), self.rapier_feedback.diagnostics());
-            object.insert("body_gear".to_owned(), serde_json::json!({
-                "personal_card": {
-                    "hand": self.personal_card.hand,
-                    "center": self.personal_card.center.map(|v| [v.x, v.y, v.z]),
-                    "scans": self.personal_card.scans,
-                    "last_scan": self.personal_card.last_scan.map(|e| e.inner() as i32),
-                },
-                "shoulder_weapons": self.world.borrow::<UniqueView<PlayerInfo>>().ok().map(|player| super::shoulder_backpack::weapons(&self.world, player.inventory_entity_id).map(|item| item.map(|id| id.inner() as i32))),
-                "pouch": self.body_pouch_readout(),
-                "holsters": super::holsters::occupants(&self.world).map(|item| super::body_gear_feedback::HolsterReadout::resolve(&self.world, item)),
-            }));
         }
-        if let (Some(object), Ok(player)) = (
+        if let (Some(object), Ok(_player)) = (
             feedback.as_object_mut(),
             self.world.borrow::<UniqueView<PlayerInfo>>(),
         ) {
-            object.insert(
-                "ammo_pouch".to_owned(),
-                self.ammo_pouch.diagnostics(player.pos, player.rotation),
-            );
-            object.insert(
-                "holsters".to_owned(),
-                self.holsters
-                    .diagnostics(&self.world, player.pos, player.rotation),
-            );
-            object.insert(
-                "chest_slots".to_owned(),
-                self.chest_slots
-                    .diagnostics(&self.world, player.pos, player.rotation),
-            );
-            object.insert("implant_sockets".to_owned(), serde_json::json!({
-                "centers": self.interaction.implant_socket_frames(&self.world).map(|frame| frame.map(|f| { let p = f.w.truncate(); [p.x, p.y, p.z] })),
-                "enabled_slots": crate::implants::capacity(&self.world),
-                "locked": ([0, 1].map(|slot| crate::implants::socket_locked(&self.world, slot))),
-                "items": crate::implants::equipped(&self.world).map(|item| item.map(|id| id.inner() as i32)),
-                "near": self.implant_sockets.near,
-            }));
             object.insert(
                 "haptics".to_owned(),
                 serde_json::to_value(
@@ -21090,21 +19480,6 @@ impl crate::game_scene::DebuggableScene for MissionCore {
                         .unwrap(),
                 )
                 .unwrap(),
-            );
-            object.insert(
-                "glove_contacts".to_owned(),
-                serde_json::json!({
-                    "centers": self.body_hand_contacts.map(|c| c.map(|c| {
-                        let p = player.pos + player.rotation.rotate_vector(c);
-                        [p.x, p.y, p.z]
-                    })),
-                    "radius": super::body_inventory::hand_radius(),
-                }),
-            );
-            object.insert(
-                "shoulder_backpack".to_owned(),
-                self.shoulder_backpack
-                    .diagnostics(player.pos, player.rotation),
             );
         }
         feedback
@@ -22813,441 +21188,6 @@ mod player_death_tests {
 }
 
 #[cfg(test)]
-mod vr_squeeze_swallow_tests {
-    use super::update_squeeze_swallow;
-
-    const LEFT: usize = 0;
-    const RIGHT: usize = 1;
-
-    /// The whole point of the latch: a squeeze that started on the panel keeps
-    /// being swallowed after the ray leaves it (and after the interface
-    /// closes), so it can never reach through into a world grab. Without the
-    /// latch the mask is recomputed per frame and vanishes the instant the
-    /// claim does - while `VirtualHand` grabs on the squeeze *level*.
-    #[test]
-    fn a_squeeze_begun_on_the_panel_never_reaches_the_world() {
-        let mut latched = [false; 2];
-        // On the panel, hand empty, squeezing: claimed.
-        update_squeeze_swallow(&mut latched, [true, false], [true, true], [true, false]);
-        assert!(latched[LEFT]);
-        // Ray slips off the panel - still swallowed.
-        update_squeeze_swallow(&mut latched, [true, false], [true, true], [false, false]);
-        assert!(latched[LEFT]);
-        // The interface closes (nothing claims anything) - still swallowed.
-        update_squeeze_swallow(&mut latched, [true, false], [true, true], [false, false]);
-        assert!(latched[LEFT]);
-        // Released at last: the next squeeze is the player's own again.
-        update_squeeze_swallow(&mut latched, [false, false], [true, true], [false, false]);
-        assert!(!latched[LEFT]);
-        update_squeeze_swallow(&mut latched, [true, false], [true, true], [false, false]);
-        assert!(
-            !latched[LEFT],
-            "a squeeze begun off the panel is the world's"
-        );
-    }
-
-    /// A hand that just took an item off the panel stops being masked, or the
-    /// mask would read as a release and drop what it just took.
-    #[test]
-    fn taking_an_item_hands_the_squeeze_back() {
-        let mut latched = [false; 2];
-        update_squeeze_swallow(&mut latched, [false, true], [true, true], [false, true]);
-        assert!(latched[RIGHT]);
-        // The grab landed: the hand is no longer empty, squeeze still held.
-        update_squeeze_swallow(&mut latched, [false, true], [true, false], [false, true]);
-        assert!(
-            !latched[RIGHT],
-            "a hand holding something must see its own squeeze"
-        );
-    }
-
-    /// Each hand latches on its own: the off-panel hand keeps world grabbing.
-    #[test]
-    fn the_off_panel_hand_is_untouched() {
-        let mut latched = [false; 2];
-        update_squeeze_swallow(&mut latched, [true, true], [true, true], [true, false]);
-        assert_eq!(latched, [true, false]);
-    }
-}
-
-#[cfg(test)]
-mod vr_trigger_safe_tests {
-    use super::{latch_trigger_safe, trigger_safe_mask};
-
-    const LEFT: usize = 0;
-    const RIGHT: usize = 1;
-
-    const NEITHER: [bool; 2] = [false, false];
-    const BOTH: [bool; 2] = [true, true];
-
-    /// The bug this rule exists to fix: with the interface up, a hand that is
-    /// not pointing at the panel and is not holding a weapon must keep its
-    /// trigger, because that trigger is the world interact (Frob) gesture -
-    /// not only weapon fire. Safing the weapon by zeroing both triggers took
-    /// the interact with it.
-    #[test]
-    fn an_off_panel_empty_hand_keeps_its_trigger() {
-        let mask = trigger_safe_mask(true, NEITHER, NEITHER);
-        assert_eq!(
-            mask, NEITHER,
-            "an empty hand off the panel must still be able to frob the world"
-        );
-    }
-
-    /// The pointer bridge: a hand on the panel is a UI pointer, so its trigger
-    /// is the click and must not also reach through into the world.
-    #[test]
-    fn a_hand_on_the_panel_is_masked() {
-        assert_eq!(
-            trigger_safe_mask(true, [true, false], NEITHER),
-            [true, false]
-        );
-    }
-
-    /// Weapons stay safed - wielded and visible, but they cannot fire while
-    /// the interface is up, on the panel or off it.
-    #[test]
-    fn a_wielding_hand_is_safed_wherever_it_points() {
-        assert_eq!(
-            trigger_safe_mask(true, NEITHER, [false, true]),
-            [false, true]
-        );
-        assert_eq!(
-            trigger_safe_mask(true, [false, true], [false, true]),
-            [false, true]
-        );
-    }
-
-    /// Per hand: one hand may be safed while the other still interacts.
-    #[test]
-    fn the_hands_are_masked_independently() {
-        // Left wields a weapon, right is empty and off the panel.
-        let mask = trigger_safe_mask(true, NEITHER, [true, false]);
-        assert!(mask[LEFT], "the wielding hand cannot fire");
-        assert!(!mask[RIGHT], "the free hand can still frob");
-    }
-
-    /// With the interface closed nothing is masked by the mode itself (the
-    /// across-exit swallow is ORed in by the caller, outside this rule).
-    #[test]
-    fn a_closed_interface_masks_nothing() {
-        assert_eq!(trigger_safe_mask(false, BOTH, BOTH), NEITHER);
-    }
-
-    /// The latch's reason to exist: a click begun on the panel keeps being
-    /// masked after the ray leaves it, so it can never turn into a world Frob
-    /// partway through. Without it the hand sees a fresh rising edge - the
-    /// player never released the trigger - and frobs whatever it now points at.
-    #[test]
-    fn a_pull_begun_on_the_panel_never_reaches_the_world() {
-        let mut latched = [None; 2];
-        // Pull starts with the ray on the panel: masked.
-        assert!(latch_trigger_safe(&mut latched, [true, false], [true, false])[LEFT]);
-        // Ray slides off the panel, trigger still held - still masked.
-        assert!(latch_trigger_safe(&mut latched, [true, false], NEITHER)[LEFT]);
-        // Released: the latch drops and the next pull is judged fresh.
-        assert!(!latch_trigger_safe(&mut latched, NEITHER, NEITHER)[LEFT]);
-        assert_eq!(latched[LEFT], None);
-        assert!(
-            !latch_trigger_safe(&mut latched, [true, false], NEITHER)[LEFT],
-            "a pull begun off the panel is the world's"
-        );
-    }
-
-    /// The other direction: a Frob begun off the panel must not be re-fired
-    /// every time the ray sweeps across the head-anchored panel. Masking a hand
-    /// mid-pull would clear `handle_empty_hand_state`'s `last_frobbed_entity`
-    /// debounce, and a held consumable would be spent once per crossing.
-    #[test]
-    fn a_pull_begun_off_the_panel_survives_crossing_it() {
-        let mut latched = [None; 2];
-        assert!(!latch_trigger_safe(&mut latched, [false, true], NEITHER)[RIGHT]);
-        assert!(
-            !latch_trigger_safe(&mut latched, [false, true], [false, true])[RIGHT],
-            "sweeping across the panel mid-pull must not re-mask the hand"
-        );
-    }
-
-    /// An untouched trigger is judged fresh every frame - the latch only ever
-    /// speaks for a pull that is actually in flight.
-    #[test]
-    fn a_released_hand_tracks_the_live_decision() {
-        let mut latched = [None; 2];
-        assert_eq!(latch_trigger_safe(&mut latched, NEITHER, BOTH), BOTH);
-        assert_eq!(latched, [None, None]);
-        assert_eq!(latch_trigger_safe(&mut latched, NEITHER, NEITHER), NEITHER);
-    }
-
-    /// Each hand latches its own pull.
-    #[test]
-    fn the_hands_latch_independently() {
-        let mut latched = [None; 2];
-        // Left pulls on the panel; right is not pulling at all.
-        assert_eq!(
-            latch_trigger_safe(&mut latched, [true, false], [true, false]),
-            [true, false]
-        );
-        // Left slides off (still latched), right now pulls off-panel.
-        assert_eq!(
-            latch_trigger_safe(&mut latched, BOTH, NEITHER),
-            [true, false]
-        );
-    }
-}
-
-#[cfg(test)]
-mod strip_deposit_tests {
-    use cgmath::One;
-
-    use super::*;
-
-    fn two_entities() -> (World, EntityId, EntityId) {
-        let mut world = World::new();
-        let item = world.add_entity(PropHasRefs(false));
-        let other = world.add_entity(PropHasRefs(false));
-        (world, item, other)
-    }
-
-    /// The bug: opening the hand over the inventory strip drops the item on
-    /// the floor, because the strip is a head-anchored UI quad with no
-    /// collider and `VirtualHand` only ever knows the world drop.
-    #[test]
-    fn a_release_over_the_strip_is_a_deposit() {
-        let (_world, item, _other) = two_entities();
-        assert_eq!(
-            strip_deposit_entities([true, false], [Some(item), None], [true, false]),
-            vec![item],
-            "a held item released with the hand on the strip belongs in the backpack"
-        );
-    }
-
-    /// Off the strip nothing changes: that release is still the ordinary
-    /// world drop, including feeding a physical container.
-    #[test]
-    fn a_release_off_the_strip_is_left_alone() {
-        let (_world, item, _other) = two_entities();
-        assert!(
-            strip_deposit_entities([false, false], [Some(item), None], [true, false]).is_empty()
-        );
-    }
-
-    /// Still squeezing is still holding - the deposit is the *release*.
-    #[test]
-    fn a_hand_still_holding_deposits_nothing() {
-        let (_world, item, _other) = two_entities();
-        assert!(
-            strip_deposit_entities([true, false], [Some(item), None], [false, false]).is_empty()
-        );
-    }
-
-    /// An empty hand sweeping the strip has nothing to deposit.
-    #[test]
-    fn an_empty_hand_deposits_nothing() {
-        assert!(strip_deposit_entities([true, true], [None, None], [true, true]).is_empty());
-    }
-
-    /// Each hand is judged on its own: one may deposit while the other drops.
-    #[test]
-    fn the_hands_deposit_independently() {
-        let (_world, item, other) = two_entities();
-        assert_eq!(
-            strip_deposit_entities([true, false], [Some(item), Some(other)], [true, true]),
-            vec![item],
-            "only the hand on the strip deposits"
-        );
-    }
-
-    /// The world drop becomes the store, in place: the item is banked instead
-    /// of spawned as a loose prop, and the `Drop` its scripts are owed still
-    /// goes out first (and still as a hand effect, so it lands in this frame's
-    /// dispatch rather than a later effect pass).
-    #[test]
-    fn a_claimed_release_becomes_a_backpack_store() {
-        let (_world, item, other) = two_entities();
-        let mut effects = vec![
-            VirtualHandEffect::DropItem {
-                entity_id: item,
-                motion: Default::default(),
-            },
-            VirtualHandEffect::DropItem {
-                entity_id: other,
-                motion: Default::default(),
-            },
-        ];
-        rewrite_inventory_release(&mut effects, &[(item, None)], &[]);
-        assert!(
-            matches!(
-                effects.as_slice(),
-                [
-                    VirtualHandEffect::OutMessage {
-                        message: Message {
-                            to,
-                            payload: MessagePayload::Drop
-                        }
-                    },
-                    VirtualHandEffect::StoreItem { entity_id },
-                    VirtualHandEffect::DropItem {
-                        entity_id: untouched, ..
-                    },
-                ] if *to == item && *entity_id == item && *untouched == other
-            ),
-            "got {effects:?}"
-        );
-    }
-
-    /// A resolved strip cell becomes a targeted store, not the first-free
-    /// one - retail drops the item into the cell the player is pointing at.
-    #[test]
-    fn a_claimed_release_with_a_resolved_cell_targets_it() {
-        let (_world, item, _other) = two_entities();
-        let mut effects = vec![VirtualHandEffect::DropItem {
-            entity_id: item,
-            motion: Default::default(),
-        }];
-        rewrite_inventory_release(&mut effects, &[(item, Some((3, 1)))], &[]);
-        assert!(
-            matches!(
-                effects.as_slice(),
-                [
-                    VirtualHandEffect::OutMessage {
-                        message: Message {
-                            payload: MessagePayload::Drop,
-                            ..
-                        }
-                    },
-                    VirtualHandEffect::StoreItemAtCell {
-                        entity_id,
-                        cell: (3, 1)
-                    },
-                ] if *entity_id == item
-            ),
-            "got {effects:?}"
-        );
-    }
-
-    /// The keycard exception: a card is collected through its Frob, not banked
-    /// as an object that unlocks nothing.
-    #[test]
-    fn a_claimed_key_source_is_frobbed_instead() {
-        let (_world, card, _other) = two_entities();
-        let mut effects = vec![VirtualHandEffect::DropItem {
-            entity_id: card,
-            motion: Default::default(),
-        }];
-        rewrite_inventory_release(&mut effects, &[], &[card]);
-        assert!(
-            matches!(
-                effects.as_slice(),
-                [
-                    VirtualHandEffect::OutMessage {
-                        message: Message {
-                            payload: MessagePayload::Drop,
-                            ..
-                        }
-                    },
-                    VirtualHandEffect::OutMessage {
-                        message: Message {
-                            to,
-                            payload: MessagePayload::Frob
-                        }
-                    },
-                ] if *to == card
-            ),
-            "got {effects:?}"
-        );
-    }
-
-    /// The panel is not physical, so the release raycast reaches straight
-    /// through it: a container standing behind the interface would take the
-    /// item too, and the deposit would land twice.
-    #[test]
-    fn a_claimed_release_loses_its_consumption_offer() {
-        let (_world, item, container) = two_entities();
-        let mut effects = vec![VirtualHandEffect::OutMessage {
-            message: Message {
-                to: container,
-                payload: MessagePayload::ProvideForConsumption { entity: item },
-            },
-        }];
-        rewrite_inventory_release(&mut effects, &[(item, None)], &[]);
-        assert!(effects.is_empty(), "got {effects:?}");
-    }
-
-    /// Everything else the hand emitted this frame is none of this rule's
-    /// business - notably the `Hover` every frame carries. Order is preserved
-    /// too, so a rewritten frame stays the frame the hand meant.
-    #[test]
-    fn unrelated_hand_effects_survive_in_order() {
-        let (_world, item, other) = two_entities();
-        let mut effects = vec![
-            VirtualHandEffect::OutMessage {
-                message: Message {
-                    to: other,
-                    payload: MessagePayload::TriggerRelease,
-                },
-            },
-            VirtualHandEffect::HoldItem { entity_id: item },
-        ];
-        rewrite_inventory_release(&mut effects, &[(item, None)], &[]);
-        assert!(
-            matches!(
-                effects.as_slice(),
-                [
-                    VirtualHandEffect::OutMessage {
-                        message: Message {
-                            payload: MessagePayload::TriggerRelease,
-                            ..
-                        }
-                    },
-                    VirtualHandEffect::HoldItem { .. },
-                ]
-            ),
-            "got {effects:?}"
-        );
-    }
-
-    /// With nothing claimed the frame is untouched, whatever it holds.
-    #[test]
-    fn an_unclaimed_frame_is_untouched() {
-        let (_world, item, _other) = two_entities();
-        let mut effects = vec![VirtualHandEffect::DropItem {
-            entity_id: item,
-            motion: Default::default(),
-        }];
-        rewrite_inventory_release(&mut effects, &[], &[]);
-        assert!(
-            matches!(effects.as_slice(), [VirtualHandEffect::DropItem { .. }]),
-            "got {effects:?}"
-        );
-    }
-
-    /// The claim's precondition: a backpack that cannot record a `Contains`
-    /// would swallow the transfer silently, so nothing may be claimed against
-    /// it and the ordinary world drop must survive.
-    #[test]
-    fn a_linkless_backpack_accepts_nothing() {
-        let mut world = World::new();
-        let inventory_entity_id = world.add_entity(PropHasRefs(false));
-        let entity_id = world.add_entity(PropHasRefs(false));
-        world.add_unique(PlayerInfo {
-            pos: Vector3::zero(),
-            rotation: Quaternion::one(),
-            entity_id,
-            left_hand_entity_id: None,
-            right_hand_entity_id: None,
-            inventory_entity_id,
-        });
-        assert!(
-            !backpack_accepts_deposit(&world, entity_id),
-            "a backpack with no Links cannot take a deposit"
-        );
-
-        world.add_component(inventory_entity_id, Links::empty());
-        assert!(backpack_accepts_deposit(&world, entity_id));
-    }
-}
-
-#[cfg(test)]
 mod psi_kit_use_tests {
     use dark::properties::{PropPsiState, PropStackCount};
     use shipyard::{EntitiesView, Get, View};
@@ -24036,15 +21976,6 @@ impl crate::game_scene::GameScene for MissionCore {
     }
 
     fn cancel_transient_input(&mut self) {
-        let (left, right) = self.interaction.held_entities();
-        for (i, item) in [left, right].into_iter().enumerate() {
-            if self.chest_slots.near[i].is_some() {
-                if let Some(item) = item {
-                    self.chest_slots.retained.retain(i, item);
-                }
-            }
-        }
-        self.chest_slots.disarm_input();
         self.vr_comfort.reset();
         self.reference_grid.reset();
         self.dismiss_amp_carousel();
@@ -24150,46 +22081,6 @@ impl crate::game_scene::GameScene for MissionCore {
             game_options,
             command_effects,
         )
-    }
-
-    fn render_debug_body(&mut self, assets: &mut AssetCache) -> Vec<SceneObject> {
-        let Some(body) = self.holsters.body_pose else {
-            return Vec::new();
-        };
-        let player = self.world.borrow::<UniqueView<PlayerInfo>>().unwrap();
-        let rotation = self.holsters.world_rotation(player.rotation);
-        let center = player.pos
-            + player.rotation.rotate_vector(body.front(
-                crate::dev_params::get(crate::dev_params::VR_BELT_DROP),
-                crate::dev_params::get(crate::dev_params::VR_BELT_DISTANCE) - 0.30,
-            ));
-        let lights = crate::object_lighting::ObjectLighting::for_scene(
-            self.spatial_data.as_deref(),
-            self.animated_lightmaps
-                .as_ref()
-                .map(|c| c.light_intensities()),
-            player.pos,
-            self.environment.clone(),
-        )
-        .map(|lighting| lighting.at_player_position(center))
-        .unwrap_or_else(|| {
-            // Synthetic scenes have no authored light database, but the body
-            // must remain readable just like player-held equipment.
-            std::rc::Rc::new(crate::object_lighting::with_ambient_floor(
-                engine::scene::light::LightArray::new(),
-                crate::dev_params::get(crate::dev_params::HELD_LIGHT_FLOOR),
-            ))
-        });
-        let mut objects = self.debug_body.render(
-            assets,
-            center,
-            rotation,
-            self.interaction.body_wrist_frames(),
-        );
-        for object in &mut objects {
-            object.set_lights(Some(lights.clone()));
-        }
-        objects
     }
 
     fn render(

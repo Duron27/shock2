@@ -2,11 +2,7 @@ pub mod entity_creator;
 pub(crate) mod mfd_device;
 pub(crate) mod personal_card;
 use tracing::info;
-mod ammo_pouch;
-mod body_gear_feedback;
-mod body_inventory;
 mod character_sheet;
-mod debug_body;
 pub(crate) mod earth_containment;
 pub(crate) mod earth_horde;
 mod earth_supplies;
@@ -15,7 +11,6 @@ pub mod entity_populator;
 pub mod flat_ui_host;
 mod health_effects;
 mod holsters;
-mod implant_sockets;
 mod mfd_utilities;
 pub mod mission_core;
 mod moving_terrain;
@@ -218,9 +213,6 @@ impl Mission {
 
 // Implementation of GameScene trait for Mission
 impl crate::game_scene::GameScene for Mission {
-    fn render_debug_body(&mut self, assets: &mut AssetCache) -> Vec<SceneObject> {
-        self.mission_core.render_debug_body(assets)
-    }
     fn end_level(&mut self) {
         self.mission_core.end_level();
     }
