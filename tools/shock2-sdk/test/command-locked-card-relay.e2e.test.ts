@@ -52,11 +52,17 @@ function distance(a: readonly number[], b: readonly number[]): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 }
 
-async function enterTripwire(game: GameServer, objectId: number): Promise<void> {
+/// Enter a tripwire and return the messages it set off. The message log is
+/// a bounded recent window and command1's ambient traffic overflows it in a
+/// few seconds, so it is read shortly after entry, before the doors settle.
+async function enterTripwire(game: GameServer, objectId: number) {
   const tripwire = await only(game, objectId);
   const [x, y, z] = tripwire.position;
   await game.player.teleport({ x, y: y + 0.5, z });
-  await game.step({ frames: 240 });
+  await game.step({ frames: 20 });
+  const messages = (await game.messages.recent()).messages;
+  await game.step({ frames: 220 });
+  return messages;
 }
 
 test(
@@ -98,10 +104,10 @@ test(
     // Enter the live authored tripwires without frobbing anything. Teleport is
     // staged as locomotion and reaches TrapNewTripwire through Rapier's real
     // SensorBeginIntersect message.
-    await enterTripwire(game, UMBILICAL_TRIPWIRE);
-    await enterTripwire(game, SHUTTLE_TRIPWIRE);
-
-    const messages = (await game.messages.recent()).messages;
+    const messages = [
+      ...(await enterTripwire(game, UMBILICAL_TRIPWIRE)),
+      ...(await enterTripwire(game, SHUTTLE_TRIPWIRE)),
+    ];
     for (const [tripwire, reader] of [[UMBILICAL_TRIPWIRE, 621], [SHUTTLE_TRIPWIRE, 69]]) {
       assert.ok(messages.some(message => message.payload === "TurnOn" &&
         message.from?.template_id === tripwire && message.to.template_id === reader),
