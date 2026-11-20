@@ -331,6 +331,9 @@ export class GameServer extends Game implements AsyncDisposable {
         : []),
       ...(options.difficulty ? ["--difficulty", options.difficulty] : []),
       ...(options.debugFlags ?? []),
+      // Extra flags for every runtime this process launches, e.g.
+      // SHOCK2_RUNTIME_FLAGS="--visible --renderer gl".
+      ...(process.env.SHOCK2_RUNTIME_FLAGS?.split(/\s+/).filter(Boolean) ?? []),
     ];
 
     const logLines: string[] = [];

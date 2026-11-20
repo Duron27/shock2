@@ -97,8 +97,8 @@ where
 #[command(name = "debug_runtime")]
 #[command(about = "HTTP-controlled game runtime for LLM testing and automation")]
 struct Args {
-    /// `gl` (default) or `vulkan`.
-    #[arg(long, default_value = "gl")]
+    /// `vulkan` (default) or `gl`.
+    #[arg(long, default_value = "vulkan")]
     renderer: String,
     #[command(flatten)]
     update_benchmark: update_benchmark::Options,

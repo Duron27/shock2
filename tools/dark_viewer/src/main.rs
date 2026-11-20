@@ -304,15 +304,7 @@ pub fn main() {
 
     tracing_subscriber::fmt::init();
     let mut glfw = glfw::init(glfw::fail_on_errors).unwrap();
-    glfw.window_hint(glfw::WindowHint::ContextVersion(4, 1));
-    glfw.window_hint(glfw::WindowHint::OpenGlProfile(
-        glfw::OpenGlProfileHint::Core,
-    ));
-    #[cfg(target_os = "macos")]
-    glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
-    if cli.screenshot.is_some() {
-        glfw.window_hint(glfw::WindowHint::Visible(false));
-    }
+    glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
 
     let (mut window, events) = glfw
         .create_window(
@@ -323,7 +315,21 @@ pub fn main() {
         )
         .expect("Failed to create GLFW window");
 
-    window.make_current();
+    let mut renderer = {
+        let extensions = glfw
+            .get_required_instance_extensions()
+            .expect("GLFW reports no Vulkan support");
+        let ctx = engine::vk::VkContext::new("Shock Engine - Viewer", &extensions, |instance| {
+            let mut surface = engine::vk::ash::vk::SurfaceKHR::null();
+            match window.create_window_surface(instance, std::ptr::null(), &mut surface) {
+                engine::vk::ash::vk::Result::SUCCESS => Ok(surface),
+                e => Err(e),
+            }
+        })
+        .expect("Vulkan device");
+        let (w, h) = window.get_framebuffer_size();
+        engine::vk::VkRenderer::new(ctx, (w as u32, h as u32), true).expect("Vulkan renderer")
+    };
     window.set_key_polling(true);
     window.set_scroll_polling(true);
     window.set_cursor_pos_polling(true);
@@ -331,17 +337,6 @@ pub fn main() {
     if cli.screenshot.is_none() {
         window.set_cursor_mode(glfw::CursorMode::Disabled);
     }
-
-    gl::load_with(|symbol| window.get_proc_address(symbol) as *const _);
-
-    println!(
-        "es2 extension supported: {}",
-        glfw.extension_supported("GL_ARB_ES2_compatibility")
-    );
-    println!(
-        "es3 extension supported: {}",
-        glfw.extension_supported("GL_ARB_ES3_compatibility")
-    );
 
     let engine = engine::opengl();
     let bundle_storage = engine.get_storage();
@@ -443,31 +438,33 @@ pub fn main() {
         };
 
         let full_scene = Scene::from_objects(scene_objects);
-        engine.render(&render_context, &full_scene);
-
-        if let Some(path) = &cli.screenshot {
-            let (width, height) = window.get_framebuffer_size();
-            let mut image = image::RgbImage::new(width as u32, height as u32);
-            unsafe {
-                gl::Finish();
-                gl::PixelStorei(gl::PACK_ALIGNMENT, 1);
-                gl::ReadPixels(
-                    0,
-                    0,
-                    width,
-                    height,
-                    gl::RGB,
-                    gl::UNSIGNED_BYTE,
-                    image.as_mut_ptr().cast(),
-                );
-                let error = gl::GetError();
-                if error != gl::NO_ERROR {
-                    eprintln!("Screenshot readback failed: OpenGL error {error}");
-                    std::process::exit(1);
-                }
+        let (width, height) = window.get_framebuffer_size();
+        renderer.resize(width.max(0) as u32, height.max(0) as u32);
+        // A frame that cannot open (swapchain just rebuilt) is retried.
+        if let Some(frame) = renderer.begin_frame([0.0, 0.0, 0.0, 1.0]) {
+            engine.render(&render_context, &full_scene);
+            if cli.screenshot.is_some() {
+                renderer.request_capture();
             }
-            image::imageops::flip_vertical_in_place(&mut image);
-            if let Err(error) = image.save(path) {
+            renderer.end_frame(frame);
+        }
+
+        if let Some(path) = &cli.screenshot
+            && let Some(capture) = renderer.take_capture()
+        {
+            // Opaque RGB like the window shows (the frame's alpha is coverage).
+            let rgb: Vec<u8> = capture
+                .rgba
+                .chunks_exact(4)
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
+            if let Err(error) = image::save_buffer(
+                path,
+                &rgb,
+                capture.width,
+                capture.height,
+                image::ColorType::Rgb8,
+            ) {
                 eprintln!("Cannot save screenshot {}: {error}", path.display());
                 std::process::exit(1);
             }
@@ -475,7 +472,6 @@ pub fn main() {
             break;
         }
 
-        window.swap_buffers();
         glfw.poll_events();
     }
 }
@@ -488,9 +484,6 @@ fn process_events(
 ) -> InputContext {
     for (_, event) in glfw::flush_messages(events) {
         match event {
-            glfw::WindowEvent::FramebufferSize(width, height) => unsafe {
-                gl::Viewport(0, 0, width, height)
-            },
             glfw::WindowEvent::Key(Key::Escape, _, Action::Press, _) => {
                 window.set_should_close(true)
             }

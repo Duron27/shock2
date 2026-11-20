@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 gl = "0.14.0"
-glfw = "0.56.0"
+glfw = { version = "0.56.0", features = ["vulkan"] }
 engine = { path = "../../engine" }
 engine_ffmpeg = { path = "../../engine_ffmpeg", optional = true }
 dark = { path = "../../dark" }

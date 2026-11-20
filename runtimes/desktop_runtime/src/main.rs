@@ -181,8 +181,8 @@ struct Args {
     // count: u8,
     #[arg(short, long, default_value = None)]
     experimental: Option<Vec<String>>,
-    /// `gl` (default) or `vulkan` (in progress: unported materials don't draw).
-    #[arg(long, default_value = "gl")]
+    /// `vulkan` (default) or `gl`.
+    #[arg(long, default_value = "vulkan")]
     renderer: String,
 }
 struct MouseUpdateResult {
