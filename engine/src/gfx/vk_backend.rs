@@ -257,6 +257,8 @@ struct ProgramObj {
 enum Garbage {
     Buffer(vk::Buffer, Allocation),
     Image(vk::Image, vk::ImageView, Allocation),
+    /// A submitted upload command buffer, from the upload pool.
+    Commands(vk::CommandBuffer),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -372,6 +374,69 @@ struct State {
     cube_units: [Option<u32>; MAX_UNITS],
 }
 
+/// Per-second counters, printed with `SHOCK2_VK_STATS=1`.
+#[derive(Default)]
+struct Stats {
+    frames: u32,
+    draws: u32,
+    pipelines: u32,
+    descriptor_writes: u32,
+    draw_time: std::time::Duration,
+    upload_time: std::time::Duration,
+    fence_wait: std::time::Duration,
+    acquire_wait: std::time::Duration,
+    since: Option<std::time::Instant>,
+}
+
+thread_local! {
+    static STATS: RefCell<Stats> = RefCell::new(Stats::default());
+    static STATS_ON: bool = std::env::var_os("SHOCK2_VK_STATS").is_some();
+}
+
+fn stat(f: impl FnOnce(&mut Stats)) {
+    if STATS_ON.with(|on| *on) {
+        STATS.with(|s| f(&mut s.borrow_mut()));
+    }
+}
+
+/// Time the renderer spent waiting for a frame slot's fence and for the
+/// next swapchain image (vsync shows up as the latter).
+pub fn note_waits(fence: std::time::Duration, acquire: std::time::Duration) {
+    stat(|s| {
+        s.fence_wait += fence;
+        s.acquire_wait += acquire;
+    });
+}
+
+/// Count a frame; once a second, print and reset.
+fn stats_frame() {
+    stat(|s| {
+        s.frames += 1;
+        let since = *s.since.get_or_insert_with(std::time::Instant::now);
+        let elapsed = since.elapsed().as_secs_f32();
+        if elapsed >= 1.0 {
+            let f = s.frames.max(1) as f32;
+            println!(
+                "SHOCK2_VK_STATS {:.1} fps | per frame: {:.0} draws, {:.0} descriptor writes, \
+                 {:.2} ms recording draws, {:.2} ms uploads, {:.2} ms waiting on the GPU, \
+                 {:.2} ms acquiring | {} pipelines built",
+                f / elapsed,
+                s.draws as f32 / f,
+                s.descriptor_writes as f32 / f,
+                s.draw_time.as_secs_f32() * 1000.0 / f,
+                s.upload_time.as_secs_f32() * 1000.0 / f,
+                s.fence_wait.as_secs_f32() * 1000.0 / f,
+                s.acquire_wait.as_secs_f32() * 1000.0 / f,
+                s.pipelines,
+            );
+            *s = Stats {
+                since: Some(std::time::Instant::now()),
+                ..Default::default()
+            };
+        }
+    });
+}
+
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
@@ -453,7 +518,7 @@ pub fn shutdown() {
     let d = s.dev.device.clone();
     unsafe {
         for (_, g) in s.garbage.drain(..) {
-            destroy_garbage(&d, g);
+            destroy_garbage(&d, s.upload_pool, g);
         }
         for (_, b) in s.buffers.drain() {
             d.destroy_buffer(b.buffer, None);
@@ -488,13 +553,26 @@ pub fn shutdown() {
     super::set_backend(super::Backend::OpenGl);
 }
 
-unsafe fn destroy_garbage(d: &ash::Device, g: Garbage) {
+/// Destroy `g`, returning the memory it held to free.
+unsafe fn destroy_garbage(
+    d: &ash::Device,
+    upload_pool: vk::CommandPool,
+    g: Garbage,
+) -> Option<Allocation> {
     unsafe {
         match g {
-            Garbage::Buffer(b, _) => d.destroy_buffer(b, None),
-            Garbage::Image(i, v, _) => {
+            Garbage::Buffer(b, a) => {
+                d.destroy_buffer(b, None);
+                Some(a)
+            }
+            Garbage::Image(i, v, a) => {
                 d.destroy_image_view(v, None);
                 d.destroy_image(i, None);
+                Some(a)
+            }
+            Garbage::Commands(cmd) => {
+                d.free_command_buffers(upload_pool, &[cmd]);
+                None
             }
         }
     }
@@ -510,17 +588,15 @@ pub fn begin_frame(
     slot: usize,
 ) {
     with(|s| {
-        s.flush_uploads();
+        s.submit_uploads();
         // Frames before `submitted - (FRAMES - 1)` are complete.
         let done_before = s.submitted.saturating_sub(FRAMES as u64 - 1);
         let mut keep = Vec::new();
         for (tag, g) in s.garbage.drain(..) {
             if tag <= done_before {
-                let a = match &g {
-                    Garbage::Buffer(_, a) | Garbage::Image(_, _, a) => *a,
-                };
-                unsafe { destroy_garbage(&s.dev.device, g) };
-                s.alloc.free(a);
+                if let Some(a) = unsafe { destroy_garbage(&s.dev.device, s.upload_pool, g) } {
+                    s.alloc.free(a);
+                }
             } else {
                 keep.push((tag, g));
             }
@@ -556,8 +632,9 @@ pub fn begin_frame(
 pub fn end_frame() {
     with(|s| {
         // Textures and meshes made while recording are drawn this frame.
-        s.flush_uploads();
+        s.submit_uploads();
         if s.recording.take().is_some() {
+            stats_frame();
             s.submitted += 1;
         }
     });
@@ -713,12 +790,24 @@ impl State {
         }
     }
 
-    /// Submit the recorded uploads and wait for them, so anything drawn
-    /// afterwards reads the uploaded data.
+    /// Submit the recorded uploads ahead of the frame being recorded. Queue
+    /// order (and the closing barrier) makes the frame read the new data, so
+    /// nothing waits: the staging and command buffer are freed with the frame.
+    fn submit_uploads(&mut self) {
+        self.flush(false);
+    }
+
+    /// Submit the recorded uploads and wait for them (loading, outside any
+    /// frame, where nothing would otherwise free the staging).
     fn flush_uploads(&mut self) {
+        self.flush(true);
+    }
+
+    fn flush(&mut self, wait: bool) {
         let Some(cmd) = self.uploads.take() else {
             return;
         };
+        let start = std::time::Instant::now();
         let d = &self.dev.device;
         unsafe {
             // Uploaded data is visible to every later command on the queue.
@@ -736,26 +825,40 @@ impl State {
                 &[],
             );
             d.end_command_buffer(cmd).expect("vkEndCommandBuffer");
-            let fence = d
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .expect("vkCreateFence");
             let cmds = [cmd];
-            d.queue_submit(
-                self.dev.queue,
-                &[vk::SubmitInfo::builder().command_buffers(&cmds).build()],
-                fence,
-            )
-            .expect("vkQueueSubmit");
-            d.wait_for_fences(&[fence], true, u64::MAX)
-                .expect("vkWaitForFences");
-            d.destroy_fence(fence, None);
-            d.free_command_buffers(self.upload_pool, &cmds);
+            let submit = [vk::SubmitInfo::builder().command_buffers(&cmds).build()];
+            if wait {
+                let fence = d
+                    .create_fence(&vk::FenceCreateInfo::default(), None)
+                    .expect("vkCreateFence");
+                d.queue_submit(self.dev.queue, &submit, fence)
+                    .expect("vkQueueSubmit");
+                d.wait_for_fences(&[fence], true, u64::MAX)
+                    .expect("vkWaitForFences");
+                d.destroy_fence(fence, None);
+                d.free_command_buffers(self.upload_pool, &cmds);
+            } else {
+                d.queue_submit(self.dev.queue, &submit, vk::Fence::null())
+                    .expect("vkQueueSubmit");
+            }
         }
-        for (buffer, alloc) in std::mem::take(&mut self.staging) {
-            unsafe { self.dev.device.destroy_buffer(buffer, None) };
-            self.alloc.free(alloc);
+        let staging = std::mem::take(&mut self.staging);
+        if wait {
+            for (buffer, alloc) in staging {
+                unsafe { self.dev.device.destroy_buffer(buffer, None) };
+                self.alloc.free(alloc);
+            }
+        } else {
+            // A fence signal covers every earlier submission on the queue.
+            // Submitted ahead of the next frame, so done when it is.
+            let tag = self.submitted + 1;
+            for (buffer, alloc) in staging {
+                self.garbage.push((tag, Garbage::Buffer(buffer, alloc)));
+            }
+            self.garbage.push((tag, Garbage::Commands(cmd)));
         }
         self.staging_bytes = 0;
+        stat(|s| s.upload_time += start.elapsed());
     }
 
     fn drop_buffer(&mut self, id: u32) {
@@ -1163,6 +1266,7 @@ impl State {
         .map_err(|(_, e)| e)
         .expect("vkCreateGraphicsPipelines")[0];
         self.pipelines.insert(key, pipeline);
+        stat(|s| s.pipelines += 1);
         pipeline
     }
 
@@ -1352,6 +1456,7 @@ impl State {
             if !writes.is_empty() {
                 d.update_descriptor_sets(&writes, &[]);
             }
+            stat(|s| s.descriptor_writes += writes.len() as u32);
         }
 
         // GL rects are bottom-left; the swapchain is top-left.
@@ -1910,6 +2015,7 @@ impl VkMesh {
     }
 
     pub fn draw(&self, topology: Topology, first: u32, count: u32) {
+        let start = std::time::Instant::now();
         with(|s| {
             s.draw(
                 self.vertices.get(),
@@ -1919,6 +2025,10 @@ impl VkMesh {
                 first,
                 count,
             )
+        });
+        stat(|s| {
+            s.draws += 1;
+            s.draw_time += start.elapsed();
         });
     }
 }

@@ -172,11 +172,14 @@ impl VkRenderer {
         let swapchain = self.swapchain.as_ref()?;
         let device = &self.ctx.device;
         let slot = &self.slots[self.slot];
+        let waited = std::time::Instant::now();
         unsafe {
             device
                 .wait_for_fences(&[slot.in_flight], true, u64::MAX)
                 .expect("vkWaitForFences");
         }
+        let fence_wait = waited.elapsed();
+        let acquired = std::time::Instant::now();
         let image_index = match unsafe {
             self.ctx.swapchain_loader.acquire_next_image(
                 swapchain.handle,
@@ -233,6 +236,7 @@ impl VkRenderer {
                 vk::SubpassContents::INLINE,
             );
         }
+        crate::gfx::vk_backend::note_waits(fence_wait, acquired.elapsed());
         crate::gfx::vk_backend::begin_frame(
             slot.commands,
             swapchain.render_pass,
