@@ -180,6 +180,11 @@ test(
     await using game = await GameServer.launch({
       mission: "hydro2.mis",
     });
+    // Once the Midwife re-acquires she attacks, and the control's follow-up
+    // sweep below runs ~17s more: long enough to kill the player, which
+    // resets the level and strands every entity id. Invulnerability changes
+    // nothing the AI perceives.
+    await game.devParams.set("cheat", 1);
 
     await game.step({ frames: 60 });
 
