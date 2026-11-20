@@ -97,6 +97,9 @@ where
 #[command(name = "debug_runtime")]
 #[command(about = "HTTP-controlled game runtime for LLM testing and automation")]
 struct Args {
+    /// `gl` (default) or `vulkan`.
+    #[arg(long, default_value = "gl")]
+    renderer: String,
     #[command(flatten)]
     update_benchmark: update_benchmark::Options,
     /// Load the same fixed-camera workload used by Quest benchmarks.
@@ -576,12 +579,21 @@ fn run_game_blocking(
     info!("Step 1: Initializing GLFW...");
     let mut glfw = glfw::init(glfw::fail_on_errors)?;
     info!("GLFW initialized successfully");
-    glfw.window_hint(glfw::WindowHint::ContextVersion(4, 1));
-    glfw.window_hint(glfw::WindowHint::OpenGlProfile(
-        glfw::OpenGlProfileHint::Core,
-    ));
-    #[cfg(target_os = "macos")]
-    glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
+    let vulkan = match args.renderer.as_str() {
+        "gl" | "opengl" => false,
+        "vk" | "vulkan" => true,
+        other => anyhow::bail!("unknown --renderer {other} (gl or vulkan)"),
+    };
+    if vulkan {
+        glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
+    } else {
+        glfw.window_hint(glfw::WindowHint::ContextVersion(4, 1));
+        glfw.window_hint(glfw::WindowHint::OpenGlProfile(
+            glfw::OpenGlProfileHint::Core,
+        ));
+        #[cfg(target_os = "macos")]
+        glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
+    }
 
     // Default to a hidden window so the runtime never steals focus or pops to
     // the foreground - it's an HTTP-driven automation tool. A hidden window
@@ -603,12 +615,36 @@ fn run_game_blocking(
     info!("GLFW window created successfully");
 
     info!("Step 3: Setting up OpenGL context...");
-    window.make_current();
+    // Vulkan presents without vsync: a hidden window is never composited, so
+    // a FIFO present could wait on a vblank that does not come.
+    let mut vk_renderer = if vulkan {
+        let extensions = glfw
+            .get_required_instance_extensions()
+            .ok_or_else(|| anyhow::anyhow!("GLFW reports no Vulkan support"))?;
+        let ctx = engine::vk::VkContext::new("Debug Runtime", &extensions, |instance| {
+            let mut surface = engine::vk::ash::vk::SurfaceKHR::null();
+            match window.create_window_surface(instance, std::ptr::null(), &mut surface) {
+                engine::vk::ash::vk::Result::SUCCESS => Ok(surface),
+                e => Err(e),
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("Vulkan device: {e}"))?;
+        let (w, h) = window.get_framebuffer_size();
+        let renderer = engine::vk::VkRenderer::new(ctx, (w as u32, h as u32), false)
+            .map_err(|e| anyhow::anyhow!("Vulkan renderer: {e}"))?;
+        info!("Vulkan device: {}", renderer.device_name());
+        Some(renderer)
+    } else {
+        window.make_current();
+        None
+    };
     window.set_key_polling(true);
     window.set_framebuffer_size_polling(true);
 
     // Load OpenGL function pointers
-    gl::load_with(|symbol| window.get_proc_address(symbol) as *const _);
+    if !vulkan {
+        gl::load_with(|symbol| window.get_proc_address(symbol) as *const _);
+    }
 
     info!("OpenGL initialized successfully");
 
@@ -784,9 +820,13 @@ fn run_game_blocking(
                 WindowEvent::Key(glfw::Key::Escape, _, glfw::Action::Press, _) => {
                     window.set_should_close(true);
                 }
-                WindowEvent::FramebufferSize(width, height) => unsafe {
-                    gl::Viewport(0, 0, width, height);
-                },
+                WindowEvent::FramebufferSize(width, height) => {
+                    if let Some(renderer) = vk_renderer.as_mut() {
+                        renderer.resize(width.max(0) as u32, height.max(0) as u32);
+                    } else {
+                        unsafe { gl::Viewport(0, 0, width, height) };
+                    }
+                }
                 _ => {}
             }
         }
@@ -1200,10 +1240,13 @@ fn run_game_blocking(
             continue;
         }
 
-        // Clear the screen to a visible color first
-        unsafe {
-            gl::ClearColor(0.1, 0.2, 0.3, 1.0); // Dark blue background
-            gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+        // Clear the screen to a visible color first (dark blue). Vulkan
+        // clears when its frame opens, just before drawing.
+        if vk_renderer.is_none() {
+            unsafe {
+                gl::ClearColor(0.1, 0.2, 0.3, 1.0);
+                gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+            }
         }
 
         // Combine scene objects
@@ -1259,15 +1302,23 @@ fn run_game_blocking(
 
         // Actually render the scene (through the Options menu's Brightness,
         // like the desktop runtime, so screenshots match what a player sees).
-        gamma_pass.begin(
-            shock2vr::user_settings::get().pc.brightness,
-            [scr_width as i32, scr_height as i32],
-        );
-        profile!(
-            "engine.render",
-            engine.render(&render_context, &scene_for_render)
-        );
-        gamma_pass.end();
+        let brightness = shock2vr::user_settings::get().pc.brightness;
+        let vk_frame = vk_renderer.as_mut().and_then(|renderer| {
+            renderer.set_gamma(brightness);
+            renderer.begin_frame([0.1, 0.2, 0.3, 1.0])
+        });
+        if vk_renderer.is_none() {
+            gamma_pass.begin(brightness, [scr_width as i32, scr_height as i32]);
+        }
+        if vk_renderer.is_none() || vk_frame.is_some() {
+            profile!(
+                "engine.render",
+                engine.render(&render_context, &scene_for_render)
+            );
+        }
+        if vk_renderer.is_none() {
+            gamma_pass.end();
+        }
         if pending_step_reply.is_some() {
             frames_rendered_this_step += 1;
         }
@@ -1276,11 +1327,24 @@ fn run_game_blocking(
             game.finish_render(view, projection_matrix, screen_size)
         });
 
+        // Vulkan: submit and present, reading the frame back if a screenshot
+        // waits on it. (A frame that could not open - a rebuilt swapchain -
+        // leaves screenshots pending for the next.)
+        let mut vk_capture = None;
+        if let (Some(renderer), Some(frame)) = (vk_renderer.as_mut(), vk_frame) {
+            if !pending_screenshots.is_empty() {
+                renderer.request_capture();
+            }
+            renderer.end_frame(frame);
+            vk_capture = renderer.take_capture();
+        }
+
         // Service deferred screenshots now that the frame is fully drawn to the
         // back buffer (before the swap, so we read the just-rendered contents).
-        if !pending_screenshots.is_empty() {
+        if !pending_screenshots.is_empty() && (vk_renderer.is_none() || vk_capture.is_some()) {
             for (spec, reply) in pending_screenshots.drain(..) {
-                let result = capture_screenshot_to_result(spec, scr_width, scr_height);
+                let result =
+                    capture_screenshot_to_result(spec, scr_width, scr_height, vk_capture.as_ref());
                 if reply.send(result).is_err() {
                     tracing::warn!("Failed to send screenshot result - receiver dropped");
                 }
@@ -1288,7 +1352,9 @@ fn run_game_blocking(
         }
 
         // Swap buffers
-        window.swap_buffers();
+        if vk_renderer.is_none() {
+            window.swap_buffers();
+        }
 
         // Finish the step only after its final image and render diagnostics exist.
         if !step_requested {
@@ -4270,6 +4336,7 @@ fn capture_screenshot_to_result(
     spec: ScreenshotSpec,
     width: u32,
     height: u32,
+    vk_capture: Option<&engine::vk::Capture>,
 ) -> Result<ScreenshotResult, String> {
     let filename = spec.filename.unwrap_or_else(|| {
         format!(
@@ -4284,13 +4351,26 @@ fn capture_screenshot_to_result(
     });
     let full_path = screenshots_dir.join(&filename);
 
-    let (size_bytes, resolution) = capture_screenshot(&full_path, width, height, spec.max_width)
-        .map_err(|error| {
-            format!(
-                "failed to write screenshot to {}: {error}",
-                full_path.display()
-            )
-        })?;
+    let saved = match vk_capture {
+        Some(capture) => image::RgbImage::from_vec(
+            capture.width,
+            capture.height,
+            capture
+                .rgba
+                .chunks_exact(4)
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect(),
+        )
+        .ok_or_else(|| "Vulkan capture has the wrong size".into())
+        .and_then(|img| save_screenshot(&full_path, img, width, height, spec.max_width)),
+        None => capture_screenshot(&full_path, width, height, spec.max_width),
+    };
+    let (size_bytes, resolution) = saved.map_err(|error| {
+        format!(
+            "failed to write screenshot to {}: {error}",
+            full_path.display()
+        )
+    })?;
     tracing::info!("Screenshot saved to: {}", full_path.display());
     Ok(ScreenshotResult {
         filename,
@@ -4415,7 +4495,21 @@ fn capture_screenshot(
         // Create image and save as PNG using actual dimensions
         let img = image::RgbImage::from_vec(actual_width, actual_height, flipped_pixels)
             .ok_or("Failed to create image from pixel data")?;
+        save_screenshot(path, img, width, height, max_width)
+    }
+}
 
+/// Save a top-row-first frame as the screenshot PNG, downscaled to the
+/// declared size. Returns the file size and the saved dimensions.
+fn save_screenshot(
+    path: &std::path::Path,
+    img: image::RgbImage,
+    width: u32,
+    height: u32,
+    max_width: Option<u32>,
+) -> Result<(u64, [u32; 2]), Box<dyn std::error::Error>> {
+    let (actual_width, actual_height) = img.dimensions();
+    {
         // Downscale to the declared (or requested) size so the saved PNG matches
         // the resolution we report, even when the framebuffer is HiDPI.
         // `Triangle` rather than `Lanczos3`: the runtime is normally run from the

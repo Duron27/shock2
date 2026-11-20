@@ -14,7 +14,7 @@ serde_json = "1.0"
 
 # Game engine dependencies (matching desktop_runtime)
 gl = "0.14.0"
-glfw = "0.56.0"
+glfw = { version = "0.56.0", features = ["vulkan"] }
 engine = { path = "../../engine" }
 dark = { path = "../../dark" }
 cgmath = "0.18.0"
