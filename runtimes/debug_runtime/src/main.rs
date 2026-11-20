@@ -63,6 +63,16 @@ fn parse_window_size(s: &str) -> Result<(u32, u32), String> {
     }
 }
 
+fn parse_window_pos(s: &str) -> Result<(i32, i32), String> {
+    let (x, y) = s
+        .split_once(',')
+        .ok_or_else(|| format!("expected X,Y, got '{s}'"))?;
+    match (x.trim().parse::<i32>(), y.trim().parse::<i32>()) {
+        (Ok(x), Ok(y)) => Ok((x, y)),
+        _ => Err(format!("expected integer X,Y, got '{s}'")),
+    }
+}
+
 /// A request-body extractor that parses JSON **regardless of the `Content-Type`
 /// header**, unlike axum's `Json`. This debug/test API is driven by ad-hoc
 /// clients (`curl -d '{...}'` without a header, the SDK, etc.); requiring
@@ -171,6 +181,13 @@ struct Args {
     /// default screenshot size - e.g. `1920x1080` for README/website captures.
     #[arg(long, default_value = "800x600", value_parser = parse_window_size)]
     window_size: (u32, u32),
+
+    /// Screen position `X,Y` of a `--visible` window's top-left corner, in
+    /// desktop pixels - e.g. a second monitor's origin, so automated runs
+    /// stay off the screen someone is using. Default: wherever the window
+    /// manager puts it.
+    #[arg(long, value_parser = parse_window_pos)]
+    window_pos: Option<(i32, i32)>,
 
     /// Keep level transitions deferred behind the loading screen, the way the
     /// shipping runtimes present them. By default this runtime drives a
@@ -578,7 +595,11 @@ fn run_game_blocking(
     // Default to a hidden window so the runtime never steals focus or pops to
     // the foreground - it's an HTTP-driven automation tool. A hidden window
     // still has a swapchain, so rendering and `/v1/screenshot` work unchanged. `--visible` opts into a normal window.
-    glfw.window_hint(glfw::WindowHint::Visible(args.visible));
+    // A positioned window is created hidden and shown once moved, so it
+    // never flashes up on the default monitor first.
+    glfw.window_hint(glfw::WindowHint::Visible(
+        args.visible && args.window_pos.is_none(),
+    ));
 
     // Create window
     info!("Step 2: Creating GLFW window...");
@@ -591,6 +612,10 @@ fn run_game_blocking(
             glfw::WindowMode::Windowed,
         )
         .expect("Failed to create GLFW window");
+    if let (true, Some((x, y))) = (args.visible, args.window_pos) {
+        window.set_pos(x, y);
+        window.show();
+    }
     info!("GLFW window created successfully");
 
     info!("Step 3: Setting up Vulkan...");
@@ -1232,6 +1257,7 @@ fn run_game_blocking(
             scene_for_render.point_shadow_strength,
         ) = game.get_shadow_lights();
         scene_for_render.fog_density = game.fog_density();
+        scene_for_render.world_gloss = game.world_gloss();
 
         // Actually render the scene (through the Options menu's Brightness,
         // like the desktop runtime, so screenshots match what a player sees).
