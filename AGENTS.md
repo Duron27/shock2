@@ -831,6 +831,10 @@ World and model textures are mipmapped with 8x anisotropy by default
 - Bloody footprints (`shock2vr/src/blood_tracks.rs`): the player or any
   creature walking through a floor blood decal leaves fading boot prints
   for several steps. Cosmetic, capped at 400, not saved.
+- Blood spatter (`shock2vr/src/blood_spatter.rs`): a wound's blood spang
+  splashes the wall behind and the floor below, and a creature that bled
+  leaves a pool where it dies. Real blood decal entities (saved, capped at
+  160 per level), so they feed the footprints.
 
 Authored `P$AnimLight` Flicker/Random/SemiRandom lamps animate per Dark's
 timer (faithful, not part of the above).

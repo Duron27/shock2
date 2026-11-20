@@ -2938,6 +2938,7 @@ pub struct MissionCore {
     /// See [`crate::muzzle_lighting::ExplosionClasses`].
     explosion_light_classes: crate::muzzle_lighting::ExplosionClasses,
     blood_tracks: crate::blood_tracks::BloodTracks,
+    blood_spatter: crate::blood_spatter::BloodSpatter,
     pub entity_info: Arc<SystemShock2EntityInfo>,
     pub physics: PhysicsWorld,
     pub script_world: ScriptWorld,
@@ -4011,6 +4012,7 @@ impl MissionCore {
             multimodal: game_options.multimodal,
             explosion_light_classes: Default::default(),
             blood_tracks: Default::default(),
+            blood_spatter: Default::default(),
             entity_info: entity_info_rc.clone(),
             template_to_particle_riders,
             template_to_particle_attachees,
@@ -5233,6 +5235,11 @@ impl MissionCore {
                 ss2_entity_info::get_hierarchy(&self.entity_info),
                 &movers,
             );
+            effects.extend(self.blood_spatter.update(
+                &self.world,
+                &self.physics,
+                ss2_entity_info::get_hierarchy(&self.entity_info),
+            ));
         }
 
         // Clear one-shot forces - but only after a step actually consumed
