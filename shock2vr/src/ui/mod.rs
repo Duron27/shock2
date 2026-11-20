@@ -1000,7 +1000,10 @@ where
                     texture,
                     alpha,
                     kind,
-                } => place_image(asset_cache, *position, *size, texture, *alpha, *kind),
+                } => match place_image(asset_cache, *position, *size, texture, *alpha, *kind) {
+                    Some(placed) => placed,
+                    None => continue,
+                },
                 UiElement::Button {
                     position,
                     size,
@@ -1017,7 +1020,10 @@ where
                         (true, ButtonHoverBehavior::Texture(hover_texture)) => hover_texture,
                         _ => texture,
                     };
-                    place_image(asset_cache, *position, *size, texture, *alpha, *kind)
+                    match place_image(asset_cache, *position, *size, texture, *alpha, *kind) {
+                        Some(placed) => placed,
+                        None => continue,
+                    }
                 }
                 UiElement::Bar {
                     position,
@@ -1404,13 +1410,20 @@ fn place_image(
     texture: &str,
     alpha: f32,
     kind: ImageKind,
-) -> PlacedElement {
+) -> Option<PlacedElement> {
     let texture = classic_fallback(
         asset_cache,
         upgraded_texture(asset_cache, texture, kind),
         kind,
     );
-    let loaded = asset_cache.get_ext(&TEXTURE_IMPORTER, &texture, &texture_options(kind));
+    // An install can lack a piece of art (the classic one has no .png
+    // replacements, and some screens name art only one install ships): leave
+    // that element out rather than take the whole frame down.
+    let Some(loaded) = asset_cache.get_ext_opt(&TEXTURE_IMPORTER, &texture, &texture_options(kind))
+    else {
+        warn_missing_image(&texture);
+        return None;
+    };
     // Replacement icons have more texels, not a larger inventory footprint.
     // Keep the classic bitmap's authored size while drawing the upgraded art.
     let authored = if matches!(kind, ImageKind::ObjectIcon | ImageKind::ObjectIconFit) {
@@ -1427,7 +1440,7 @@ fn place_image(
         texture_px(&loaded)
     };
     let (position, size) = drawn_rect(position, size, authored, kind);
-    PlacedElement {
+    Some(PlacedElement {
         turns: 0,
         rect: Rect::new(position.x, position.y, size.x, size.y),
         alpha,
@@ -1435,7 +1448,20 @@ fn place_image(
             texture: texture.to_owned(),
             kind,
         },
+    })
+}
+
+/// Logs each missing UI image once, not every frame it is laid out.
+fn warn_missing_image(texture: &str) {
+    thread_local! {
+        static WARNED: std::cell::RefCell<std::collections::HashSet<String>> =
+            Default::default();
     }
+    WARNED.with(|warned| {
+        if warned.borrow_mut().insert(texture.to_owned()) {
+            eprintln!("missing UI image {texture}; leaving it out");
+        }
+    });
 }
 
 /// Lay out one text element inside its authored widget `rect`: pick the size,
