@@ -813,6 +813,7 @@ multipliers) turns it off for a faithful comparison:
 - `screen_vignette`, `screen_grain`, `screen_contrast`, `screen_saturation` -
   the final-copy grade (`engine/src/vk/gamma.rs`). Below 40% health the
   grade also drains colour and pulses the edges red (not a dev param).
+  Menus and cutscenes (non-pausable scenes) are left ungraded.
 - `screen_bloom`, `screen_streak` - glare around near-white pixels, in the
   same final copy.
 - `world_gloss` - floors reflect the mission's 25AE environment capture and
