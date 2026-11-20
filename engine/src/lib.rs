@@ -6,6 +6,7 @@ mod engine;
 pub mod file_system;
 mod font;
 pub mod gamma;
+pub mod gfx;
 mod gl_engine;
 pub mod importers;
 pub mod logging;

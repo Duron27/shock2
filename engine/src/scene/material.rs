@@ -34,6 +34,11 @@ pub trait Material: Any {
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn has_initialized(&self) -> bool;
     fn initialize(&mut self, is_opengl_es: bool);
+    /// Draws entirely through `crate::gfx`, so it renders on any backend.
+    /// Materials still calling GL directly are skipped under Vulkan.
+    fn uses_gfx(&self) -> bool {
+        false
+    }
 
     /// Draw opaque material with single-pass lighting
     ///

@@ -35,18 +35,19 @@ impl BlendFactor {
             _ => return None,
         })
     }
-    pub(crate) fn gl(self) -> u32 {
+    pub(crate) fn gfx(self) -> crate::gfx::BlendFactor {
+        use crate::gfx::BlendFactor as F;
         match self {
-            Self::Zero => gl::ZERO,
-            Self::One => gl::ONE,
-            Self::SrcAlpha => gl::SRC_ALPHA,
-            Self::InvSrcAlpha => gl::ONE_MINUS_SRC_ALPHA,
-            Self::SrcColor => gl::SRC_COLOR,
-            Self::InvSrcColor => gl::ONE_MINUS_SRC_COLOR,
-            Self::DstAlpha => gl::DST_ALPHA,
-            Self::InvDstAlpha => gl::ONE_MINUS_DST_ALPHA,
-            Self::DstColor => gl::DST_COLOR,
-            Self::InvDstColor => gl::ONE_MINUS_DST_COLOR,
+            Self::Zero => F::Zero,
+            Self::One => F::One,
+            Self::SrcAlpha => F::SrcAlpha,
+            Self::InvSrcAlpha => F::OneMinusSrcAlpha,
+            Self::SrcColor => F::SrcColor,
+            Self::InvSrcColor => F::OneMinusSrcColor,
+            Self::DstAlpha => F::DstAlpha,
+            Self::InvDstAlpha => F::OneMinusDstAlpha,
+            Self::DstColor => F::DstColor,
+            Self::InvDstColor => F::OneMinusDstColor,
         }
     }
 }

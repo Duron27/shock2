@@ -28,6 +28,7 @@ use super::basic_material;
 use super::mesh;
 use super::quad;
 use super::skinned_material::SkinnedMaterial;
+use crate::gfx;
 use crate::materials;
 
 /// Composition for a transparent scene object. Incidence overlays reuse the
@@ -497,6 +498,12 @@ impl SceneObject {
         Some(depth)
     }
 
+    /// Under Vulkan, a material still drawing with raw GL is skipped until it
+    /// is ported (there is no GL context to call).
+    fn renders_on_backend(&self) -> bool {
+        !gfx::is_vulkan() || self.material.borrow().uses_gfx()
+    }
+
     fn draw_context(&self, render_context: &EngineRenderContext) -> EngineRenderContext {
         EngineRenderContext {
             world_wave: self.world_wave,
@@ -523,6 +530,9 @@ impl SceneObject {
         view: &Matrix4<f32>,
         lights: &crate::scene::light::LightArray,
     ) {
+        if !self.renders_on_backend() {
+            return;
+        }
         if !self.material.borrow().has_initialized() {
             self.material
                 .borrow_mut()
@@ -542,7 +552,7 @@ impl SceneObject {
             return;
         }
         if !self.depth_write {
-            unsafe { gl::DepthMask(gl::FALSE) };
+            gfx::depth_mask(false);
         }
 
         if let Some(t) = self.transparency_override {
@@ -591,7 +601,7 @@ impl SceneObject {
         }
 
         if !self.depth_write {
-            unsafe { gl::DepthMask(gl::TRUE) };
+            gfx::depth_mask(true);
         }
     }
     pub fn draw_transparent(
@@ -601,6 +611,9 @@ impl SceneObject {
         view: &Matrix4<f32>,
         lights: &crate::scene::light::LightArray,
     ) {
+        if !self.renders_on_backend() {
+            return;
+        }
         let render_context = self.draw_context(render_context);
         if let Some(stack) = self
             .material_stack
@@ -676,6 +689,9 @@ impl SceneObject {
         let transparency = self.effective_transparency();
         for pass in &stack.passes {
             let mut material = pass.material.borrow_mut();
+            if gfx::is_vulkan() && !material.uses_gfx() {
+                continue;
+            }
             if !material.has_initialized() {
                 material.initialize(engine.is_opengl_es);
             }
@@ -687,13 +703,7 @@ impl SceneObject {
             let prepared = material.draw_opaque(context, view, &xform, &self.skinning_data, lights)
                 || material.draw_transparent(context, view, &xform, &self.skinning_data, lights);
             if prepared {
-                unsafe {
-                    gl::DepthMask(if opaque_phase && self.depth_write && pass.writes_depth {
-                        gl::TRUE
-                    } else {
-                        gl::FALSE
-                    });
-                }
+                gfx::depth_mask(opaque_phase && self.depth_write && pass.writes_depth);
                 self.draw_geometry_with_blend(true, pass.blend);
             }
             material.set_transparency_override(None);
@@ -701,11 +711,9 @@ impl SceneObject {
             material.set_full_bright(false);
             material.set_glow(super::material::Glow::NONE);
         }
-        unsafe {
-            // Restore the renderer's phase state, not this object's override.
-            // Replacement stacks return directly without the ordinary base's cleanup.
-            gl::DepthMask(if opaque_phase { gl::TRUE } else { gl::FALSE });
-        }
+        // Restore the renderer's phase state, not this object's override.
+        // Replacement stacks return directly without the ordinary base's cleanup.
+        gfx::depth_mask(opaque_phase);
     }
 
     /// Get the world position of this scene object from its transform matrix
@@ -871,6 +879,7 @@ impl SceneObject {
         self.draw_geometry_with_blend(apply_depth_bias, self.blend_mode);
     }
     fn draw_geometry_with_blend(&self, apply_depth_bias: bool, blend: BlendMode) {
+        use gfx::{BlendFactor as F, Cap, DepthFunc};
         let depth_bias = (apply_depth_bias
             || matches!(
                 blend,
@@ -878,35 +887,29 @@ impl SceneObject {
             ))
             && self.depth_bias;
         if depth_bias {
-            unsafe {
-                gl::Enable(gl::POLYGON_OFFSET_FILL);
-                gl::PolygonOffset(-1.0, -2.0);
-            }
+            gfx::enable(Cap::PolygonOffsetFill);
+            gfx::polygon_offset(-1.0, -2.0);
         }
         if let Some(front_face) = self.backface_culling {
-            unsafe {
-                gl::Enable(gl::CULL_FACE);
-                gl::CullFace(gl::BACK);
-                gl::FrontFace(match front_face {
-                    FrontFaceWinding::Clockwise => gl::CW,
-                    FrontFaceWinding::CounterClockwise => gl::CCW,
-                });
-            }
+            gfx::enable(Cap::CullFace);
+            gfx::cull_back_faces();
+            gfx::front_face(match front_face {
+                FrontFaceWinding::Clockwise => gfx::FrontFace::Clockwise,
+                FrontFaceWinding::CounterClockwise => gfx::FrontFace::CounterClockwise,
+            });
         }
 
-        unsafe {
-            match blend {
-                BlendMode::Alpha => {}
-                BlendMode::Authored(source, destination) => {
-                    gl::BlendFunc(source.gl(), destination.gl());
-                    gl::DepthFunc(gl::LEQUAL);
-                }
-                BlendMode::AlphaOverlay => gl::DepthFunc(gl::LEQUAL),
-                BlendMode::AdditiveColor => gl::BlendFunc(gl::SRC_COLOR, gl::ONE),
-                BlendMode::AdditiveAlpha => {
-                    gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE, gl::ZERO, gl::ONE);
-                    gl::DepthFunc(gl::LEQUAL);
-                }
+        match blend {
+            BlendMode::Alpha => {}
+            BlendMode::Authored(source, destination) => {
+                gfx::blend_func(source.gfx(), destination.gfx());
+                gfx::depth_func(DepthFunc::LessEqual);
+            }
+            BlendMode::AlphaOverlay => gfx::depth_func(DepthFunc::LessEqual),
+            BlendMode::AdditiveColor => gfx::blend_func(F::SrcColor, F::One),
+            BlendMode::AdditiveAlpha => {
+                gfx::blend_func_separate(F::SrcAlpha, F::One, F::Zero, F::One);
+                gfx::depth_func(DepthFunc::LessEqual);
             }
         }
         self.geometry.draw_with_morph(&self.morph_weights);
@@ -914,35 +917,27 @@ impl SceneObject {
             blend,
             BlendMode::AdditiveAlpha | BlendMode::AlphaOverlay | BlendMode::Authored(_, _)
         ) {
-            unsafe {
-                gl::DepthFunc(gl::LESS);
-            }
+            gfx::depth_func(DepthFunc::Less);
         }
         if blend != BlendMode::Alpha {
-            unsafe {
-                gl::BlendFuncSeparate(
-                    gl::SRC_ALPHA,
-                    gl::ONE_MINUS_SRC_ALPHA,
-                    gl::ONE,
-                    gl::ONE_MINUS_SRC_ALPHA,
-                );
-            }
+            gfx::blend_func_separate(
+                F::SrcAlpha,
+                F::OneMinusSrcAlpha,
+                F::One,
+                F::OneMinusSrcAlpha,
+            );
         }
 
         if self.backface_culling.is_some() {
             // Culling is an explicit per-object opt-in; restore the default for
             // world, procedural, and UI geometry drawn afterward.
-            unsafe {
-                gl::Disable(gl::CULL_FACE);
-                gl::FrontFace(gl::CCW);
-            }
+            gfx::disable(Cap::CullFace);
+            gfx::front_face(gfx::FrontFace::CounterClockwise);
         }
 
         if depth_bias {
-            unsafe {
-                gl::PolygonOffset(0.0, 0.0);
-                gl::Disable(gl::POLYGON_OFFSET_FILL);
-            }
+            gfx::polygon_offset(0.0, 0.0);
+            gfx::disable(Cap::PolygonOffsetFill);
         }
     }
 

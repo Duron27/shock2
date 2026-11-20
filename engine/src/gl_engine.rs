@@ -26,72 +26,70 @@ impl OpenGLEngine {
                 .iter()
                 .filter(move |object| object.render_layer() == layer)
         };
-        unsafe {
-            // Composition is keyed explicitly: debug/desktop append per-eye
-            // objects while Oculus prepends them, but both must render world,
-            // scene effects, scene UI, then system UI. Each non-world layer
-            // starts with one depth clear at its group boundary, never from an
-            // individual object mid-pass.
-            for layer in RenderLayer::ORDERED {
-                if in_layer(layer).next().is_none() {
-                    continue;
-                }
-                if layer.clears_depth() {
-                    gl::Clear(gl::DEPTH_BUFFER_BIT);
-                }
-
-                // SINGLE-PASS LIGHTING: Opaque pass with all lighting calculated
-                // in shaders.
-                in_layer(layer).for_each(|s| {
-                    // An object's own lights don't replace the scene's - the
-                    // player's hand lights live there, and a torch pointed at a
-                    // prop has to light it.
-                    let merged = s.lights().map(|o| o.merged_with(lights));
-                    s.draw_opaque(
-                        self,
-                        render_context,
-                        view,
-                        merged.as_ref().unwrap_or(lights),
-                    )
-                });
-
-                // Transparent pass with all lighting calculated in shaders
-                gl::DepthMask(gl::FALSE);
-                // Preserve authored composition order. A mask belongs to one
-                // actor only; rebuilding for another actor never touches scene depth.
-                let mut cached_mask = None;
-                for s in in_layer(layer) {
-                    let mask = s
-                        .self_depth_group
-                        .zip(self_depth_scene)
-                        .map(|(group, scene)| {
-                            if cached_mask.is_none_or(|(id, _)| id != group) {
-                                cached_mask = Some((
-                                    group,
-                                    self.self_depth.borrow_mut().render(
-                                        group,
-                                        layer,
-                                        self,
-                                        render_context,
-                                        view,
-                                        scene,
-                                    ),
-                                ));
-                            }
-                            cached_mask.unwrap().1
-                        });
-                    let context = EngineRenderContext {
-                        self_depth: mask.map_or(
-                            crate::scene::self_depth::Phase::None,
-                            crate::scene::self_depth::Phase::Test,
-                        ),
-                        ..*render_context
-                    };
-                    let merged = s.lights().map(|o| o.merged_with(lights));
-                    s.draw_transparent(self, &context, view, merged.as_ref().unwrap_or(lights));
-                }
-                gl::DepthMask(gl::TRUE);
+        // Composition is keyed explicitly: debug/desktop append per-eye
+        // objects while Oculus prepends them, but both must render world,
+        // scene effects, scene UI, then system UI. Each non-world layer
+        // starts with one depth clear at its group boundary, never from an
+        // individual object mid-pass.
+        for layer in RenderLayer::ORDERED {
+            if in_layer(layer).next().is_none() {
+                continue;
             }
+            if layer.clears_depth() {
+                crate::gfx::clear(false, true);
+            }
+
+            // SINGLE-PASS LIGHTING: Opaque pass with all lighting calculated
+            // in shaders.
+            in_layer(layer).for_each(|s| {
+                // An object's own lights don't replace the scene's - the
+                // player's hand lights live there, and a torch pointed at a
+                // prop has to light it.
+                let merged = s.lights().map(|o| o.merged_with(lights));
+                s.draw_opaque(
+                    self,
+                    render_context,
+                    view,
+                    merged.as_ref().unwrap_or(lights),
+                )
+            });
+
+            // Transparent pass with all lighting calculated in shaders
+            crate::gfx::depth_mask(false);
+            // Preserve authored composition order. A mask belongs to one
+            // actor only; rebuilding for another actor never touches scene depth.
+            let mut cached_mask = None;
+            for s in in_layer(layer) {
+                let mask = s
+                    .self_depth_group
+                    .zip(self_depth_scene)
+                    .map(|(group, scene)| {
+                        if cached_mask.is_none_or(|(id, _)| id != group) {
+                            cached_mask = Some((
+                                group,
+                                self.self_depth.borrow_mut().render(
+                                    group,
+                                    layer,
+                                    self,
+                                    render_context,
+                                    view,
+                                    scene,
+                                ),
+                            ));
+                        }
+                        cached_mask.unwrap().1
+                    });
+                let context = EngineRenderContext {
+                    self_depth: mask.map_or(
+                        crate::scene::self_depth::Phase::None,
+                        crate::scene::self_depth::Phase::Test,
+                    ),
+                    ..*render_context
+                };
+                let merged = s.lights().map(|o| o.merged_with(lights));
+                s.draw_transparent(self, &context, view, merged.as_ref().unwrap_or(lights));
+            }
+            crate::gfx::depth_mask(true);
         }
     }
 }
@@ -110,19 +108,17 @@ use crate::scene::{RenderLayer, scene::Scene};
 
 /// Depth and blend state shared by every pass.
 unsafe fn set_render_state() {
-    unsafe {
-        gl::Enable(gl::DEPTH_TEST);
-        gl::Enable(gl::BLEND);
-        // Shaders emit straight RGB; the framebuffer accumulates
-        // premultiplied RGB. Preserve coverage alpha for the Quest
-        // passthrough compositor instead of multiplying alpha by itself.
-        gl::BlendFuncSeparate(
-            gl::SRC_ALPHA,
-            gl::ONE_MINUS_SRC_ALPHA,
-            gl::ONE,
-            gl::ONE_MINUS_SRC_ALPHA,
-        );
-    }
+    use crate::gfx::{self, BlendFactor as F, Cap};
+    gfx::enable(Cap::DepthTest);
+    gfx::enable(Cap::Blend);
+    // Shaders emit straight RGB; the framebuffer accumulates premultiplied
+    // RGB, keeping coverage alpha rather than multiplying alpha by itself.
+    gfx::blend_func_separate(
+        F::SrcAlpha,
+        F::OneMinusSrcAlpha,
+        F::One,
+        F::OneMinusSrcAlpha,
+    );
 }
 
 impl OpenGLEngine {
@@ -148,8 +144,8 @@ impl OpenGLEngine {
             };
             unsafe {
                 pass.target.bind();
-                gl::ClearColor(0.0, 0.0, 0.0, 1.0);
-                gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+                crate::gfx::clear_color([0.0, 0.0, 0.0, 1.0]);
+                crate::gfx::clear(true, true);
                 // Scene lights carry the hand lights, which reach the far side too.
                 self.draw_layers(&context, &camera.view, &pass.objects, scene.lights(), None);
                 pass.target.unbind();
@@ -182,8 +178,8 @@ impl Engine for OpenGLEngine {
             // this frame's result.
             self.draw_offscreen_passes(render_context, scene);
 
-            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+            crate::gfx::clear_color([0.0, 0.0, 0.0, 0.0]);
+            crate::gfx::clear(true, true);
 
             // WIREFRAME: Uncomment this to see wireframe in desktop
             // gl::PolygonMode(gl::FRONT_AND_BACK, gl::LINE);

@@ -1,16 +1,13 @@
-extern crate gl;
 use std::any::Any;
 use std::rc::Rc;
 
 use crate::engine::EngineRenderContext;
+use crate::gfx::{self, Program, Uniform};
 use crate::scene::Material;
-use crate::shader_program::ShaderProgram;
 
 use crate::texture::TextureTrait;
-use c_string::*;
 use cgmath::Matrix4;
 use cgmath::Vector4;
-use cgmath::prelude::*;
 
 use once_cell::sync::OnceCell;
 
@@ -44,12 +41,12 @@ const FRAGMENT_SHADER_SOURCE: &str = r#"
 "#;
 
 struct Uniforms {
-    projection_loc: i32,
-    world_loc: i32,
-    text_color_loc: i32,
+    projection: Uniform,
+    world: Uniform,
+    text_color: Uniform,
 }
 
-static SHADER_PROGRAM: OnceCell<(ShaderProgram, Uniforms)> = OnceCell::new();
+static SHADER_PROGRAM: OnceCell<(Program, Uniforms)> = OnceCell::new();
 
 pub struct ScreenSpaceMaterial {
     diffuse_texture: Rc<dyn TextureTrait>,
@@ -66,48 +63,31 @@ impl ScreenSpaceMaterial {
             text_color,
         })
     }
+
     pub fn draw_common(
         &self,
         render_context: &EngineRenderContext,
         _view_matrix: &Matrix4<f32>,
         world_matrix: &Matrix4<f32>,
     ) {
-        let (shader_program, uniforms) = SHADER_PROGRAM.get().expect("shader not compiled");
+        let (program, uniforms) = SHADER_PROGRAM.get().expect("shader not compiled");
         self.diffuse_texture.bind0(render_context);
-        unsafe {
-            gl::UseProgram(shader_program.gl_id);
-
-            // TODO: Pass in via render_context?
-            // Separate render pass?
-            let projection = cgmath::ortho(
-                0.0,
-                render_context.screen_size.x,
-                render_context.screen_size.y,
-                0.0,
-                0.0,
-                1.0,
-            );
-
-            gl::UniformMatrix4fv(uniforms.world_loc, 1, gl::FALSE, world_matrix.as_ptr());
-            // No `view` uniform: -1 skips it.
-            crate::multiview::bind_view_projection(
-                -1,
-                uniforms.projection_loc,
-                &cgmath::Matrix4::identity(),
-                &projection,
-                render_context,
-                false,
-            );
-            gl::Uniform4f(
-                uniforms.text_color_loc,
-                self.text_color.x,
-                self.text_color.y,
-                self.text_color.z,
-                self.text_color.w,
-            );
-        }
+        program.bind();
+        // Pixels, origin top-left.
+        let projection = cgmath::ortho(
+            0.0,
+            render_context.screen_size.x,
+            render_context.screen_size.y,
+            0.0,
+            0.0,
+            1.0,
+        );
+        gfx::set_mat4(uniforms.world, world_matrix);
+        gfx::set_mat4(uniforms.projection, &projection);
+        gfx::set_vec4(uniforms.text_color, self.text_color.into());
     }
 }
+
 impl Material for ScreenSpaceMaterial {
     fn as_any(&self) -> &dyn Any {
         self
@@ -121,41 +101,20 @@ impl Material for ScreenSpaceMaterial {
         false
     }
 
-    fn initialize(&mut self, is_opengl_es: bool) {
+    fn initialize(&mut self, _is_opengl_es: bool) {
         let _ = SHADER_PROGRAM.get_or_init(|| {
-            // build and compile our shader program
-            // ------------------------------------
-            // vertex shader
-            let vertex_shader = crate::shader::build(
-                VERTEX_SHADER_SOURCE,
-                crate::shader::ShaderType::Vertex,
-                is_opengl_es,
-            );
-
-            // fragment shader
-            let fragment_shader = crate::shader::build(
-                FRAGMENT_SHADER_SOURCE,
-                crate::shader::ShaderType::Fragment,
-                is_opengl_es,
-            );
-            // link shaders
-            unsafe {
-                let shader = crate::shader_program::link(&vertex_shader, &fragment_shader);
-
-                let uniforms = Uniforms {
-                    text_color_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("textColor").as_ptr(),
-                    ),
-                    projection_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("projection").as_ptr(),
-                    ),
-                    world_loc: gl::GetUniformLocation(shader.gl_id, c_str!("world").as_ptr()),
-                };
-                (shader, uniforms)
-            }
+            let program = Program::new(VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE);
+            let uniforms = Uniforms {
+                text_color: program.uniform("textColor"),
+                projection: program.uniform("projection"),
+                world: program.uniform("world"),
+            };
+            (program, uniforms)
         });
+    }
+
+    fn uses_gfx(&self) -> bool {
+        true
     }
 
     fn draw_opaque(

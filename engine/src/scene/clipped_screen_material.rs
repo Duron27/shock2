@@ -1,14 +1,12 @@
-extern crate gl;
 use std::any::Any;
 use std::ops::Deref;
 
 use crate::engine::EngineRenderContext;
+use crate::gfx::{self, Program, Uniform};
 use crate::scene::Material;
 use crate::scene::light::LightArray;
-use crate::shader_program::ShaderProgram;
 use crate::texture::TextureTrait;
-use c_string::*;
-use cgmath::{Matrix, Matrix4, SquareMatrix, ortho};
+use cgmath::{Matrix4, SquareMatrix, ortho};
 use once_cell::sync::OnceCell;
 
 // Simple vertex shader - no normals needed for UI elements
@@ -58,13 +56,13 @@ const FRAGMENT_SHADER_SOURCE: &str = r#"
 "#;
 
 struct ClippedScreenUniforms {
-    world_loc: i32,
-    view_loc: i32,
-    projection_loc: i32,
-    clip_x_loc: i32,
+    world: Uniform,
+    view: Uniform,
+    projection: Uniform,
+    clip_x: Uniform,
 }
 
-static CLIPPED_SCREEN_SHADER: OnceCell<(ShaderProgram, ClippedScreenUniforms)> = OnceCell::new();
+static CLIPPED_SCREEN_SHADER: OnceCell<(Program, ClippedScreenUniforms)> = OnceCell::new();
 
 pub struct ClippedScreenMaterial<T>
 where
@@ -93,46 +91,32 @@ where
         view_matrix: &Matrix4<f32>,
         world_matrix: &Matrix4<f32>,
     ) {
-        let (shader_program, uniforms) = CLIPPED_SCREEN_SHADER
+        let (program, uniforms) = CLIPPED_SCREEN_SHADER
             .get()
             .expect("clipped screen shader not compiled");
-
         self.diffuse_texture.bind0(render_context);
+        program.bind();
 
-        unsafe {
-            gl::UseProgram(shader_program.gl_id);
-
-            // In screen-space mode, substitute an orthographic projection (pixels,
-            // origin top-left) and an identity view so the world matrix places the
-            // quad directly in screen pixels - matching ScreenSpaceMaterial.
-            let (projection, view) = if self.screen_space {
-                let ortho_projection = ortho(
-                    0.0,
-                    render_context.screen_size.x,
-                    render_context.screen_size.y,
-                    0.0,
-                    0.0,
-                    1.0,
-                );
-                (ortho_projection, Matrix4::identity())
-            } else {
-                (render_context.projection_matrix, *view_matrix)
-            };
-
-            // Set transformation matrices
-            gl::UniformMatrix4fv(uniforms.world_loc, 1, gl::FALSE, world_matrix.as_ptr());
-            crate::multiview::bind_view_projection(
-                uniforms.view_loc,
-                uniforms.projection_loc,
-                &view,
-                &projection,
-                render_context,
-                !self.screen_space,
+        // In screen-space mode, substitute an orthographic projection (pixels,
+        // origin top-left) and an identity view so the world matrix places the
+        // quad directly in screen pixels - matching ScreenSpaceMaterial.
+        let (projection, view) = if self.screen_space {
+            let ortho_projection = ortho(
+                0.0,
+                render_context.screen_size.x,
+                render_context.screen_size.y,
+                0.0,
+                0.0,
+                1.0,
             );
-
-            // Set clipping value
-            gl::Uniform1f(uniforms.clip_x_loc, self.clip_percentage);
-        }
+            (ortho_projection, Matrix4::identity())
+        } else {
+            (render_context.projection_matrix, *view_matrix)
+        };
+        gfx::set_mat4(uniforms.world, world_matrix);
+        gfx::set_mat4(uniforms.view, &view);
+        gfx::set_mat4(uniforms.projection, &projection);
+        gfx::set_f32(uniforms.clip_x, self.clip_percentage);
     }
 }
 
@@ -152,38 +136,23 @@ where
         self.has_initialized
     }
 
-    fn initialize(&mut self, is_opengl_es: bool) {
+    fn initialize(&mut self, _is_opengl_es: bool) {
         let _ = CLIPPED_SCREEN_SHADER.get_or_init(|| {
-            let vertex_shader = crate::shader::build(
-                VERTEX_SHADER_SOURCE,
-                crate::shader::ShaderType::Vertex,
-                is_opengl_es,
-            );
-
-            let fragment_shader = crate::shader::build(
-                FRAGMENT_SHADER_SOURCE,
-                crate::shader::ShaderType::Fragment,
-                is_opengl_es,
-            );
-
-            unsafe {
-                let shader = crate::shader_program::link(&vertex_shader, &fragment_shader);
-
-                let uniforms = ClippedScreenUniforms {
-                    world_loc: gl::GetUniformLocation(shader.gl_id, c_str!("world").as_ptr()),
-                    view_loc: gl::GetUniformLocation(shader.gl_id, c_str!("view").as_ptr()),
-                    projection_loc: gl::GetUniformLocation(
-                        shader.gl_id,
-                        c_str!("projection").as_ptr(),
-                    ),
-                    clip_x_loc: gl::GetUniformLocation(shader.gl_id, c_str!("clipX").as_ptr()),
-                };
-
-                (shader, uniforms)
-            }
+            let program = Program::new(VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE);
+            let uniforms = ClippedScreenUniforms {
+                world: program.uniform("world"),
+                view: program.uniform("view"),
+                projection: program.uniform("projection"),
+                clip_x: program.uniform("clipX"),
+            };
+            (program, uniforms)
         });
 
         self.has_initialized = true;
+    }
+
+    fn uses_gfx(&self) -> bool {
+        true
     }
 
     fn draw_opaque(
