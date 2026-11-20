@@ -268,6 +268,30 @@ pub fn create_initial_scene(
         };
     }
 
+    // A save to load wins over the default main menu: `--save-file` alone
+    // used to boot the menu and silently ignore the save.
+    if let Some(save_file) = &options.save_file {
+        let save_file_path = resolve_save_file(save_file);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&save_file_path)
+            .unwrap_or_else(|err| panic!("cannot open save {}: {err}", save_file_path.display()));
+        let save_data = SaveData::read(&mut file).unwrap();
+        let played = save_data.metadata.played;
+        let (mission, mission_to_save_data) = load_mission_from_save_data(
+            save_data,
+            asset_cache,
+            audio_context,
+            global_context,
+            options,
+        );
+        return SceneInitResult {
+            played,
+            scene: Box::new(mission),
+            mission_save_data: mission_to_save_data,
+        };
+    }
+
     if options.mission.eq_ignore_ascii_case("main_menu") {
         return SceneInitResult {
             played: std::time::Duration::ZERO,
@@ -287,24 +311,6 @@ pub fn create_initial_scene(
             played: std::time::Duration::ZERO,
             scene,
             mission_save_data: HashMap::new(),
-        };
-    }
-
-    if let Some(save_file_path) = &options.save_file {
-        let mut file = OpenOptions::new().read(true).open(save_file_path).unwrap();
-        let save_data = SaveData::read(&mut file).unwrap();
-        let played = save_data.metadata.played;
-        let (mission, mission_to_save_data) = load_mission_from_save_data(
-            save_data,
-            asset_cache,
-            audio_context,
-            global_context,
-            options,
-        );
-        return SceneInitResult {
-            played,
-            scene: Box::new(mission),
-            mission_save_data: mission_to_save_data,
         };
     }
 
@@ -776,4 +782,15 @@ mod tests {
 
         assert_eq!(resolve_cutscene_path_from(root.path(), "cs1.avi"), expected);
     }
+}
+
+/// A `--save-file` argument as a path: taken as given when it exists, else
+/// as a save's name in the saves directory (`quick`, `quick.sav`).
+fn resolve_save_file(arg: &str) -> std::path::PathBuf {
+    let given = std::path::PathBuf::from(arg);
+    if given.exists() {
+        return given;
+    }
+    let name = arg.strip_suffix(".sav").unwrap_or(arg);
+    crate::save_file_path(name)
 }
