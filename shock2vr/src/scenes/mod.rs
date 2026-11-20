@@ -24,13 +24,9 @@ pub mod cutscene_skip;
 pub mod debrief;
 pub mod debug_ai_ranged;
 pub mod debug_annelid;
-pub mod debug_bullet_time;
-pub mod debug_calibration;
 pub mod debug_camera;
 pub mod debug_common;
 pub mod debug_gamepig;
-pub mod debug_gloves;
-pub mod debug_hand_poses;
 pub mod debug_hitbox;
 pub mod debug_hud;
 pub mod debug_interactions;
@@ -59,14 +55,11 @@ pub use cutscene_player::CutscenePlayerScene;
 pub use debrief::DebriefScene;
 pub use debug_annelid::create_debug_annelid_scene;
 pub use debug_camera::DebugCameraScene;
-pub use debug_gloves::DebugGlovesScene;
-pub use debug_hand_poses::DebugHandPosesScene;
 pub use debug_hitbox::DebugHitboxScene;
 pub use debug_hud::DebugHudScene;
 pub use debug_joint_constraint::DebugJointConstraintScene;
 pub use debug_ladder::create_debug_ladder_scene;
 pub use debug_map::DebugMapScene;
-pub use debug_melee::create_debug_melee_scene;
 pub use debug_minimal::DebugMinimalScene;
 pub use debug_particles::DebugParticlesScene;
 pub use debug_protocol_droid::DebugProtocolDroidScene;
@@ -177,14 +170,10 @@ const DEBUG_SCENES: &[(&str, DebugSceneCtor)] = &[
         Box::new(DebugMinimalScene::create(global, options, assets, audio))
     }),
     ("debug_weapons", create_debug_weapons_scene),
-    ("debug_melee", create_debug_melee_scene),
+    ("debug_melee", debug_melee::create_debug_melee_scene),
     (
         "debug_ai_ranged",
         debug_ai_ranged::create_debug_ai_ranged_scene,
-    ),
-    (
-        "debug_bullet_time",
-        debug_bullet_time::create_debug_bullet_time_scene,
     ),
     (
         "debug_interactions",
@@ -211,13 +200,6 @@ const DEBUG_SCENES: &[(&str, DebugSceneCtor)] = &[
     ("debug_hud", |_global, _options, _assets, _audio| {
         Box::new(DebugHudScene::new())
     }),
-    ("debug_gloves", DebugGlovesScene::new),
-    (
-        "debug_calibration",
-        debug_calibration::create_debug_calibration_scene,
-    ),
-    ("debug_psi_fit", DebugGlovesScene::psi_amp),
-    ("debug_hand_poses", DebugHandPosesScene::new),
     ("debug_joint_constraint", DebugJointConstraintScene::new),
     ("debug_map", |_global, _options, _assets, _audio| {
         Box::new(DebugMapScene::new())

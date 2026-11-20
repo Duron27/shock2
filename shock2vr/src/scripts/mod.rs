@@ -99,7 +99,6 @@ mod shodan_shield;
 mod speed_patch;
 mod stat_booster;
 mod std_door;
-pub(crate) use std_door::player_door_frob_blocked;
 mod slot_machine;
 mod tool_consumable;
 mod torpedo;

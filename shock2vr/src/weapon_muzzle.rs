@@ -17,7 +17,7 @@ use shipyard::{Component, EntityId, Get, View, World};
 
 use crate::{
     mission::entity_creator::CreateEntityOptions, physics::PhysicsWorld,
-    runtime_props::RuntimePropVhots, scripts::Effect, vr_config::Handedness, vr_support::GripPose,
+    runtime_props::RuntimePropVhots, scripts::Effect, vr_support::GripPose,
 };
 
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
@@ -27,14 +27,6 @@ pub struct MuzzleFallback {
 }
 
 impl MuzzleFallback {
-    /// This muzzle in the frame `frame` draws its model in (a held gun's
-    /// `gun_model_frame`).
-    pub(crate) fn framed(self, frame: Matrix4<f32>) -> Self {
-        Self {
-            point: frame.transform_point(self.point),
-            axis: frame.transform_vector(self.axis),
-        }
-    }
 
     /// Unit right/up/forward frame at this attachment. Item scaling affects the
     /// attachment position, never launched projectile size or velocity.
@@ -118,13 +110,6 @@ pub(crate) fn resolve(world: &World, weapon: EntityId) -> MuzzleFallback {
     }
 }
 
-/// `resolve` for an item whose barrel is known (`barrel_axis`); `None` for
-/// anything else, which `resolve` defaults to -X.
-pub(crate) fn known(world: &World, item: EntityId) -> Option<MuzzleFallback> {
-    let (point, axis) = muzzle(world, item);
-    Some(MuzzleFallback { point, axis: axis? })
-}
-
 /// A weapon's muzzle point, and its barrel axis if known.
 fn muzzle(world: &World, weapon: EntityId) -> (Point3<f32>, Option<Vector3<f32>>) {
     let fallback = world
@@ -160,25 +145,6 @@ fn muzzle_point(vhots: &[Vhot], fallback: Option<Point3<f32>>) -> Point3<f32> {
         .unwrap_or_else(|| point3(0.0, 0.0, 0.0))
 }
 
-/// A gun's muzzle as play sets it on the model wielded in `hand`
-/// (`ChangeModel`): `muzzle_point` over the glove weapon model, in the hand's
-/// rendered frame. `None` for anything else, or with no known barrel.
-pub fn held_muzzle(cache: &mut AssetCache, name: &str, hand: Handedness) -> Option<MuzzleFallback> {
-    let name = name.to_ascii_lowercase();
-    let name = name.trim_end_matches(".bin");
-    if !crate::vr_weapon_grip::supports_model(name) {
-        return None;
-    }
-    let fallback = load_fallback(cache, name)?;
-    // The magazine-in model: drawing the magazine out leaves the barrel alone.
-    let source = cache.get_opt(&GLOVE_WEAPON_IMPORTER, &format!("{name}.bin"))?;
-    let vhots = source.as_ref().as_ref()?.model.vhots();
-    let muzzle = MuzzleFallback {
-        point: muzzle_point(&vhots, Some(fallback.point)),
-        axis: fallback.axis,
-    };
-    Some(muzzle.framed(crate::vr_config::gun_model_frame(name, hand)))
-}
 
 /// The controller's aim in its own frame: play's hand ray, and the way a gun
 /// held with an aligned grip fires.

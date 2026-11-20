@@ -1668,10 +1668,6 @@ impl Script for AnimatedMonsterAI {
             ]);
         }
 
-        if crate::pipe_melee::recovering(world, entity_id) {
-            return self.publish_behavior(entity_id);
-        }
-
         if let Some(stun) = self.stun.as_mut() {
             stun.remaining -= time.elapsed.as_secs_f32();
             // Dark ends the high-priority motion at an action boundary, rather
@@ -2106,14 +2102,6 @@ impl Script for AnimatedMonsterAI {
         // Flags/completion already queued by the interrupted forward tick must
         // not replace the recoil. Its own completion is delivered after the
         // animation observer releases the recovery marker.
-        if crate::pipe_melee::recovering(world, entity_id)
-            && matches!(
-                msg,
-                MessagePayload::AnimationCompleted | MessagePayload::AnimationFlagTriggered { .. }
-            )
-        {
-            return Effect::NoEffect;
-        }
         if let MessagePayload::Stun {
             duration_seconds,
             tags,
@@ -2613,7 +2601,6 @@ impl Script for AnimatedMonsterAI {
                 };
                 let connected = if motion_flags.contains(MotionFlags::MELEE_CONTACT_START)
                     && can_act
-                    && !crate::pipe_melee::uses_physical_pipe(world, entity_id)
                 {
                     // The swing reached its authored contact frame - resolve
                     // the hit through the attacker's melee weapon archetype.

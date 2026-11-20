@@ -9,12 +9,12 @@ mod environmental_aux;
 pub mod game_scene;
 pub mod golf_courses;
 pub mod golf_game;
-pub mod hand_buttons;
-pub mod hand_capture;
-pub mod hand_pose;
-pub mod hand_pose_library;
-pub mod handheld_input;
-pub mod haptics;
+mod hand_buttons;
+mod hand_capture;
+mod hand_pose;
+mod hand_pose_library;
+mod handheld_input;
+mod haptics;
 pub mod hit_feedback;
 pub mod hog_wallow_game;
 pub mod horde_stats;
@@ -23,14 +23,13 @@ pub mod input;
 pub mod input_context;
 pub mod install;
 pub mod inventory;
-pub mod ladder_holds;
+mod ladder_holds;
 mod melee_lighting;
 mod melee_swing;
 pub mod message_trace;
 pub mod object_lighting;
 pub mod particle_effects;
 mod particle_group;
-mod pipe_melee;
 mod psi_amp_readout;
 pub mod psi_amp_selection;
 mod psi_carousel;
@@ -41,7 +40,7 @@ pub mod scenes;
 mod slot_machine;
 pub mod time;
 pub mod user_settings;
-pub mod vr_comfort;
+mod vr_comfort;
 mod weapon_button_hold;
 
 pub mod career;
@@ -62,8 +61,7 @@ mod flat_weapon_animation;
 pub mod free_camera;
 mod glove_fit;
 mod gui;
-pub mod hand_anticipation;
-mod hand_feedback;
+mod hand_anticipation;
 mod hand_glove;
 mod hud;
 mod interaction;
@@ -116,13 +114,7 @@ mod throwing;
 pub mod ui;
 mod util;
 mod virtual_hand;
-pub mod vr_belt;
 mod vr_config;
-pub mod vr_holster;
-pub mod vr_magazine;
-mod vr_psi_sway;
-mod vr_shotgun_pump;
-mod vr_weapon_action;
 mod weapon_attachments;
 pub mod weapon_installation;
 pub mod weapon_modification;
@@ -136,15 +128,10 @@ pub use hand_glove::{GloveRenderer, HandLight};
 /// can re-measure the melee `_h` contact offsets off the shipped rigs with the
 /// same maths the wield uses.
 pub use vr_config::{Handedness, MeleePosedArm, melee_contact_offset};
-mod climb_marker;
-pub mod climb_release;
 pub mod swimming;
-pub mod vr_climb;
-pub mod vr_crouch;
-pub mod vr_grip;
-pub mod vr_support;
-pub mod vr_tracking;
-pub mod vr_weapon_grip;
+mod vr_grip;
+mod vr_support;
+mod vr_tracking;
 mod wielded_weapon;
 pub mod world_scale;
 pub mod zip_asset_path;
@@ -1814,15 +1801,6 @@ impl Game {
                 self.input_recorder = None;
             }
         }
-        let calibrated_input = glove_fit::calibrated_input(
-            input_context,
-            matches!(
-                self.active_game_scene.scene_name(),
-                "debug_gloves" | "debug_psi_fit"
-            ),
-            dev_params::get(dev_params::GLOVE_FORWARD_CM),
-        );
-        let input_context = &calibrated_input;
         let span = span!(Level::INFO, "update");
         let _enter = span.enter();
         let delta_time = time.elapsed.as_secs_f32();
@@ -3379,7 +3357,7 @@ impl Game {
             &mut self.asset_cache,
             &self.options,
             pawn_to_world,
-            self.active_game_scene.scene_name() == "debug_gloves",
+            false,
         );
         for object in &mut pause_objects {
             object.set_render_layer(RenderLayer::SystemOverlay);

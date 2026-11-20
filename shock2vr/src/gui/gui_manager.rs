@@ -71,9 +71,6 @@ impl GuiPropProxyEntity {
         Self { entity_id }
     }
 
-    pub(crate) fn host_entity(&self) -> EntityId {
-        self.entity_id
-    }
 }
 
 #[derive(Component, Clone, Copy)]

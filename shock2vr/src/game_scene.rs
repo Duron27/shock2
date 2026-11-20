@@ -431,57 +431,13 @@ pub struct DebugClimbGrip {
     pub normal: [f32; 3],
 }
 
-/// One hand's hold, in the `/v1/info` climb readout.
-#[derive(Debug, Serialize, Clone)]
-pub struct DebugClimbHold {
-    pub hand: &'static str,
-    pub kind: &'static str,
-    pub entity_id: Option<i32>,
-    pub point: [f32; 3],
-    /// Which grace grab took this hold (1 or 2); 0 for an ordinary hold.
-    pub grace: u8,
-}
-
-/// The player's hand-climb state (see `crate::vr_climb`), reported by
-/// `/v1/info`. Flatscreen holds nothing, but still climbs ladders by pushing
-/// into them, so `is_climbing` is not implied by `grips`.
+/// The player's ladder-climb state, reported by `/v1/info`. The player
+/// climbs ladders by pushing into them.
 #[derive(Debug, Serialize, Clone, Default)]
 pub struct DebugClimbState {
     pub is_climbing: bool,
-    /// A scripted top-out is carrying the body over a lip - the hand vault's
-    /// second half, and flat's ladder mantle.
+    /// A scripted top-out (the ladder mantle) is carrying the body over a lip.
     pub vaulting: bool,
-    /// The hand currently moving the body ("left"/"right"), if any.
-    pub anchor_hand: Option<&'static str>,
-    pub grips: Vec<DebugClimbHold>,
-    /// Grace grabs left in this ladder departure.
-    pub grace_remaining: u8,
-    /// Free (left, right) gloves glowing in reach of a hold they would take.
-    pub reach: [bool; 2],
-    /// What letting go of every hold does (see `crate::climb_release`).
-    pub release: DebugClimbRelease,
-}
-
-/// The `/v1/info` climb release readout: the outcome the footprint and held
-/// gloves show, and the gaze verdict behind it.
-#[derive(Debug, Serialize, Clone, Default)]
-pub struct DebugClimbRelease {
-    /// "assisted" (gaze landing), "natural" (plain drop/throw), or "none".
-    pub mode: &'static str,
-    /// Resting body centre at the landing.
-    pub landing: Option<[f32; 3]>,
-    pub floor_y: Option<f32>,
-    /// Feet height now minus the landing floor.
-    pub expected_drop: Option<f32>,
-    pub safe: bool,
-    /// Why the gaze offered no assisted landing, if it did not.
-    pub rejection: Option<&'static str>,
-    /// The aimed surface point behind the gaze verdict.
-    pub gaze_candidate: Option<[f32; 3]>,
-    /// The landing a committed assisted release is moving to.
-    pub gliding_to: Option<[f32; 3]>,
-    /// Opacity of a teleporting exit's black fade (0 when none runs).
-    pub exit_fade: f32,
 }
 
 /// Raycast mask for collision group filtering

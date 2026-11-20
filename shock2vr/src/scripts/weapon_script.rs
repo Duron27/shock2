@@ -346,7 +346,7 @@ impl Script for WeaponScript {
         };
         // A burst belongs to the pull that started it: a reload, or the gun
         // leaving the player's hands, ends it.
-        if (is_reloading(world, entity_id) || crate::vr_shotgun_pump::blocks_fire(world, entity_id))
+        if is_reloading(world, entity_id)
             || !crate::wielded_weapon::held_in_hand(world, entity_id)
             || crate::weapon_requirements::unmet_weapon_skill(world, entity_id).is_some()
         {
@@ -561,12 +561,6 @@ fn fire_one_shot(world: &World, entity_id: EntityId, setting: &GunSettingDesc) -
         return ShotOutcome::NotWorking;
     }
 
-    // A spent or open shotgun action refuses a fresh pull with its authored
-    // click, even with rounds in the magazine. Broken-state feedback wins.
-    if crate::vr_shotgun_pump::blocks_fire(world, entity_id) {
-        return ShotOutcome::Empty;
-    }
-
     // Ammo gating: weapons that carry a `PropGunState` are limited by
     // their clip. A magazine that cannot pay the setting's per-shot
     // cost dry-fires (no shot/flash). Weapons without a gun state
@@ -664,14 +658,13 @@ fn fire_one_shot(world: &World, entity_id: EntityId, setting: &GunSettingDesc) -
             .filter(|(_, options)| !silenced || options.flags & 1 != 0)
             .filter(|(_, options)| {
                 options.flags & 1 == 0
-                    || (!crate::vr_shotgun_pump::enabled(world, entity_id)
-                        && !world
-                            .borrow::<View<crate::flat_weapon_animation::FlatWeaponPose>>()
-                            .ok()
-                            .and_then(|poses| {
-                                poses.get(entity_id).ok().map(|pose| pose.delayed_ejection)
-                            })
-                            .unwrap_or(false))
+                    || !world
+                        .borrow::<View<crate::flat_weapon_animation::FlatWeaponPose>>()
+                        .ok()
+                        .and_then(|poses| {
+                            poses.get(entity_id).ok().map(|pose| pose.delayed_ejection)
+                        })
+                        .unwrap_or(false)
             })
             .map(|(template_id, options)| {
                 create_muzzle_flash(world, entity_id, template_id, &options)
@@ -717,7 +710,7 @@ fn fire_one_shot(world: &World, entity_id: EntityId, setting: &GunSettingDesc) -
     // A hand-worked VR pump paces the gun itself (the spent action
     // blocks the next pull until racked), so it gets no wait on top.
     let cooldown = shot_cooldown_seconds(setting);
-    if is_gunshot && cooldown > 0.0 && !crate::vr_shotgun_pump::enabled(world, entity_id) {
+    if is_gunshot && cooldown > 0.0 {
         effects.push(Effect::BeginShotCooldown {
             entity_id,
             seconds: cooldown,
@@ -1591,35 +1584,6 @@ mod tests {
         let origin = root_transform.transform_point(position).to_vec();
         let forward = root_transform.transform_vector(vec3(0.0, 0.0, 1.0));
         (origin, forward)
-    }
-
-    #[test]
-    fn supported_weapon_shots_follow_the_solved_barrel_in_both_hands() {
-        use crate::vr_support::solve_two_hand_pose;
-        for hand in [crate::Handedness::Left, crate::Handedness::Right] {
-            let base = Quaternion::from_angle_y(Deg(70.0));
-            let primary = vec3(1.0, 2.0, 3.0);
-            let anchor = hand
-                .gun_mirror()
-                .transform_point(point3(-0.6, -0.1, 0.04))
-                .to_vec();
-            let primary_anchor = vec3(0.02, 0.0, 0.0);
-            let support =
-                primary + base.rotate_vector(anchor - primary_anchor) + vec3(0.0, 0.15, 0.08);
-            let solved = solve_two_hand_pose(primary, support, base, primary_anchor, anchor, base);
-            let transform = Matrix4::from_translation(solved.position)
-                * Matrix4::from(solved.rotation)
-                * Matrix4::from_scale(0.7);
-            let muzzle = hand.gun_mirror().transform_point(point3(-0.9, 0.1, 0.03));
-            let (origin, velocity) = vr_fire_geometry(transform, vec![muzzle_vhot(muzzle)]);
-            assert!((origin - transform.transform_point(muzzle).to_vec()).magnitude() < 1e-5);
-            let forward = solved.rotation.rotate_vector(vec3(-1.0, 0.0, 0.0));
-            assert!(velocity.normalize().dot(forward) > 0.99999);
-            assert!(
-                (forward - base.rotate_vector(vec3(-1.0, 0.0, 0.0))).magnitude() > 0.05,
-                "support must actually steer the shot away from the single-hand direction"
-            );
-        }
     }
 
     #[test]

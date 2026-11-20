@@ -373,15 +373,6 @@ pub mod render_source {
     pub const DEBUG_OVERLAY: &str = "debug_overlay";
     /// VR status lines and banners; hidden with flat HUD while a menu owns input.
     pub const GAMEPLAY_HUD: &str = "gameplay_hud";
-    /// The grip pose workbench's scene: its held item and floor grid. Its
-    /// hands are [`PLAYER_HANDS`].
-    pub const GRIP_WORKBENCH: &str = "grip_workbench";
-    /// The grip pose workbench's control panel.
-    pub const GRIP_WORKBENCH_PANEL: &str = "grip_workbench_panel";
-    /// The beams of the controllers in hand while the workbench is open.
-    pub const GRIP_WORKBENCH_POINTER: &str = "grip_workbench_pointer";
-    /// A test-held gun's firing and controller-aim lines.
-    pub const GRIP_WORKBENCH_AIM: &str = "grip_workbench_aim";
 }
 
 /// A tag that records only which render path produced an object.

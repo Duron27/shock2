@@ -266,23 +266,6 @@ impl GameScene for DebugScene {
         self.core.cancel_transient_input();
     }
 
-    fn pose_workbench_open(&self) -> bool {
-        self.core.pose_workbench_open()
-    }
-
-    fn update_pose_workbench(
-        &mut self,
-        elapsed: std::time::Duration,
-        input: &InputContext,
-        actions: &crate::input::InputActionState,
-    ) {
-        self.core.update_pose_workbench(elapsed, input, actions);
-    }
-
-    fn hold_pose_workbench(&mut self) {
-        self.core.hold_pose_workbench();
-    }
-
     fn is_pausable(&self) -> bool {
         true
     }
@@ -514,23 +497,6 @@ impl<H: DebugSceneHooks> GameScene for HookedDebugScene<H> {
         self.core.cancel_transient_input();
     }
 
-    fn pose_workbench_open(&self) -> bool {
-        self.core.pose_workbench_open()
-    }
-
-    fn update_pose_workbench(
-        &mut self,
-        elapsed: std::time::Duration,
-        input: &InputContext,
-        actions: &crate::input::InputActionState,
-    ) {
-        self.core.update_pose_workbench(elapsed, input, actions);
-    }
-
-    fn hold_pose_workbench(&mut self) {
-        self.core.hold_pose_workbench();
-    }
-
     fn is_pausable(&self) -> bool {
         true
     }
@@ -574,9 +540,7 @@ impl<H: DebugSceneHooks> GameScene for HookedDebugScene<H> {
     ) -> (Vec<SceneObject>, Vector3<f32>, Quaternion<f32>) {
         let (mut scene_objects, mut camera_position, mut camera_rotation) =
             self.core.render(asset_cache, options);
-        // The grip pose workbench is a scene of its own; the gallery adds
-        // nothing to it.
-        if !self.core.pose_workbench_open() {
+        {
             self.hooks.after_render(
                 &mut self.core,
                 &mut scene_objects,

@@ -914,12 +914,6 @@ mod tests {
         let effects = controller.wield(shotgun);
 
         assert!(
-            !effects
-                .iter()
-                .any(|effect| matches!(effect, VirtualHandEffect::DropItem { .. })),
-            "a wield swap must never eject the displaced weapon into the world"
-        );
-        assert!(
             effects.iter().any(|effect| matches!(
                 effect,
                 VirtualHandEffect::StoreItem { entity_id } if *entity_id == wrench

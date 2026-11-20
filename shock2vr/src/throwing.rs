@@ -1,8 +1,8 @@
 //! Tracked release motion and bounded, one-impact damage for player-thrown props.
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
-use cgmath::{InnerSpace, Quaternion, Rotation, Vector3, Zero, vec3};
-use dark::properties::{PropHitPoints, PropMaterial, PropPhysAttr};
+use cgmath::{InnerSpace, Vector3, Zero};
+use dark::properties::{PropHitPoints, PropMaterial};
 use shipyard::{EntityId, Get, IntoIter, IntoWithId, UniqueView, View, World};
 
 use crate::{
@@ -12,39 +12,19 @@ use crate::{
 
 /// Read once at release/impact so one calculation uses a consistent set of knobs.
 struct ThrowTuning {
-    speed_scale: f32,
-    spin_scale: f32,
-    max_speed: f32,
-    max_spin: f32,
-    strength_override: f32,
-    strength_bonus: f32,
-    weight_exponent: f32,
-    strength_weight_relief: f32,
-    min_speed: f32,
     impact_min_speed: f32,
     damage_speed: f32,
     organic_cap: f32,
     inorganic_cap: f32,
-    damage_window: f32,
 }
 impl ThrowTuning {
     fn read(read_value: impl Fn(crate::dev_params::DevParamId) -> f32) -> Self {
         use crate::dev_params::*;
         Self {
-            speed_scale: read_value(THROW_SPEED_SCALE),
-            spin_scale: read_value(THROW_SPIN_SCALE),
-            max_speed: read_value(THROW_MAX_SPEED),
-            max_spin: read_value(THROW_MAX_SPIN),
-            strength_override: read_value(THROW_STRENGTH_OVERRIDE),
-            strength_bonus: read_value(THROW_STRENGTH_BONUS),
-            weight_exponent: read_value(THROW_WEIGHT_EXPONENT),
-            strength_weight_relief: read_value(THROW_STRENGTH_WEIGHT_RELIEF),
-            min_speed: read_value(THROW_MIN_SPEED),
             impact_min_speed: read_value(THROW_IMPACT_MIN_SPEED),
             damage_speed: read_value(THROW_DAMAGE_SPEED),
             organic_cap: read_value(THROW_ORGANIC_CAP),
             inorganic_cap: read_value(THROW_INORGANIC_CAP),
-            damage_window: read_value(THROW_DAMAGE_WINDOW),
         }
     }
     fn current() -> Self {
@@ -60,27 +40,6 @@ impl ThrowTuning {
 pub(crate) struct ReleaseMotion {
     pub linear: Vector3<f32>,
     pub angular: Vector3<f32>,
-}
-
-/// How a fumbled weapon leaves the hand: up and back from the contact it was
-/// refused at, tumbling - a visible spring out of the grip that lands about
-/// a unit away rather than across the room. Straight up without a contact.
-pub(crate) fn fumble_motion(
-    weapon: Vector3<f32>,
-    away_from: Option<Vector3<f32>>,
-) -> ReleaseMotion {
-    const OUT_SPEED: f32 = 1.5;
-    const UP_SPEED: f32 = 2.5;
-    const SPIN: f32 = 6.0;
-    let out = away_from
-        .map(|contact| vec3(weapon.x - contact.x, 0.0, weapon.z - contact.z))
-        .filter(|out| out.magnitude2() > 1e-8)
-        .map_or(Vector3::zero(), |out| out.normalize());
-    let up = Vector3::unit_y();
-    ReleaseMotion {
-        linear: out * OUT_SPEED + up * UP_SPEED,
-        angular: up.cross(out) * SPIN,
-    }
 }
 
 impl Default for ReleaseMotion {
@@ -99,125 +58,6 @@ pub(crate) fn cancel_tracking(world: &World) {
         epoch.0 = epoch.0.wrapping_add(1);
     } else {
         world.add_unique(TrackingEpoch(1));
-    }
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct HandMotion {
-    previous: Option<(Vector3<f32>, Quaternion<f32>, Vector3<f32>, Quaternion<f32>)>,
-    samples: VecDeque<(ReleaseMotion, f32)>,
-    latest: ReleaseMotion,
-    epoch: u64,
-}
-
-impl HandMotion {
-    pub fn sync_epoch(&mut self, world: &World) {
-        let epoch = world
-            .borrow::<UniqueView<TrackingEpoch>>()
-            .map(|e| e.0)
-            .unwrap_or(0);
-        if self.epoch != epoch {
-            *self = Self {
-                epoch,
-                ..Self::default()
-            };
-        }
-    }
-
-    pub fn sample(
-        &mut self,
-        position: Vector3<f32>,
-        rotation: Quaternion<f32>,
-        pawn: Vector3<f32>,
-        heading: Quaternion<f32>,
-        dt: f32,
-    ) -> ReleaseMotion {
-        let valid = |v: Vector3<f32>| v.x.is_finite() && v.y.is_finite() && v.z.is_finite();
-        if !dt.is_finite()
-            || dt < 0.0
-            || dt > 0.1
-            || !valid(position)
-            || !valid(pawn)
-            || !rotation.magnitude2().is_finite()
-            || rotation.magnitude2() < 0.5
-            || !heading.magnitude2().is_finite()
-            || heading.magnitude2() < 0.5
-        {
-            *self = Self {
-                epoch: self.epoch,
-                ..Self::default()
-            };
-            return ReleaseMotion::default();
-        }
-        if dt == 0.0 {
-            // Debug HTTP updates do not advance time. Preserve the last real
-            // sample, but still reject invalid/recentered poses on release.
-            if self
-                .previous
-                .is_some_and(|(old, _, old_pawn, old_heading)| {
-                    (position - old).magnitude() > 0.5
-                        || (pawn - old_pawn).magnitude() > 0.5
-                        || heading.normalize().dot(old_heading).abs() < 0.995
-                })
-            {
-                *self = Self {
-                    epoch: self.epoch,
-                    ..Self::default()
-                };
-            }
-            return self.latest;
-        }
-        self.latest = ReleaseMotion::default();
-        let previous =
-            self.previous
-                .replace((position, rotation.normalize(), pawn, heading.normalize()));
-        let Some((old_position, old_rotation, old_pawn, old_heading)) = previous else {
-            return ReleaseMotion::default();
-        };
-        // Pawn-space samples exclude locomotion and snap turning. Teleports,
-        // recentering, and implausible tracking jumps must not launch an item.
-        let linear = (position - old_position) / dt;
-        if linear.magnitude() > 20.0
-            || (pawn - old_pawn).magnitude() > 0.5
-            || heading.dot(old_heading).abs() < 0.995
-        {
-            self.samples.clear();
-            return ReleaseMotion::default();
-        }
-        let mut delta = rotation.normalize() * old_rotation.conjugate();
-        if delta.s < 0.0 {
-            delta = -delta;
-        }
-        let angle = 2.0 * delta.v.magnitude().atan2(delta.s);
-        let angular = if delta.v.magnitude() > 0.0001 {
-            delta.v.normalize() * angle / dt
-        } else {
-            Vector3::zero()
-        };
-        if angular.magnitude() > 50.0 {
-            self.samples.clear();
-            return ReleaseMotion::default();
-        }
-        self.samples
-            .push_back((ReleaseMotion { linear, angular }, dt));
-        // A short time-weighted history smooths controller noise without picking
-        // a stale peak after the player has deliberately stopped their hand.
-        while self.samples.len() > 1
-            && self.samples.iter().map(|(_, dt)| dt).sum::<f32>() - self.samples.front().unwrap().1
-                >= crate::dev_params::get(crate::dev_params::THROW_SMOOTHING_MS) / 1000.0
-        {
-            self.samples.pop_front();
-        }
-        let duration: f32 = self.samples.iter().map(|(_, dt)| dt).sum();
-        let mut result = ReleaseMotion::default();
-        for (sample, dt) in &self.samples {
-            result.linear += sample.linear * (*dt / duration);
-            result.angular += sample.angular * (*dt / duration);
-        }
-        result.linear = heading.rotate_vector(result.linear);
-        result.angular = heading.rotate_vector(result.angular);
-        self.latest = result;
-        result
     }
 }
 
@@ -248,38 +88,6 @@ pub(crate) struct ThrownItems {
     active: HashMap<EntityId, SavedThrow>,
     before_step: HashMap<EntityId, BodyMotion>,
     sound_guards: HashMap<EntityId, ImpactSoundGuard>,
-}
-
-fn relative_mass(authored: Option<f32>) -> f32 {
-    // Retail MedSci mug 439 authors 30. These are Dark units, not kilograms.
-    authored
-        .filter(|m| m.is_finite() && *m > 0.0)
-        .unwrap_or(30.0)
-        .max(1.0)
-        / 30.0
-}
-
-fn launch_motion(
-    mut motion: ReleaseMotion,
-    strength: i32,
-    mass: f32,
-    player_velocity: Vector3<f32>,
-    tuning: &ThrowTuning,
-) -> ReleaseMotion {
-    let strength = (strength.clamp(1, 6) - 1) as f32 / 5.0;
-    let weight_penalty = mass.max(1.0).powf(tuning.weight_exponent);
-    let gain = (1.0 + tuning.strength_bonus * strength)
-        / (1.0 + (weight_penalty - 1.0) * (1.0 - strength * tuning.strength_weight_relief));
-    motion.linear *= gain * tuning.speed_scale;
-    if motion.linear.magnitude() > tuning.max_speed {
-        motion.linear = motion.linear.normalize() * tuning.max_speed;
-    }
-    motion.linear += player_velocity;
-    motion.angular *= tuning.spin_scale;
-    if motion.angular.magnitude() > tuning.max_spin {
-        motion.angular = motion.angular.normalize() * tuning.max_spin;
-    }
-    motion
 }
 
 fn impact_damage(mass: f32, closing_speed: f32, organic: bool, tuning: &ThrowTuning) -> f32 {
@@ -329,44 +137,6 @@ impl ThrownItems {
     pub fn cancel(&mut self, entity: EntityId) {
         self.active.remove(&entity);
         self.sound_guards.remove(&entity);
-    }
-    pub fn launch(
-        &mut self,
-        world: &World,
-        physics: &mut PhysicsWorld,
-        entity: EntityId,
-        motion: ReleaseMotion,
-    ) {
-        self.cancel(entity);
-        let mass = relative_mass(
-            world
-                .borrow::<View<PropPhysAttr>>()
-                .ok()
-                .and_then(|v| v.get(entity).ok().map(|p| p.mass)),
-        );
-        let tuning = ThrowTuning::current();
-        let strength = crate::implants::effective_stats(world)
-            .map(|stats| stats.strength)
-            .unwrap_or(1);
-        let strength = if tuning.strength_override > 0.0 {
-            tuning.strength_override as i32
-        } else {
-            strength
-        };
-        let deliberate = motion.linear.magnitude() >= tuning.min_speed;
-        let motion = launch_motion(motion, strength, mass, physics.player_velocity(), &tuning);
-        if physics.release_motion(entity, motion) {
-            self.active.insert(
-                entity,
-                SavedThrow {
-                    mass,
-                    remaining: tuning.damage_window,
-                    armed: deliberate,
-                    motion,
-                },
-            );
-        }
-        self.publish(world, physics);
     }
 
     pub fn restore(&mut self, world: &World, physics: &mut PhysicsWorld) {
@@ -547,91 +317,6 @@ impl ThrownItems {
 mod tests {
     use super::*;
     use cgmath::vec3;
-
-    /// A fumbled weapon springs up and back from the contact - horizontally
-    /// away from it, never toward the victim - and straight up without one.
-    #[test]
-    fn a_fumble_springs_up_and_away_from_the_contact() {
-        let weapon = vec3(1.0, 1.5, 0.0);
-        let motion = fumble_motion(weapon, Some(vec3(2.0, 1.2, 0.0)));
-        assert!(motion.linear.x < 0.0 && motion.linear.z.abs() < 1e-6);
-        assert!(motion.linear.y > 0.0);
-        assert!(motion.linear.magnitude() < 4.0, "a spring, not a throw");
-
-        let straight = fumble_motion(weapon, None);
-        assert_eq!(straight.linear, vec3(0.0, straight.linear.y, 0.0));
-        assert!(straight.linear.y > 0.0);
-    }
-
-    fn identity() -> Quaternion<f32> {
-        Quaternion::new(1.0, 0.0, 0.0, 0.0)
-    }
-
-    #[test]
-    fn spin_zero_time_requests_pause_and_teleport() {
-        use cgmath::{Deg, Rotation3};
-        let mut history = HandMotion::default();
-        let q = identity();
-        let zero = Vector3::zero();
-        history.sample(zero, q, zero, q, 1.0 / 60.0);
-        let spin = history.sample(
-            zero,
-            Quaternion::from_angle_y(Deg(10.0)),
-            zero,
-            q,
-            1.0 / 60.0,
-        );
-        assert!((spin.angular.y - 10.471975).abs() < 0.001);
-        assert_eq!(history.sample(zero, q, zero, q, 0.0).angular, spin.angular);
-        let world = World::new();
-        cancel_tracking(&world);
-        history.sync_epoch(&world);
-        assert_eq!(history.sample(zero, q, zero, q, 0.0).angular, zero);
-        history.sample(zero, q, zero, q, 1.0 / 60.0);
-        assert_eq!(
-            history
-                .sample(vec3(0.1, 0.0, 0.0), q, vec3(50.0, 0.0, 0.0), q, 1.0 / 60.0)
-                .linear,
-            zero
-        );
-        assert_eq!(history.sample(zero, q, zero, q, 0.0).linear, zero);
-    }
-
-    #[test]
-    fn zero_time_release_rejects_invalid_tracking() {
-        let mut history = HandMotion::default();
-        let q = identity();
-        let zero = Vector3::zero();
-        history.sample(zero, q, zero, q, 1.0 / 60.0);
-        history.sample(vec3(0.1, 0.0, 0.0), q, zero, q, 1.0 / 60.0);
-        assert_eq!(
-            history
-                .sample(zero, Quaternion::new(0.0, 0.0, 0.0, 0.0), zero, q, 0.0)
-                .linear,
-            zero
-        );
-    }
-
-    #[test]
-    fn velocity_is_independent_of_frame_rate_and_quaternion_sign() {
-        for hz in [60.0, 72.0, 90.0, 120.0] {
-            let mut history = HandMotion::default();
-            for i in 0..12 {
-                let q = if i % 2 == 0 { identity() } else { -identity() };
-                let motion = history.sample(
-                    vec3(i as f32 * 6.0 / hz, 0.0, 0.0),
-                    q,
-                    Vector3::zero(),
-                    identity(),
-                    1.0 / hz,
-                );
-                if i > 0 {
-                    assert!((motion.linear.x - 6.0).abs() < 0.001);
-                }
-                assert_eq!(motion.angular, Vector3::zero());
-            }
-        }
-    }
 
     fn impact_fixture(
         material: &str,
@@ -830,85 +515,6 @@ mod tests {
     }
 
     #[test]
-    fn physics_release_and_save_restore_preserve_linear_and_angular_motion() {
-        let mut world = World::new();
-        let item = world.add_entity(());
-        let mut physics = PhysicsWorld::new();
-        physics.add_dynamic(
-            item,
-            Vector3::zero(),
-            identity(),
-            Vector3::zero(),
-            crate::physics::PhysicsShape::Sphere(0.1),
-            crate::physics::CollisionGroup::entity(),
-            false,
-            crate::physics::DynamicPhysicsOptions::default(),
-        );
-        let mut throws = ThrownItems::default();
-        throws.launch(
-            &world,
-            &mut physics,
-            item,
-            ReleaseMotion {
-                linear: vec3(6.0, 0.0, 0.0),
-                angular: vec3(0.0, 3.0, 0.0),
-            },
-        );
-        assert_eq!(physics.get_velocity(item).unwrap(), vec3(6.0, 0.0, 0.0));
-        assert_eq!(
-            physics.snapshot_body_motion()[&item].angular,
-            vec3(0.0, 3.0, 0.0)
-        );
-        let saved = world.borrow::<UniqueView<SavedThrows>>().unwrap().0[&item.inner()];
-        world.add_component(item, saved);
-        physics.release_motion(item, ReleaseMotion::default());
-        let mut restored = ThrownItems::default();
-        restored.restore(&world, &mut physics);
-        assert_eq!(physics.get_velocity(item).unwrap(), vec3(6.0, 0.0, 0.0));
-        assert_eq!(
-            physics.snapshot_body_motion()[&item].angular,
-            vec3(0.0, 3.0, 0.0)
-        );
-        restored.cancel(item);
-        restored.publish(&world, &physics);
-        assert!(
-            world
-                .borrow::<UniqueView<SavedThrows>>()
-                .unwrap()
-                .0
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn tuning_scales_spin_and_launch_without_exceeding_selected_limits() {
-        let mut tuning = ThrowTuning::defaults();
-        tuning.speed_scale = 2.0;
-        tuning.spin_scale = 2.0;
-        tuning.max_speed = 8.0;
-        tuning.max_spin = 3.0;
-        let input = ReleaseMotion {
-            linear: vec3(6.0, 0.0, 0.0),
-            angular: vec3(0.0, 2.0, 0.0),
-        };
-        let result = launch_motion(input, 1, 1.0, Vector3::zero(), &tuning);
-        assert_eq!(result.linear.x, 8.0);
-        assert_eq!(result.angular.y, 3.0);
-        tuning.organic_cap = 1.0;
-        tuning.inorganic_cap = 0.0;
-        assert_eq!(impact_damage(1.0, 20.0, true, &tuning), 1.0);
-        assert_eq!(impact_damage(1.0, 20.0, false, &tuning), 0.0);
-        tuning.weight_exponent = 1.0;
-        tuning.strength_weight_relief = 1.0;
-        assert!(
-            launch_motion(input, 6, 1e30, Vector3::zero(), &tuning)
-                .linear
-                .x
-                .is_finite()
-        );
-    }
-
-    #[test]
     fn cup_damage_caps_and_grazes() {
         assert_eq!(impact_damage(1.0, 6.0, true, &ThrowTuning::defaults()), 2.0);
         assert_eq!(
@@ -929,36 +535,5 @@ mod tests {
             0.0
         );
         assert_eq!(impact_damage(0.2, 6.0, true, &ThrowTuning::defaults()), 0.0);
-    }
-    #[test]
-    fn strength_helps_without_changing_direction() {
-        let input = ReleaseMotion {
-            linear: vec3(0.0, 0.0, -6.0),
-            angular: Vector3::zero(),
-        };
-        let weak = launch_motion(input, 1, 1.0, Vector3::zero(), &ThrowTuning::defaults());
-        let strong = launch_motion(input, 6, 1.0, Vector3::zero(), &ThrowTuning::defaults());
-        assert_eq!(weak.linear.z, -6.0);
-        assert_eq!(strong.linear.z, -7.5);
-        assert!(
-            launch_motion(input, 1, 4.0, Vector3::zero(), &ThrowTuning::defaults())
-                .linear
-                .magnitude()
-                < weak.linear.magnitude()
-        );
-    }
-    #[test]
-    fn stationary_drop_tracking_jump_and_recovery() {
-        let mut history = HandMotion::default();
-        let q = Quaternion::new(1.0, 0.0, 0.0, 0.0);
-        let sample =
-            |h: &mut HandMotion, x| h.sample(vec3(x, 0.0, 0.0), q, Vector3::zero(), q, 1.0 / 60.0);
-        assert_eq!(sample(&mut history, 0.0).linear, Vector3::zero());
-        assert!((sample(&mut history, 0.1).linear.x - 6.0).abs() < 0.001);
-        assert_eq!(sample(&mut history, 100.0).linear, Vector3::zero());
-        for _ in 0..5 {
-            sample(&mut history, 100.0);
-        }
-        assert_eq!(sample(&mut history, 100.0).linear, Vector3::zero());
     }
 }

@@ -2,7 +2,7 @@
 //! native panels; glyph layout and widget geometry remain owned by the shared UI.
 use crate::ui::canvas_viewport::{CanvasViewport, target_to_canvas};
 use crate::ui::{HAlign, Rect, UiCanvas, VAlign, WorldPanel};
-use cgmath::{InnerSpace, Quaternion, Rotation, Vector2, Vector3, vec2, vec3};
+use cgmath::{Quaternion, Rotation, Vector2, Vector3, vec2, vec3};
 
 mod grip;
 
@@ -12,59 +12,7 @@ pub(super) const PANEL_RANGE: f32 = 8.0 / crate::METERS_PER_WORLD_UNIT;
 pub const SIZE: Vector2<f32> = Vector2::new(268.0, 376.0);
 pub const SCREEN: Rect = Rect::new(8.0, 8.0, 252.0, 296.0);
 
-pub fn panel(
-    position: Vector3<f32>,
-    rotation: Quaternion<f32>,
-    grip: Option<&crate::vr_grip::ResolvedGrip>,
-    hand: usize,
-) -> Option<WorldPanel> {
-    let grip = grip?;
-    // The runtime grip already carries the world-size compensation.
-    let authored_size = face_size() / crate::world_scale::WorldScale::active().personal();
-    let (base, contact) = authored_panel(position, rotation, grip, authored_size);
-    Some(grip::place(
-        base,
-        contact,
-        rotation,
-        &grip::tuning(hand),
-        grip::margin(hand),
-    ))
-}
 
-fn authored_panel(
-    position: Vector3<f32>,
-    rotation: Quaternion<f32>,
-    grip: &crate::vr_grip::ResolvedGrip,
-    size: Vector2<f32>,
-) -> (WorldPanel, Vector3<f32>) {
-    let display = size * grip.item_scale;
-    let anchor = Vector3::from(grip.anchor);
-    let center = scaled_grip_point(
-        vec3(0.0, 0.0, 0.0),
-        anchor,
-        grip.item_scale,
-        display.x / crate::tricorder::width(),
-    );
-    let base = WorldPanel {
-        center: position
-            + rotation.rotate_vector(grip.offset + grip.rotation.rotate_vector(center)),
-        rotation: (rotation * grip.rotation).normalize(),
-        size: display,
-    };
-    let contact = position
-        + rotation
-            .rotate_vector(grip.offset + grip.rotation.rotate_vector(anchor * grip.item_scale));
-    (base, contact)
-}
-
-fn scaled_grip_point(
-    point: Vector3<f32>,
-    anchor: Vector3<f32>,
-    authored: f32,
-    scale: f32,
-) -> Vector3<f32> {
-    anchor * authored + (point - anchor) * scale
-}
 
 fn grip_margin() -> f32 {
     crate::dev_params::get(crate::dev_params::VR_MFD_GRIP_MARGIN)
@@ -374,40 +322,6 @@ mod tests {
     }
 
     #[test]
-    fn saved_scale_matches_editor_body_screen_and_lens_in_both_hands() {
-        use cgmath::{Deg, Rotation3};
-        let library: crate::vr_grip::GripLibrary =
-            serde_json::from_str(include_str!("../../../assets/vr-tricorder-grips.json")).unwrap();
-        let position = vec3(0.2, 0.4, -0.7);
-        let hand_rotation = Quaternion::from_angle_y(Deg(37.0));
-        let size = vec2(
-            crate::tricorder::width(),
-            crate::tricorder::width() * SIZE.y / SIZE.x,
-        );
-        for hand in ["left", "right"] {
-            for scale in [0.5, 1.0, 1.5] {
-                let mut grip = library.lookup("tricorder", hand).unwrap().clone();
-                grip.item_scale = scale;
-                let (panel, _) = authored_panel(position, hand_rotation, &grip, size);
-                assert_eq!(panel.size, size * scale);
-                for point in [
-                    vec3(0.0, 0.0, 0.0),
-                    vec3(size.x / 2.0, size.y / 2.0, 0.0),
-                    crate::tricorder::lens(size.x),
-                ] {
-                    let runtime = panel.center + panel.rotation * (point * panel.size.x / size.x);
-                    let editor =
-                        position + hand_rotation * (grip.offset + grip.rotation * (point * scale));
-                    assert!(
-                        (runtime - editor).magnitude() < 0.00001,
-                        "{hand} scale {scale}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn landscape_modes_preserve_the_body_and_exclude_the_gap() {
         use cgmath::InnerSpace;
         let source = Some(Rect::new(2.0, 124.0, 636.0, 296.0));
@@ -441,16 +355,6 @@ mod tests {
             } else {
                 assert_eq!(layout.size, SIZE);
             }
-        }
-    }
-
-    #[test]
-    fn resizing_the_device_keeps_the_authored_grip_contact_fixed() {
-        let anchor = vec3(0.1, -0.02, 0.18);
-        for scale in [0.3, 0.7, 1.2] {
-            assert_eq!(scaled_grip_point(anchor, anchor, 1.0, scale), anchor);
-            let edge = scaled_grip_point(anchor + vec3(0.2, 0.0, 0.0), anchor, 1.0, scale);
-            assert!((edge.x - anchor.x - 0.2 * scale).abs() < 0.0001);
         }
     }
 

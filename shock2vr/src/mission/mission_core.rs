@@ -85,7 +85,7 @@ use crate::{
         draw_item_outline, is_hud_selectable,
     },
     input_context::{self, InputContext},
-    interaction::{FlatInteraction, InteractionContext, PlayerInteraction, VrInteraction},
+    interaction::{FlatInteraction, InteractionContext, PlayerInteraction},
     inventory::PlayerInventoryEntity,
     mission::{SpatialQueryEngine, entity_populator::EntityPopulator},
     physics::{self, CollisionGroup, PlayerHandle},
@@ -445,86 +445,7 @@ mod loot_table_tests {
     }
 }
 
-/// Send the grip pose workbench's controller pulses out with the frame's
-/// haptics.
-fn request_pulses(world: &World, pulses: Vec<(crate::Handedness, crate::haptics::HapticPulse)>) {
-    if let Ok(mut feedback) = world.borrow::<UniqueViewMut<crate::haptics::HapticFeedback>>() {
-        for (hand, pulse) in pulses {
-            feedback.request(hand, pulse);
-        }
-    }
-}
 
-/// The grip pose workbench's scene, built from the mission's draws of its held
-/// item (`scene`): the item on the workbench instead of in its frozen hand,
-/// again in each extra view, and the workbench's floor. Nothing else of the
-/// mission is kept. The item keeps its entity id but is relabelled, and is lit
-/// by the workbench's own lights.
-fn draw_pose_workbench(
-    scene: Vec<SceneObject>,
-    bench: crate::interaction::PoseWorkbench,
-    world: &World,
-) -> Vec<SceneObject> {
-    use cgmath::SquareMatrix;
-    // Back out the item's whole draw transform (scale included), then draw it
-    // at its grip's scale: the scale its gloves and contacts use, which the
-    // bench's thumbstick changes.
-    let Some(from_world) = world
-        .borrow::<View<RuntimePropTransform>>()
-        .ok()
-        .and_then(|transforms| transforms.get(bench.entity).ok().map(|t| t.0))
-        .and_then(|transform| transform.invert())
-    else {
-        return bench.environment;
-    };
-    // The other hand's model frame, reflected about the model origin (the
-    // drawn frame sits at the grip contact).
-    let mirror = bench.mirror.map(|mirror| {
-        let contact = crate::interaction::grip_contact(world, bench.entity);
-        Matrix4::from_translation(-contact) * mirror * Matrix4::from_translation(contact)
-    });
-    // Turned for viewing, the extra views included.
-    let rebase = bench.turn
-        * Matrix4::from_translation(bench.item.position)
-        * Matrix4::from(bench.item.rotation)
-        * Matrix4::from_scale(bench.item_scale)
-        * mirror.unwrap_or_else(Matrix4::identity)
-        * from_world;
-    // The item's own model; effects tagged with it (a laser sight) are left
-    // out, rather than left behind at the frozen hand or turned across the
-    // views.
-    let item: Vec<_> = scene
-        .into_iter()
-        .filter_map(|object| {
-            let tag = object.debug_tag().filter(|tag| {
-                tag.entity_id == Some(bench.entity.inner())
-                    && tag.source.as_deref() == Some("entity")
-            })?;
-            let tag = Rc::new(engine::scene::SceneObjectDebugTag {
-                source: Some(crate::util::render_source::GRIP_WORKBENCH.to_owned()),
-                ..tag.clone()
-            });
-            Some((object, tag))
-        })
-        .collect();
-    let mut objects = bench.environment;
-    let placements =
-        std::iter::once(rebase).chain(bench.views.into_iter().flatten().map(|view| view * rebase));
-    for placement in placements {
-        for (object, tag) in &item {
-            let mut copy = object.clone();
-            copy.set_transform(placement * object.get_transform());
-            // A reflection turns the faces inside out.
-            if mirror.is_some() {
-                copy.set_backface_culling(copy.backface_culling().map(dark::model::flip_winding));
-            }
-            copy.set_lights(bench.lights.clone());
-            copy.set_debug_tag(Some(tag.clone()));
-            objects.push(copy);
-        }
-    }
-    objects
-}
 
 /// Move a VR overlay built in the tracked pawn space (the cyber interface, the
 /// `show_position` readout) into world coordinates, and put it in the system-
@@ -3153,16 +3074,6 @@ pub struct MissionCore {
     /// The lower-button press behind `button_jump` is still held: the jump
     /// channel stays down with it, so a held press keeps swimming up.
     button_jump_held: bool,
-    /// Where letting go of every climbing hold would land: resolved after each
-    /// movement frame, shown and committed until the next (see `climb_release`).
-    climb_release: crate::climb_release::ReleasePreview,
-    /// The assisted landing a committed release is moving to.
-    climb_release_glide: Option<crate::climb_release::ReleaseOutcome>,
-    /// A committed assisted exit taken as a fade-and-teleport, while it runs.
-    climb_exit_teleport: Option<crate::climb_release::ExitTeleport>,
-    /// The view's yaw (radians about +Y; 0 faces -Z), for the footprint.
-    climb_release_yaw: f32,
-    landing_marker: crate::climb_marker::LandingMarker,
 
     /// Entry/exit feel for `use_mode`: one eased 0..1 ramp driving the VR
     /// comfort dim's strength - see [`crate::ui::entry_ramp`]. Advanced every
@@ -3297,10 +3208,10 @@ fn restore_held_item_interaction(
 ) -> Vec<VirtualHandEffect> {
     let mut effects = Vec::new();
     if let Some(entity_id) = left_hand_entity {
-        effects.extend(interaction.restore_held(world, entity_id, vr_config::Handedness::Left));
+        effects.extend(interaction.grab(world, entity_id, vr_config::Handedness::Left));
     }
     if let Some(entity_id) = right_hand_entity {
-        effects.extend(interaction.restore_held(world, entity_id, vr_config::Handedness::Right));
+        effects.extend(interaction.grab(world, entity_id, vr_config::Handedness::Right));
     }
     effects
 }
@@ -3546,12 +3457,7 @@ impl MissionCore {
         let mission_saved_script_states = population.script_states;
 
         // Instantiate held items
-        let mut interaction: Box<dyn PlayerInteraction> =
-            if game_options.presentation_mode == crate::PresentationMode::Flat {
-                Box::new(FlatInteraction::new())
-            } else {
-                Box::new(VrInteraction::new())
-            };
+        let mut interaction: Box<dyn PlayerInteraction> = Box::new(FlatInteraction::new());
         let held_instantiation = held_item_save_data
             .instantiate_with_legacy_template_names(&mut world, &unique_gamesys_template_names);
         let left_hand_entity = held_instantiation.left_hand_entity_id;
@@ -4167,11 +4073,6 @@ impl MissionCore {
             psi_nav_latched: Default::default(),
             button_jump: false,
             button_jump_held: false,
-            climb_release: Default::default(),
-            climb_release_glide: None,
-            climb_exit_teleport: None,
-            climb_release_yaw: 0.0,
-            landing_marker: Default::default(),
             use_mode_shortcut: None,
             use_mode_ramp: crate::ui::entry_ramp::EntryExitRamp::new(),
             vr_use_mode_anchor: crate::ui::FrontendPanelAnchor::new(),
@@ -4258,8 +4159,6 @@ impl MissionCore {
         if !self.player_is_alive() {
             return Vec::new();
         }
-        // A dead body is not carried onto a climb exit's landing.
-        self.climb_exit_teleport = None;
 
         if let Ok(mut status) = self
             .world
@@ -5050,51 +4949,6 @@ impl MissionCore {
 
         let up_value = turn_thumbstick_value.y / dark::SCALE_FACTOR;
 
-        // VR climbs by hand: a gripping hand resolves to a body translation
-        // that replaces locomotion entirely for the frame (stick movement
-        // is ignored; turning above still applies). Flat has
-        // no hands and keeps its push-into-ladder climb.
-        //
-        // Composed against the pose the coming step will land on, not the one
-        // `PlayerInfo` carries: the movement is cast from the queued kinematic
-        // target, and composing against the superseded pose would apply each
-        // correction on top of a body that has already absorbed the last one.
-        // A scripted top-out owns the body outright, so the hands do nothing
-        // while one runs and cannot take a fresh hold part-way over the lip.
-        self.interaction.reserve_body_tool_hands([false, false]);
-        if !tick.elapsed.is_zero() && self.climb_exit_teleport.is_some() {
-            self.interaction.suspend_hand_climb(input_context);
-        }
-        let hand_climb = (!tick.elapsed.is_zero()
-            && !self.player_handle.is_topping_out()
-            && self.climb_exit_teleport.is_none())
-        .then(|| {
-            let pawn_pos = self
-                .physics
-                .get_player_next_translation(&self.player_handle);
-            self.interaction
-                .update_hand_climb(&crate::interaction::ClimbContext {
-                    physics: &self.physics,
-                    world: &self.world,
-                    input: input_context,
-                    pawn_pos,
-                    pawn_rotation: new_rotation,
-                    // Measured from the STANDING capsule while balling up
-                    // on a hold: that swap raises the collider's feet
-                    // without the body moving, and a ledge must not stop
-                    // being a ledge just because the player tucked their
-                    // knees under it.
-                    feet_y: pawn_pos.y
-                        - crate::physics::player_center_above_floor(
-                            self.player_handle.is_crouched()
-                                && !self.player_handle.is_hanging_crouched(),
-                        ),
-                    step_dt: self.physics.player_step_dt(),
-                    grounded: self.player_handle.is_grounded(),
-                })
-        })
-        .unwrap_or_default();
-
         // A frozen AI keeps its physical body and gravity, but cannot coast
         // on the previous animation's horizontal root-motion velocity.
         for entity in self.id_to_physics.keys() {
@@ -5140,8 +4994,6 @@ impl MissionCore {
         // PlayerInfo/introspection even before the next real step.
         self.thrown_items
             .prepare(&self.physics, time.elapsed.as_secs_f32());
-        // The hold a hand vault starts from this frame, for the player trail.
-        let mut vault_hold = None;
         let mut comfort_displacement = vec3(0.0, 0.0, 0.0);
         let (new_character_pos, collision_events) = if tick.elapsed.is_zero() {
             (
@@ -5149,165 +5001,34 @@ impl MissionCore {
                 Vec::new(),
             )
         } else {
-            // A voluntary final release commits the assisted landing on show,
-            // frozen there (the head no longer steers it) and revalidated from
-            // here; it replaces the throw. A broken hold or lost tracking does
-            // not commit. Before the crouch request below: the glide owns the
-            // body, so a held crouch cannot first change the stance the shown
-            // landing was resolved for.
-            let shown = self
-                .climb_release
-                .outcome
-                .filter(|outcome| outcome.mode == crate::climb_release::ReleaseMode::Assisted);
-            let mut hand_climb = hand_climb;
-            let assisted_release = shown.is_some_and(|outcome| {
-                hand_climb.released
-                    && input_context
-                        .pose_tracking
-                        .is_none_or(|tracking| tracking.head && tracking.hands == [true; 2])
-                    && self.commit_assisted_exit(outcome)
-            });
-            // A teleport exit: the body waits, held in place, until the view
-            // is black, then moves once; the hands take no hold until the
-            // fade is over. A landing gone invalid by then drops the body.
-            if let Some(exit) = self.climb_exit_teleport.as_mut() {
-                if exit.advance(tick.elapsed.as_secs_f32()) {
-                    let outcome = exit.outcome;
-                    if self
-                        .physics
-                        .teleport_assisted_release(
-                            outcome.landing,
-                            outcome.safe,
-                            &mut self.player_handle,
-                        )
-                        .is_some()
-                    {
-                        self.player_footsteps.reset();
-                    } else {
-                        // Refused: the body drops from here, so stop showing
-                        // a landing it will not reach.
-                        self.climb_release_glide = None;
-                    }
-                }
-                if exit.done() {
-                    self.climb_exit_teleport = None;
-                }
-            }
-            // The body waits, held in place, until it moves; through the
-            // fade-in after, gravity runs but the stick does not walk (below).
-            if self.climb_exit_teleport.is_some_and(|exit| !exit.moved()) {
-                hand_climb.translation = Some(vec3(0.0, 0.0, 0.0));
-            }
             // Apply the crouch request before moving: swaps the capsule size
             // feet-planted; standing up is refused without headroom (the
             // actual state is read back via `player_is_crouched`).
-            //
-            // A hand on a ledge balls the body up regardless of the crouch
-            // input, so the knees clear the lip being pulled over - and it
-            // swaps the capsule around the body CENTER, since a hanging body's
-            // feet rest on nothing and the gripping hand rides that center.
-            //
-            // Only while they are actually hanging, though. A player still
-            // standing on the deck holding a waist-high ledge has their weight
-            // on their feet, and a center-anchored swap there would lift them
-            // off the floor going down and drive the standing capsule through
-            // it coming back up.
-            let hangs_from_a_ledge = !self.player_handle.is_grounded()
-                && self
-                    .interaction
-                    .hand_climb()
-                    .is_some_and(|climb| climb.holds_a_ledge());
-            let still_hanging =
-                self.player_handle.is_hanging_crouched() && !self.player_handle.is_grounded();
-            if hangs_from_a_ledge || still_hanging {
-                // Undone the same way it was made, so a body that is still in
-                // the air ends up back where it hung rather than 0.64 wu above
-                // it. Once their feet are on something the ordinary
-                // feet-planted path below is the correct one - and the only one
-                // that can stand them up at all, since a center-anchored
-                // expansion would put their feet through that floor.
-                self.physics.set_player_crouch_hanging(
-                    hangs_from_a_ledge || input_context.crouch,
-                    &mut self.player_handle,
-                );
-            } else if hand_climb.translation.is_none() {
-                self.physics
-                    .set_player_crouch(input_context.crouch, &mut self.player_handle);
-            }
-            // Head over the lip: the hands have done all they can, so hand the
-            // body to the scripted top-out and let go of everything. A route
-            // the planner cannot find is simply not taken - the holds stay and
-            // the player keeps pulling.
-            if let Some(grip) = self.hand_vault_target(input_context.head.position) {
-                if self
-                    .physics
-                    .plan_hand_top_out(grip, &mut self.player_handle)
-                {
-                    vault_hold = self
-                        .interaction
-                        .hand_climb()
-                        .and_then(|climb| climb.anchor())
-                        .map(|hand| (hand, grip.into()));
-                    self.interaction.release_climb_grips();
-                    hand_climb.translation = None;
-                }
-            }
-            // Letting go of the last hold throws the body with the momentum of
-            // the pull, so a hard haul-and-release sails on past the hold.
-            if let Some(launch) = hand_climb.launch.filter(|_| !assisted_release) {
-                self.physics.launch_player(launch, &mut self.player_handle);
-            }
-            // A discrete jump (a Quest hand's lower face button, an injected
-            // `Jump` action) rides the same held channel the runtimes drive,
-            // for exactly one frame - so the controller's edge detection sees
-            // one jump per press however the request arrived.
+            self.physics
+                .set_player_crouch(input_context.crouch, &mut self.player_handle);
+            // A discrete jump (an injected `Jump` action) rides the same held
+            // channel the runtimes drive, for exactly one frame - so the
+            // controller's edge detection sees one jump per press however the
+            // request arrived.
             self.button_jump_held &= input_context.jump_button_held;
             let jump = input_context.jump
                 || std::mem::take(&mut self.button_jump)
                 || self.button_jump_held;
             let (medium, water_current) = self.player_water_state(jump);
-            // No walking or jumping until a climb exit's fade is over.
-            let exit_fading = self.climb_exit_teleport.is_some();
-            let request = match hand_climb.translation {
-                Some(translation) => crate::physics::PlayerMoveRequest::HandClimb { translation },
-                None => crate::physics::PlayerMoveRequest::Walk {
-                    movement: if exit_fading {
-                        vec3(0.0, 0.0, 0.0)
-                    } else {
-                        forward
-                            + new_rotation.rotate_vector(roomscale_movement)
-                            + cgmath::vec3(0.0, up_value, 0.0)
-                    },
-                    facing,
-                    jump_pressed: jump && !exit_fading,
-                    // Push-to-climb is the FLAT climb input; VR's hands are
-                    // its own (see `vr_climb`).
-                    push_to_climb: game_options.presentation_mode == crate::PresentationMode::Flat,
-                    medium,
-                    water_current,
-                },
+            let request = crate::physics::PlayerMoveRequest::Walk {
+                movement: forward
+                    + new_rotation.rotate_vector(roomscale_movement)
+                    + cgmath::vec3(0.0, up_value, 0.0),
+                facing,
+                jump_pressed: jump,
+                push_to_climb: true,
+                medium,
+                water_current,
             };
             let held = self.interaction.held_entities();
-            let pending_pawn = self
+            let _pending_pawn = self
                 .physics
                 .get_player_next_translation(&self.player_handle);
-            for (hand, entity) in [held.0, held.1].into_iter().enumerate() {
-                let Some(entity) = entity else { continue };
-                let context = self
-                    .interaction
-                    .held_grip_anchor(entity)
-                    .and_then(|anchor| {
-                        physics::HeldRecoveryContext::from_input(
-                            input_context,
-                            hand,
-                            pending_pawn,
-                            new_rotation,
-                            anchor,
-                            tick.elapsed.as_secs_f32(),
-                        )
-                    });
-                self.physics.set_held_recovery_context(entity, context);
-            }
             // Match the blade rendered on the previous frame before sweeping it.
             for entity in [held.0, held.1].into_iter().flatten() {
                 if let Some(bounds) = crate::rapier::collider_bounds(&self.world, entity) {
@@ -5331,48 +5052,6 @@ impl MissionCore {
                     .update_player_movement(request, &mut self.player_handle)
             );
             comfort_displacement = moved.0 - before_move;
-            if let Some(requested) = hand_climb.translation {
-                self.interaction
-                    .resolve_hand_climb(requested, self.player_handle.self_translation());
-            }
-            // A committed landing stays shown through the glide and any fall
-            // that ends it, until the body lands or takes a new hold. A glide
-            // turned back by an obstruction ends away from it: clear at once.
-            if !self.player_handle.is_topping_out() && self.climb_exit_teleport.is_none() {
-                let body = self.physics.get_player_translation(&self.player_handle);
-                if self.climb_release_glide.is_some_and(|glide| {
-                    let off = glide.landing.center - body;
-                    vec3(off.x, 0.0, off.z).magnitude() > 0.1
-                }) || self.player_handle.is_grounded()
-                    || self
-                        .interaction
-                        .hand_climb()
-                        .is_some_and(|climb| climb.grips().next().is_some())
-                {
-                    self.climb_release_glide = None;
-                }
-            }
-            self.climb_release =
-                self.interaction
-                    .hand_climb()
-                    .map_or_else(Default::default, |climb| {
-                        crate::climb_release::resolve(
-                            &self.physics,
-                            &self.player_handle,
-                            climb,
-                            input_context,
-                            new_rotation,
-                            &self.climb_release,
-                            crate::dev_params::get(crate::dev_params::CLIMB_SAFE_DROP)
-                                / crate::METERS_PER_WORLD_UNIT,
-                        )
-                    });
-            if let Some(head) = crate::util::tracked_rotation(input_context.head.rotation) {
-                let forward = (new_rotation * head).rotate_vector(vec3(0.0, 0.0, -1.0));
-                self.climb_release_yaw = (-forward.x).atan2(-forward.z);
-            }
-            self.interaction
-                .set_climb_release_safe(self.climb_release.safe());
             moved
         };
 
@@ -5381,9 +5060,7 @@ impl MissionCore {
         // physical request from the comfort signal. A wall may have rejected
         // part of it (and pushed the capsule back out), so a remainder larger
         // than the actual travel is blocked physical motion, not a ride.
-        let comfort_motion = if hand_climb.translation.is_some() {
-            vec3(0.0, 0.0, 0.0)
-        } else {
+        let comfort_motion = {
             let artificial = comfort_displacement - new_rotation.rotate_vector(roomscale_movement);
             if artificial.magnitude2() > comfort_displacement.magnitude2() {
                 vec3(0.0, 0.0, 0.0)
@@ -5813,13 +5490,6 @@ impl MissionCore {
 
         drop(hitbox_profile);
         let interaction_profile = crate::perf::scope(crate::perf::Phase::Interaction);
-        if !time.elapsed.is_zero() {
-            effects.extend(crate::pipe_melee::resolve(
-                &mut self.world,
-                &mut self.physics,
-                &mut self.id_to_animation_player,
-            ));
-        }
 
         // Default VR has one object-bound world-panel slot. Keep its
         // transient proxy faithful to the original overlay lifecycle before
@@ -5860,7 +5530,7 @@ impl MissionCore {
                 ),
                 self.player_handle.is_crouched(),
                 (false).then(|| {
-                    self.trail_hands(input_context, new_character_pos, new_rotation, vault_hold)
+                    self.trail_hands(input_context, new_character_pos, new_rotation, None)
                 }),
             );
         }
@@ -5904,11 +5574,9 @@ impl MissionCore {
         let interface = crate::cyber_interface::installed(&self.world);
         let device_opted_in = super::mfd_device::enabled(&game_options.experimental_features);
         let device_enabled = device_opted_in && interface;
-        self.interaction.set_body_tool_device(device_enabled);
-        let device_hand: Option<usize> = None;
+        let _ = device_enabled;
         self.flat_ui.psionic_projection = psi_projected;
         let device_active = psi_projected
-            || device_hand.is_some()
             || (game_options.presentation_mode == crate::PresentationMode::Flat
                 && game_options
                     .experimental_features
@@ -5935,17 +5603,6 @@ impl MissionCore {
                     &mut self.physics,
                     &mut self.script_world,
                     &mut self.id_to_physics,
-                );
-            }
-        }
-        if let Some(i) = device_hand {
-            let hand = [&input_context.left_hand, &input_context.right_hand][i];
-            if hand.rotation.magnitude2() > 0.0001 {
-                self.device_panel = super::mfd_device::panel(
-                    hand.position,
-                    hand.rotation,
-                    self.interaction.personal_card_grip(i).as_ref(),
-                    i,
                 );
             }
         }
@@ -6012,7 +5669,7 @@ impl MissionCore {
                 if psi_projected {
                     psi_hand.map(hand_slot)
                 } else {
-                    device_hand
+                    None
                 },
                 [left.is_some(), right.is_some()],
             );
@@ -6035,16 +5692,6 @@ impl MissionCore {
                 }),
             );
         }
-        // Both inventory pointers pose their empty hands toward the UI.
-        let mut ui_point = [false; 2];
-        if let Some(pass) = self.vr_use_mode_pointer.as_ref() {
-            for (index, ray) in pass.rays.iter().enumerate() {
-                if ray.canvas_hit.is_some() && (self.use_mode || pass.is_active(index)) {
-                    ui_point[hand_slot(ray.handedness)] = true;
-                }
-            }
-        }
-        self.interaction.set_ui_point(ui_point);
         if self.vr_trigger_swallow && !self.use_mode {
             let held = |hand: &crate::input_context::Hand| {
                 hand.trigger_value > crate::ui::VR_TRIGGER_THRESHOLD
@@ -6111,95 +5758,27 @@ impl MissionCore {
                 )
             });
 
-        let reserved_releases: Vec<EntityId> = Vec::new();
+        let _reserved_releases: Vec<EntityId> = Vec::new();
 
         effects.extend(self.flat_weapon_animation.advance(
             &mut self.world,
             self.interaction.viewmodel_entity(),
             tick.elapsed.as_secs_f32(),
         ));
-        effects.extend(crate::vr_magazine::refresh_weapons(
-            &self.world,
-            self.interaction.held_entities(),
-        ));
-        effects.extend(crate::vr_weapon_action::advance(
-            &mut self.world,
-            self.interaction.held_entities(),
-            tick.elapsed.as_secs_f32(),
-        ));
-        effects.extend(crate::vr_psi_sway::advance(
-            &mut self.world,
-            self.interaction.held_entities(),
-            hands_input,
-            tick.elapsed.as_secs_f32(),
-        ));
-        let mut interaction_msgs = self.interaction.update(&InteractionContext {
+        let interaction_msgs = self.interaction.update(&InteractionContext {
             physics: &self.physics,
             world: &self.world,
             input: hands_input,
             step_dt: tick.elapsed.as_secs_f32(),
-            support_enabled: !self.use_mode
-                && self.player_is_alive()
-                && self.player_controls_enabled,
             player_pos,
             player_rotation: player_rot,
             flat_eye: self.flat_eye.unwrap_or(neutral_eye),
-            reserved_releases: &reserved_releases,
         });
-        self.interaction.fit_held_items(
-            &self.world,
-            asset_cache,
-            &mut interaction_msgs,
-            game_options,
-        );
         // Cue each hand once as it reaches a target that will take its item,
         // like the shoulder slot's ready tick.
         let tool_ready = self.tool_ready_targets(game_options.presentation_mode);
         self.tool_ready = tool_ready;
 
-        // A chemical released onto a specimen that takes it is used up where
-        // the hand held it, never dropped first (a drop moves it off the grip
-        // and its dissolve would show elsewhere). The release goes straight
-        // to the chemical handler, which also returns any it refuses.
-        let doses: Vec<_> = interaction_msgs
-            .iter()
-            .filter_map(|effect| match effect {
-                VirtualHandEffect::OutMessage {
-                    message:
-                        Message {
-                            to,
-                            payload: MessagePayload::ProvideForConsumption { entity },
-                        },
-                } if crate::research::chemical_ready_for(&self.world, *entity, *to)
-                    && interaction_msgs.iter().any(|effect| {
-                        matches!(effect, VirtualHandEffect::DropItem { entity_id, .. } if entity_id == entity)
-                    }) =>
-                {
-                    Some((*entity, *to))
-                }
-                _ => None,
-            })
-            .collect();
-        interaction_msgs.retain(|effect| match effect {
-            VirtualHandEffect::DropItem {
-                entity_id: entity, ..
-            }
-            | VirtualHandEffect::OutMessage {
-                message:
-                    Message {
-                        payload: MessagePayload::ProvideForConsumption { entity },
-                        ..
-                    },
-            } => !doses.iter().any(|(dose, _)| dose == entity),
-            _ => true,
-        });
-        effects.extend(doses.into_iter().map(|(entity_id, specimen)| {
-            Effect::UseResearchChemical {
-                entity_id,
-                specimen: Some(specimen),
-                released: true,
-            }
-        }));
         // Releases offered to a target: an accepted item is confirmed below
         // once a script consumes it. A release is also a plain drop, so a
         // refusal is explained only on a hackable target no script took the
@@ -6230,32 +5809,6 @@ impl MissionCore {
         self.psi_pull_aim = self.psi_pull_aim_targets();
         self.physics
             .set_held_target_frame(player_pos, player_rot, hands_input.tracking);
-        // Weight is an independent VR experiment. Configure the existing held
-        // drive after acquisition/fitting so all physics substeps share it.
-        let (left, right) = self.interaction.held_entities();
-        let strength = crate::weapon_recoil::handling_strength(&self.world);
-        for gun in [left, right].into_iter().flatten() {
-            let target = game_options
-                .experimental_features
-                .contains("physical_gun_weight")
-                .then(|| self.interaction.held_grip_anchor(gun))
-                .flatten()
-                .and_then(|anchor| {
-                    crate::weapon_recoil::gun_weight_target(
-                        &self.world,
-                        gun,
-                        anchor,
-                        strength,
-                        self.interaction.is_supported(gun),
-                    )
-                });
-            self.physics.set_held_gun_weight(gun, target);
-        }
-
-        // The physical VR reload: a clip carried into the other hand's weapon
-        // loads it. Runs after the hands have been updated so the held pair is
-        // this frame's.
-
         // Tag the wielded weapon with the flat camera/crosshair fire ray so its
         // firing scripts spawn projectiles along the crosshair (camera-origin
         // aim) rather than the offset barrel. Only the player's wielded weapon
@@ -6291,7 +5844,6 @@ impl MissionCore {
         // The timing of this is important - things like the GUI rendering depend on an up-to-date position
         // from physics
         self.synchronize_physics_positions();
-        self.interaction.synchronize_held_visuals(&self.world);
 
         // Re-anchor attached entities (e.g. a muzzle flash) to their parent's
         // now-current transform, so they track a moving parent rather than their
@@ -6512,7 +6064,7 @@ impl MissionCore {
         self.world
             .borrow::<UniqueViewMut<crate::melee_swing::MeleeSwings>>()
             .unwrap()
-            .release_unsupported(|entity| self.interaction.is_supported(entity));
+            .release_unsupported(|_| false);
 
         // Advance the authored light once for both wall lightmaps and fixture
         // emission. Dispatch its bright/dark edge before scripts consume it.
@@ -7220,7 +6772,6 @@ impl MissionCore {
                     .add_component(*id, RuntimePropJointTransforms(joint_transforms));
             }
 
-            crate::pipe_melee::observe(&mut self.world, *id, player, flags);
 
             let v_transform = self.world.borrow::<View<RuntimePropTransform>>().unwrap();
             let maybe_transform = v_transform.get(*id);
@@ -8626,20 +8177,6 @@ impl MissionCore {
         }
     }
 
-    /// Put `entity_id` in a thigh holster (slot 0 right, 1 left), out of any
-    /// container and the physics world.
-    pub(crate) fn holster(&mut self, entity_id: EntityId, slot: usize) {
-        self.detach_from_containers(entity_id);
-        self.make_un_physical(entity_id);
-        self.world.add_component(
-            entity_id,
-            (
-                crate::runtime_props::RuntimePropHolstered { slot: slot as u8 },
-                PropHasRefs(false),
-            ),
-        );
-    }
-
     /// Remove every incoming `Contains` link to `entity_id` (take it out of
     /// whatever container holds it) without giving it world presence.
     fn detach_from_containers(&mut self, entity_id: EntityId) {
@@ -8771,11 +8308,7 @@ impl MissionCore {
         root_transform: Matrix4<f32>,
         additional_options: CreateEntityOptions,
     ) -> EntityCreationInfo {
-        let mut additional_options = additional_options;
-        additional_options.projectile_launch_origin = additional_options
-            .projectile_weapon
-            .and_then(|weapon| self.interaction.held_launch_origin(weapon))
-            .or(additional_options.projectile_launch_origin);
+        let additional_options = additional_options;
         let firing_weapon = additional_options.projectile_weapon.filter(|_| {
             additional_options.player_fired_projectile && !additional_options.transient_fx
         });
@@ -9539,7 +9072,7 @@ impl MissionCore {
         let pose = crate::hud::readouts::pose_entry(
             self.multimodal,
             crate::developer_mode::enabled(),
-            self.interaction.can_pose_held_item(),
+            false,
         );
         self.flat_ui
             .set_readouts((self.use_mode || self.flat_ui.device).then(|| {
@@ -10608,16 +10141,7 @@ impl MissionCore {
                     }
                 }
 
-                Effect::ToggleGripPoseTool => {
-                    // The workbench freezes the world: not over the cyber
-                    // interface, which would stay up on top of it, nor for a
-                    // dead player.
-                    if self.player_is_alive() && !self.use_mode {
-                        self.interaction.toggle_grip_pose_tool();
-                    } else {
-                        println!("SHOCK2QUEST_VR_GRIP_POSE_TOOL active=false reason=unavailable");
-                    }
-                }
+                Effect::ToggleGripPoseTool => {}
 
                 Effect::ToggleUseMode => {
                     match game_options.presentation_mode {
@@ -12401,9 +11925,6 @@ impl MissionCore {
                     }
                     // Articulation effects are applied after the update's physics
                     // sync. Refresh moving-part contacts without resampling support.
-                    if self.interaction.holding_hand(entity_id).is_some() {
-                        self.interaction.synchronize_held_articulation(&self.world);
-                    }
                 }
                 Effect::SetJointTransform {
                     entity_id,
@@ -12759,415 +12280,24 @@ impl MissionCore {
                     // The model swap rebuilds the animation player, so any
                     // turn clip it was playing is gone with it.
                     self.abandon_turn_clip(entity_id);
-                    // A VR-wielded first-person model loads as authored,
-                    // baked hands included (see `VrHeldModel`); the
-                    // separate importer is the seam where per-wield mesh
-                    // preparation lives.
-                    let is_vr = false;
-                    let vr_held = is_vr && crate::vr_config::is_vr_view_model(&model_name);
-                    // The PsiSword authors no world model at all (PropLimbModel
-                    // only), so it has no id_to_model entry to take a transform
-                    // from - a VR wield materializes its first model from the
-                    // entity transform instead. Every other ChangeModel still
-                    // requires an existing model, exactly as before.
                     let maybe_xform = self
                         .id_to_model
                         .get(&entity_id)
-                        .map(|model| model.get_transform())
-                        .or_else(|| {
-                            if !vr_held {
-                                return None;
-                            }
-                            self.world
-                                .borrow::<View<RuntimePropTransform>>()
-                                .ok()
-                                .and_then(|v| v.get(entity_id).ok().map(|t| t.0))
-                        });
+                        .map(|model| model.get_transform());
                     if let Some(xform) = maybe_xform {
-                        let _ext_name = model_name.clone();
-                        // Any model swap invalidates a computed grip; only the
-                        // melee `_h` branch below re-derives one. Without this
-                        // a drop would leave the restored world model wearing
-                        // the wield's contact offset.
-                        self.world.remove::<RuntimePropVrGripOffset>(entity_id);
-                        // Was the *outgoing* model a VR-wielded first-person
-                        // model? (Read before PropModelName is overwritten
-                        // below - identifies the drop-restore swap.)
-                        let was_vr_held = is_vr
-                            && self
-                                .world
-                                .borrow::<View<PropModelName>>()
-                                .ok()
-                                .and_then(|v_model_name| {
-                                    v_model_name
-                                        .get(entity_id)
-                                        .ok()
-                                        .map(|model| crate::vr_config::is_vr_view_model(&model.0))
-                                })
-                                .unwrap_or(false);
                         // A missing model must never take down the frame (or a
                         // load): keep the current model and complain loudly.
-                        let glove_source =
-                            if vr_held && crate::vr_weapon_grip::supports_model(&model_name) {
-                                asset_cache
-                                    .get_ext_opt(
-                                        &dark::importers::GLOVE_WEAPON_IMPORTER,
-                                        &format!("{model_name}.bin"),
-                                        &dark::importers::GloveWeaponOptions {
-                                            magazine_removed: crate::vr_magazine::removed(
-                                                &self.world,
-                                                entity_id,
-                                            ),
-                                        },
-                                    )
-                                    .filter(|source| source.as_ref().is_some())
-                            } else {
-                                None
-                            };
-                        let glove_weapon = glove_source.is_some();
-                        let (new_model, vr_held_source) = if let Some(magazine) =
-                            crate::vr_magazine::entity_model(asset_cache, &self.world, entity_id)
-                        {
-                            (Some(Model::transform(&magazine, xform)), None)
-                        } else if let Some(source) = glove_source {
-                            (
-                                Some(Model::transform(
-                                    &source.as_ref().as_ref().unwrap().model,
-                                    xform,
-                                )),
-                                if crate::vr_weapon_grip::is_melee(&model_name) {
-                                    asset_cache.get_opt(
-                                        &dark::importers::VR_HELD_MODELS_IMPORTER,
-                                        &format!("{model_name}.bin"),
-                                    )
-                                } else {
-                                    None
-                                },
-                            )
-                        } else if vr_held {
-                            match asset_cache.get_opt(
-                                &dark::importers::VR_HELD_MODELS_IMPORTER,
-                                &format!("{model_name}.BIN"),
-                            ) {
-                                Some(source) => (
-                                    Some(Model::transform(&source.as_ref().model, xform)),
-                                    Some(source),
-                                ),
-                                None => (None, None),
-                            }
-                        } else {
-                            (
-                                asset_cache
-                                    .get_opt(&MODELS_IMPORTER, &format!("{model_name}.BIN"))
-                                    .map(|m| Model::transform(m.as_ref(), xform)),
-                                None,
-                            )
-                        };
-                        let Some(mut new_model) = new_model else {
+                        let Some(new_model) = asset_cache
+                            .get_opt(&MODELS_IMPORTER, &format!("{model_name}.BIN"))
+                            .map(|m| Model::transform(m.as_ref(), xform))
+                        else {
                             tracing::error!(
                                 "ChangeModel: model '{model_name}.BIN' could not be loaded for entity {entity_id:?} - keeping current model"
                             );
                             continue;
                         };
-
-                        let held_scale = self
-                            .world
-                            .borrow::<View<crate::runtime_props::RuntimePropGloveWeapon>>()
-                            .ok()
-                            .and_then(|v| v.get(entity_id).ok().map(|p| p.item_scale))
-                            .unwrap_or(1.0);
-                        self.world
-                            .remove::<crate::runtime_props::RuntimePropGloveWeapon>(entity_id);
-                        if glove_weapon {
-                            self.world.add_component(
-                                entity_id,
-                                crate::runtime_props::RuntimePropGloveWeapon {
-                                    item_scale: held_scale,
-                                    magazine_removed: crate::vr_magazine::removed(
-                                        &self.world,
-                                        entity_id,
-                                    ),
-                                    magazine_anchor: crate::vr_magazine::load(
-                                        asset_cache,
-                                        &model_name,
-                                    )
-                                    .and_then(|model| {
-                                        model.as_ref().as_ref().map(|m| {
-                                            use cgmath::Transform;
-                                            crate::vr_config::gun_model_frame(
-                                                &model_name,
-                                                self.interaction
-                                                    .holding_hand(entity_id)
-                                                    .unwrap_or(crate::Handedness::Right),
-                                            )
-                                            .transform_vector(m.source_center)
-                                        })
-                                    }),
-                                },
-                            );
-                        }
-                        let mut vhots = new_model.vhots();
-                        let mut muzzle =
-                            crate::weapon_muzzle::load_fallback(asset_cache, &model_name);
-                        // Which hand a VR wield renders for. The `_h` models
-                        // are all authored right-handed, so a left-hand wield
-                        // draws the mirror image. A model applied while
-                        // nothing holds it (a restore before the grab) has no
-                        // hand yet; the right-handed default matches what the
-                        // rig is authored as, and the grab's own ChangeModel
-                        // re-derives this.
-                        let hand = self
-                            .interaction
-                            .holding_hand(entity_id)
-                            .unwrap_or(crate::vr_config::Handedness::Right);
-                        // Apply the VR model-axis scale and handedness together,
-                        // including muzzle vhots so shots leave the visible barrel.
-                        // Melee rigs mirror in their own frame below. The
-                        // model's authored bounding box is left as-is: a held
-                        // gun is unphysical, and nothing frames it by that box.
-                        if vr_held && !is_melee_weapon(&self.world, entity_id) {
-                            let mirror = crate::vr_config::gun_model_frame(&model_name, hand);
-                            new_model.apply_local_transform(mirror);
-                            for vhot in vhots.iter_mut() {
-                                vhot.point = mirror.transform_point(vhot.point);
-                            }
-                            muzzle = muzzle.map(|muzzle| muzzle.framed(mirror));
-                        }
-                        // An articulated VR-wielded first-person model (hand +
-                        // arm + gun as skeleton sub-objects) renders unposed
-                        // without a player, so give it the empty bind pose (it
-                        // emits no motion flags or completion events). The
-                        // player must NOT outlive the wield: the animation
-                        // loop writes every player's root velocity into
-                        // physics each frame, and an empty player's is zero -
-                        // left in place after the drop-restore to the static
-                        // world model it would pin the dropped weapon's
-                        // horizontal velocity to zero. Scoped to the VR wield
-                        // swap so every other ChangeModel (both presentations)
-                        // behaves exactly as before this path existed.
-                        if vr_held && new_model.is_animated() {
-                            // Melee _h models are LGMM skinned meshes: the
-                            // empty player's rest pose leaves the arm splayed
-                            // mid-swing (same defect the flat viewmodel path
-                            // documents), so hold the player-melee idle's
-                            // final frame instead - a static pose that emits
-                            // no motion flags, events, or root velocity
-                            // (`from_completed_animation`). The flat viewmodel
-                            // plays the same clip from frame 0 because there
-                            // the swing animates; VR's hold is a frozen ready
-                            // stance the tracked hand moves, so it takes the
-                            // clip's settled end pose. Root motion is
-                            // cancelled for the same reason as flat: the
-                            // entity transform is re-anchored (there to the
-                            // camera, here to the tracked hand) every frame.
-                            if is_melee_weapon(&self.world, entity_id) {
-                                let player = asset_cache
-                                    .get_opt(
-                                        &ANIMATION_CLIP_IMPORTER,
-                                        &format!("{MELEE_IDLE_CLIP}_.mc"),
-                                    )
-                                    .map(|clip| {
-                                        AnimationPlayer::with_root_motion_cancelled(
-                                            &AnimationPlayer::from_completed_animation(clip),
-                                        )
-                                    })
-                                    .unwrap_or_else(AnimationPlayer::empty);
-                                // Seat the posed arm on the tracked hand. Two
-                                // halves of one placement, both derived from
-                                // this same posed arm so they cannot drift
-                                // apart: the grip puts the entity/body origin
-                                // on the rendered weapon head, and the
-                                // model-space correction cancels that same
-                                // offset so the fist still lands in the palm.
-                                // The fitted child collider below extends back
-                                // over the rendered weapon without moving that
-                                // controller-driven body origin.
-                                let arm = new_model.skeleton().and_then(|skeleton| {
-                                    crate::vr_config::MeleePosedArm::from_joints(
-                                        &player.get_transforms(skeleton),
-                                    )
-                                });
-                                if let Some(arm) = arm {
-                                    // Which arm to draw: the left hand renders
-                                    // the mirror image, and the contact offset
-                                    // below is mirrored with it, keeping the
-                                    // collider on the rendered head.
-                                    let correction = if glove_weapon {
-                                        crate::vr_config::melee_wield_pose_correction_scaled(
-                                            arm, 1.0, hand,
-                                        )
-                                    } else {
-                                        crate::vr_config::melee_wield_pose_correction(arm, hand)
-                                    };
-                                    let contact = if glove_weapon {
-                                        crate::vr_config::melee_contact_offset_scaled(arm, 1.0)
-                                    } else {
-                                        crate::vr_config::melee_contact_offset(arm)
-                                    };
-                                    new_model.apply_local_transform(correction);
-                                    self.world
-                                        .add_component(entity_id, RuntimePropVrGripOffset(contact));
-                                    if self.interaction.is_holding(entity_id) {
-                                        match vr_held_source.as_ref().and_then(|source| {
-                                            source.posed_weapon_bounds(&player, correction)
-                                        }) {
-                                            Some(bounds) => {
-                                                // The rendered weapon's own
-                                                // measured size. Logged because
-                                                // nothing else reports how big
-                                                // a wielded view model
-                                                // actually is, and "the
-                                                // viewmodels look oversized" is
-                                                // otherwise an eyeball claim.
-                                                let cm = crate::METERS_PER_WORLD_UNIT * 100.0;
-                                                tracing::info!(
-                                                    "wield '{model_name}': rendered weapon {:.2}x{:.2}x{:.2} units ({:.0}x{:.0}x{:.0} cm), grip offset {:.3} units ({:.0} cm)",
-                                                    bounds.size.x,
-                                                    bounds.size.y,
-                                                    bounds.size.z,
-                                                    bounds.size.x * cm,
-                                                    bounds.size.y * cm,
-                                                    bounds.size.z * cm,
-                                                    crate::vr_config::melee_contact_offset(arm)
-                                                        .magnitude(),
-                                                    crate::vr_config::melee_contact_offset(arm)
-                                                        .magnitude()
-                                                        * cm,
-                                                );
-                                                // The baked hand/forearm from
-                                                // the same rig, for scale: a
-                                                // view model authored for a
-                                                // flat camera can exaggerate
-                                                // its weapon without
-                                                // exaggerating the arm, and
-                                                // the ratio decides whether a
-                                                // VR correction is uniform or
-                                                // weapon-only.
-                                                match vr_held_source.as_ref().and_then(|source| {
-                                                    source.posed_arm_bounds(&player, correction)
-                                                }) {
-                                                    Some(arm_bounds) => tracing::info!(
-                                                        "wield '{model_name}': baked arm {:.0}x{:.0}x{:.0} cm",
-                                                        arm_bounds.size.x * cm,
-                                                        arm_bounds.size.y * cm,
-                                                        arm_bounds.size.z * cm,
-                                                    ),
-                                                    None => tracing::info!(
-                                                        "wield '{model_name}': baked arm unmeasured"
-                                                    ),
-                                                }
-                                                let bounds = if crate::rapier::is_rapier(
-                                                    &self.world,
-                                                    entity_id,
-                                                ) {
-                                                    let hilt = vr_held_source
-                                                        .as_ref()
-                                                        .and_then(|source| {
-                                                            source.posed_weapon_bounds_filtered(
-                                                                &player,
-                                                                correction,
-                                                                |name| {
-                                                                    !name.eq_ignore_ascii_case(
-                                                                        "ND-rapier_b.psd",
-                                                                    )
-                                                                },
-                                                            )
-                                                        })
-                                                        .unwrap_or(bounds);
-                                                    let collider = crate::rapier::Collider {
-                                                        hilt,
-                                                        full: bounds,
-                                                    };
-                                                    self.world.add_component(entity_id, collider);
-                                                    crate::rapier::collider_bounds(
-                                                        &self.world,
-                                                        entity_id,
-                                                    )
-                                                    .unwrap_or(bounds)
-                                                } else {
-                                                    bounds
-                                                };
-                                                self.physics.fit_held_item_cuboid(
-                                                    entity_id,
-                                                    bounds.size,
-                                                    bounds.center,
-                                                )
-                                            }
-                                            None => tracing::error!(
-                                                "ChangeModel: '{model_name}' has no fittable weapon geometry - retaining its loose-prop collider"
-                                            ),
-                                        }
-                                    }
-                                } else {
-                                    tracing::error!(
-                                        "ChangeModel: '{model_name}' has no melee arm joints - wielding it unseated"
-                                    );
-                                }
-                                self.id_to_animation_player.insert(entity_id, player);
-                            } else {
-                                self.id_to_animation_player
-                                    .entry(entity_id)
-                                    .or_insert_with(AnimationPlayer::empty);
-                            }
-                        } else if was_vr_held && !new_model.is_animated() {
-                            self.id_to_animation_player.remove(&entity_id);
-                        }
-
-                        // A physically held gun (`physical_held_items`) is
-                        // swept against the level with a cuboid fitted to the
-                        // *rendered* view model, exactly as a melee weapon is.
-                        // Without this it would keep the loose-prop box, which
-                        // is the size of the WORLD model and centred on the
-                        // grip rather than on the barrel - so the weapon would
-                        // stop at the wrong distance from a wall, in both
-                        // directions. Guns author no grip correction (their
-                        // offset moves the entity, not the mesh), so model
-                        // space is the body's own frame and the fit needs no
-                        // transform. Melee took its own fit above, with the
-                        // posed arm's correction.
-                        let is_physical_gun = vr_held
-                            && !glove_weapon
-                            && self.interaction.is_holding(entity_id)
-                            && self
-                                .held_item_collision_group(entity_id)
-                                .is_some_and(|group| group.is_inert());
-                        if is_physical_gun {
-                            // The same player the model is rendered with, so
-                            // the fit measures the pose the player sees.
-                            let player = self
-                                .id_to_animation_player
-                                .get(&entity_id)
-                                .cloned()
-                                .unwrap_or_else(AnimationPlayer::empty);
-                            if let Some(bounds) = vr_held_source.as_ref().and_then(|source| {
-                                source.posed_weapon_bounds(
-                                    &player,
-                                    crate::vr_config::gun_model_frame(&model_name, hand),
-                                )
-                            }) {
-                                let cm = crate::METERS_PER_WORLD_UNIT * 100.0;
-                                tracing::info!(
-                                    "wield '{model_name}': rendered weapon {:.0}x{:.0}x{:.0} cm, center ({:.3}, {:.3}, {:.3})",
-                                    bounds.size.x * cm,
-                                    bounds.size.y * cm,
-                                    bounds.size.z * cm,
-                                    bounds.center.x,
-                                    bounds.center.y,
-                                    bounds.center.z,
-                                );
-                                self.physics.fit_held_item_cuboid(
-                                    entity_id,
-                                    bounds.size,
-                                    bounds.center,
-                                );
-                            }
-                        }
-                        self.world
-                            .remove::<crate::vr_shotgun_pump::PumpMotion>(entity_id);
-                        self.world
-                            .remove::<crate::vr_weapon_action::WeaponAction>(entity_id);
-                        self.world
-                            .remove::<crate::vr_psi_sway::CableSway>(entity_id);
+                        let vhots = new_model.vhots();
+                        let muzzle = crate::weapon_muzzle::load_fallback(asset_cache, &model_name);
                         self.world
                             .remove::<crate::runtime_props::RuntimePropObjectArticulation>(
                                 entity_id,
@@ -13198,13 +12328,8 @@ impl MissionCore {
                         PropModelName,
                         RuntimePropVhots,
                         crate::runtime_props::RuntimePropObjectArticulation,
-                        crate::vr_shotgun_pump::PumpMotion,
-                        crate::vr_weapon_action::WeaponAction,
-                        crate::vr_psi_sway::CableSway,
                         crate::weapon_muzzle::MuzzleFallback,
-                        crate::runtime_props::RuntimePropGloveWeapon,
                     )>(entity_id);
-                    self.world.remove::<RuntimePropVrGripOffset>(entity_id);
                 }
                 Effect::PlayEmail { deck, email, force } => {
                     let email_file = get_email_sound_file(deck, email);
@@ -13264,17 +12389,6 @@ impl MissionCore {
                         }
                     }
                     self.flat_weapon_animation.fired(&self.world, entity_id);
-                    crate::vr_shotgun_pump::fired(&mut self.world, entity_id);
-                    crate::vr_weapon_action::fired(&mut self.world, entity_id);
-                    let hands = self.interaction.haptic_hands(entity_id);
-                    for (hand, pulse) in hands
-                        .into_iter()
-                        .zip([crate::haptics::GUN_RECOIL, crate::haptics::GUN_SUPPORT])
-                    {
-                        if let Some(hand) = hand {
-                            effects.push_back(Effect::HandHaptic { hand, pulse });
-                        }
-                    }
                 }
                 Effect::HandHaptic { hand, pulse } => {
                     self.world
@@ -13282,52 +12396,10 @@ impl MissionCore {
                         .unwrap()
                         .request(hand, pulse);
                 }
-                Effect::FumbleHeldItem {
-                    entity_id,
-                    away_from,
-                } => {
-                    // Only while a hand still holds it: a release earlier this
-                    // frame, or a second victim struck before the drop lands,
-                    // fumbles nothing and says nothing.
-                    if let Some(hand) = self.interaction.fumble(entity_id) {
-                        let (left, right) = self.interaction.held_entities();
-                        {
-                            let mut player =
-                                self.world.borrow::<UniqueViewMut<PlayerInfo>>().unwrap();
-                            player.left_hand_entity_id = left;
-                            player.right_hand_entity_id = right;
-                        }
-                        self.drop_held_item_into_world(entity_id);
-                        if let Some(position) = self.entity_world_position(entity_id) {
-                            let motion = crate::throwing::fumble_motion(position, away_from);
-                            self.physics.release_motion(entity_id, motion);
-                            self.thrown_items.track_existing_motion(
-                                &self.world,
-                                &self.physics,
-                                entity_id,
-                            );
-                        }
-                        effects.push_back(Effect::HandHaptic {
-                            hand,
-                            pulse: crate::haptics::WEAPON_FUMBLE,
-                        });
-                        effects.push_back(Effect::ShowMessage {
-                            text: crate::scripts::gui::unhandled_weapon_message(
-                                &self.world,
-                                entity_id,
-                            ),
-                        });
-                    }
-                }
+                // Only a VR hand could fumble what it held.
+                Effect::FumbleHeldItem { .. } => {}
                 Effect::EjectWeaponCasings { entity_id } => {
-                    if self.interaction.viewmodel_entity() == Some(entity_id)
-                        || (crate::vr_shotgun_pump::enabled(&self.world, entity_id)
-                            && [
-                                self.interaction.held_entities().0,
-                                self.interaction.held_entities().1,
-                            ]
-                            .contains(&Some(entity_id)))
-                    {
+                    if self.interaction.viewmodel_entity() == Some(entity_id) {
                         effects.extend(Effect::flatten(vec![
                             crate::scripts::weapon_script::eject_casings(&self.world, entity_id),
                         ]));
@@ -13527,16 +12599,7 @@ impl MissionCore {
                     one_hand,
                 } => {
                     let strength = crate::weapon_recoil::handling_strength(&self.world);
-                    // Exactly one of these applies: VR kicks the held rigid
-                    // body (a no-op unless the gun is a held-inert body), flat
-                    // kicks its viewmodel spring.
-                    self.physics.kick_held_gun(
-                        entity_id,
-                        impulse,
-                        one_hand,
-                        strength,
-                        self.interaction.is_supported(entity_id),
-                    );
+                    let _ = one_hand;
                     self.interaction.kick_viewmodel(
                         entity_id,
                         crate::weapon_recoil::flat_impulse(impulse, strength),
@@ -13725,7 +12788,6 @@ impl MissionCore {
                 } => {
                     self.physics
                         .set_player_translation(position, &mut self.player_handle);
-                    self.climb_exit_teleport = None;
                     // Scripted teleports, level load and quickload all land
                     // here, and none of them ran a movement frame: forget the
                     // stride and the fall in progress so the arrival is silent
@@ -14980,8 +14042,6 @@ impl MissionCore {
         if reload.rounds_loaded == 0 {
             return Effect::NoEffect;
         }
-        crate::vr_magazine::set_removed(&mut self.world, weapon, false);
-        crate::vr_weapon_action::reloaded(&mut self.world, weapon);
         for item in reload.depleted_items {
             self.interaction.on_entity_destroyed(item);
             self.flat_ui.on_entity_destroyed(item);
@@ -15039,11 +14099,6 @@ impl MissionCore {
             .and_then(|v| v.get(weapon).ok().and_then(|p| p.magazine_anchor))
             .unwrap_or_else(|| crate::vr_config::magazine_anchor_from_entity(&self.world, weapon));
         self.entity_point_world(weapon, anchor)
-    }
-
-    /// The world position of `entity`'s live transform.
-    fn entity_world_position(&self, entity: EntityId) -> Option<Vector3<f32>> {
-        self.entity_point_world(entity, vec3(0.0, 0.0, 0.0))
     }
 
     /// A point in `entity`'s local frame, carried by its live transform.
@@ -15202,11 +14257,9 @@ impl MissionCore {
             .entity_id;
         self.world
             .add_component(clip, dark::properties::PropStackCount(rounds));
-        self.prepare_magazine_model(asset_cache, weapon, clip);
         self.make_un_physical(clip);
         self.make_physical(clip);
         super::reload::empty_magazine(&self.world, weapon);
-        crate::vr_magazine::set_removed(&mut self.world, weapon, true);
         Some(crate::scripts::script_util::play_environmental_sound(
             &self.world,
             weapon,
@@ -15356,9 +14409,6 @@ impl MissionCore {
             // or never moved, and only the magazine can say which.
             None => outcome.rounds_unloaded > 0 || self.magazine_rounds(weapon) == 0,
         };
-        if emptied && (outcome.rounds_unloaded > 0 || outcome.spawn_clip.is_some()) {
-            crate::vr_magazine::set_removed(&mut self.world, weapon, true);
-        }
         emptied
     }
 
@@ -16022,9 +15072,7 @@ impl MissionCore {
 
         // WhiteOut is a view transition, so it covers the world, viewmodel,
         // HUD, and flat UI and is rendered once per eye in VR.
-        // So does the black fade of a teleporting climb exit.
-        let exit_fade = self.climb_exit_teleport.map_or(0.0, |exit| exit.alpha());
-        for (rgb, alpha) in [(1.0, self.screen_fade_alpha), (0.0, exit_fade)] {
+        for (rgb, alpha) in [(1.0, self.screen_fade_alpha)] {
             if alpha > 0.0 {
                 let mut fade = SceneObject::screen_space_color_quad(
                     vec2(0.0, 0.0),
@@ -16089,7 +15137,6 @@ impl MissionCore {
                 }
             }
         }
-        messages.extend(self.interaction.maintenance_previews(&self.world));
         if self.use_mode && !crate::cyber_interface::installed(&self.world) {
             messages.push(crate::cyber_interface::NOT_INSTALLED.to_owned());
         }
@@ -16295,16 +15342,8 @@ impl MissionCore {
             .borrow::<View<crate::runtime_props::RuntimePropDoubleSided>>()
             .unwrap();
 
-        // The grip pose workbench is a scene of its own: of the mission, only
-        // its held item is drawn, onto the workbench (see the model loop).
-        let bench = self.interaction.pose_workbench();
-
         // Start with built in scene objects
-        let mut scene = if bench.is_some() {
-            Vec::new()
-        } else {
-            self.scene_objects.clone()
-        };
+        let mut scene = self.scene_objects.clone();
         scene.extend(crate::hud::survival_status::render(
             &self.world,
             asset_cache,
@@ -16433,12 +15472,6 @@ impl MissionCore {
 
         // Render models
         for (entity_id, objs) in &self.id_to_model {
-            if bench
-                .as_ref()
-                .is_some_and(|bench| bench.entity != *entity_id)
-            {
-                continue;
-            }
             total_model_count += 1;
             if flat_viewmodel_skip.contains(entity_id) {
                 continue;
@@ -16458,9 +15491,7 @@ impl MissionCore {
                 };
             }
 
-            // The workbench draws its item away from the frozen mission spot
-            // that portal culling judges.
-            let visible = bench.is_some() || self.visibility_engine.is_visible(*entity_id);
+            let visible = self.visibility_engine.is_visible(*entity_id);
             let echo = radar_contacts.get(&entity_id.inner()).copied();
             let item_echo = item_contacts.get(&entity_id.inner()).copied();
             if !visible && echo.is_none() && item_echo.is_none() {
@@ -16649,29 +15680,9 @@ impl MissionCore {
             total_model_count
         );
 
-        if let Some(bench) = bench {
-            let mut scene = draw_pose_workbench(scene, bench, &self.world);
-            scene.append(&mut self.interaction.render(
-                asset_cache,
-                &self.world,
-                self.use_mode,
-                None,
-            ));
-            let player = self.world.borrow::<UniqueView<PlayerInfo>>().unwrap();
-            return (scene, player.pos, player.rotation);
-        }
 
         // Where letting go of every hold lands (VR climbing), or the landing a
         // committed release is gliding to.
-        if let Some(outcome) = self.climb_release_glide.or(self.climb_release.outcome) {
-            scene.push(self.landing_marker.object(
-                outcome.landing.center,
-                outcome.landing.floor_y,
-                outcome.landing.normal,
-                self.climb_release_yaw,
-                outcome.safe,
-            ));
-        }
 
         // Render bitmap_animation
         for (entity_id, objs) in &self.id_to_bitmap {
@@ -16775,17 +15786,6 @@ impl MissionCore {
         let mut _player = SceneObject::new(player_mat, Box::new(engine::scene::cube::create()));
         _player.set_transform(Matrix4::from_translation(player.pos));
 
-        // The interaction controller owns its own visuals: VR draws hand models
-        // + forearm HUD panels; flat draws nothing here (its weapon viewmodel is
-        // drawn on top in `render_per_eye`). They are labelled `PLAYER_HANDS_SOURCE`
-        // so `Game` can drop them while the pause menu is up (issue #1018).
-        scene.append(&mut self.interaction.render(
-            asset_cache,
-            &self.world,
-            self.use_mode,
-            object_lights.as_ref(),
-        ));
-
         // The old synthetic blue inventory cube remains a desktop diagnostic.
         // VR presents the authored INVBACK canvas through GuiManager instead.
         if options.presentation_mode == crate::PresentationMode::Flat {
@@ -16824,7 +15824,6 @@ impl MissionCore {
         // that carries RuntimePropVrGripOffset, so that component *is* the
         // set of held melee weapons.
         if crate::dev_params::get(crate::dev_params::MELEE_VOLUMES) > 0.5 {
-            scene.extend(crate::pipe_melee::debug_geometry(&self.world));
             let held = self
                 .world
                 .borrow::<View<RuntimePropVrGripOffset>>()
@@ -17048,13 +16047,8 @@ impl MissionCore {
 
     /// Player-carried lights: developer spotlights, weapon flashlights, and melee glow.
     pub fn get_hand_lights(&self, options: &GameOptions) -> Vec<engine::scene::light::SceneLight> {
-        let debug_lights = self.interaction.hand_spotlights(options);
-        // The developer override already supplies one light per hand.
-        let mut lights: Vec<_> = if !debug_lights.is_empty() {
-            debug_lights
-        } else {
-            crate::weapon_attachments::flashlights(&self.world)
-        }
+        let _ = options;
+        let mut lights: Vec<_> = crate::weapon_attachments::flashlights(&self.world)
         .into_iter()
         .map(Into::into)
         .collect();
@@ -17112,55 +16106,7 @@ impl MissionCore {
         }
     }
 
-    /// Commit an assisted exit to `outcome`'s landing, revalidated from the
-    /// body's current pose: a fade-and-teleport (the default) or the glide
-    /// (`climb_exit_motion`). `false` leaves the body to an ordinary release.
-    fn commit_assisted_exit(&mut self, outcome: crate::climb_release::ReleaseOutcome) -> bool {
-        let committed = if crate::dev_params::get_bool(crate::dev_params::CLIMB_EXIT_MOTION) {
-            self.physics
-                .plan_assisted_release(outcome.landing, &mut self.player_handle)
-        } else if self
-            .physics
-            .assisted_release_is_valid(outcome.landing, &self.player_handle)
-        {
-            self.climb_exit_teleport = Some(crate::climb_release::ExitTeleport::new(outcome));
-            true
-        } else {
-            false
-        };
-        if committed {
-            self.climb_release_glide = Some(outcome);
-        }
-        committed
-    }
 
-    /// The actual held surface, after a deliberate upward or inward pull.
-    /// Preserve this target across ladder-to-deck transfer; head height at the
-    /// moment of grabbing does not disqualify the new hold.
-    fn hand_vault_target(&self, head_local: Vector3<f32>) -> Option<crate::physics::ClimbGrip> {
-        let anchor = self.interaction.hand_climb()?.anchor_grip()?;
-        let grip = crate::climb_release::vault_hold(anchor.grip, &self.climb_release)?;
-        let center = self
-            .physics
-            .get_player_next_translation(&self.player_handle);
-        let toward = anchor.grip.point - anchor.pawn_at_grab;
-        let horizontal = cgmath::vec3(toward.x, 0.0, toward.z);
-        let distance = horizontal.magnitude();
-        let traveled = center - anchor.pawn_at_grab;
-        let inward = if distance > 1e-4 {
-            traveled.dot(horizontal / distance)
-        } else {
-            0.0
-        };
-        crate::vr_climb::vault_ready(
-            center.y + head_local.y,
-            traveled.y.max(inward),
-            grip.point.y,
-            grip.kind,
-            crate::physics::is_walkable_normal(grip.normal.y),
-        )
-        .then_some(grip)
-    }
 
     /// Both VR hands for the player trail: each controller's world point (the
     /// one climbing grabs with, on the rendered rig) and the hold it is on.
@@ -17171,15 +16117,7 @@ impl MissionCore {
         pawn_rotation: Quaternion<f32>,
         top_out: Option<(crate::vr_config::Handedness, crate::debug_trail::TrailHold)>,
     ) -> crate::debug_trail::TrailHands {
-        let mut holds = [None, None];
-        for (hand, anchor) in self
-            .interaction
-            .hand_climb()
-            .into_iter()
-            .flat_map(|c| c.grips())
-        {
-            holds[crate::vr_config::hand_slot(hand)] = Some(anchor.grip.into());
-        }
+        let holds: [Option<crate::debug_trail::TrailHold>; 2] = [None, None];
         let hand =
             |index: usize, input: &crate::input_context::Hand| crate::debug_trail::TrailHand {
                 position: crate::virtual_hand::hand_world_position(
@@ -17197,9 +16135,7 @@ impl MissionCore {
 
     /// Whether either VR hand currently holds a climb hold.
     pub fn player_is_gripping(&self) -> bool {
-        self.interaction
-            .hand_climb()
-            .is_some_and(|climb| climb.grips().next().is_some())
+        false
     }
 
     pub fn player_save_position(&self) -> Result<Vector3<f32>, PlayerSavePoseError> {
@@ -17290,55 +16226,6 @@ impl MissionCore {
         deferred
     }
 
-    /// Apply the source weapon's magazine geometry to a real ammo clip.
-    fn prepare_magazine_model(
-        &mut self,
-        asset_cache: &mut AssetCache,
-        weapon: EntityId,
-        clip: EntityId,
-    ) {
-        // Ammo identity and stack count stay on the real clip entity.
-        if let Some(source) =
-            crate::scripts::internal_switch_held_model::get_raw_view_model(&self.world, weapon)
-                .map(|name| name.to_ascii_lowercase())
-        {
-            if let Some(magazine) = crate::vr_magazine::load(asset_cache, &source) {
-                let item_scale = self
-                    .world
-                    .borrow::<View<crate::runtime_props::RuntimePropGloveWeapon>>()
-                    .ok()
-                    .and_then(|v| v.get(weapon).ok().map(|w| w.item_scale))
-                    .unwrap_or(crate::world_scale::WorldScale::active().personal())
-                    / crate::world_scale::WorldScale::active().personal();
-                self.world.add_component(
-                    clip,
-                    (
-                        dark::properties::InternalPropMagazineModel { source, item_scale },
-                        dark::properties::PropScale(vec3(item_scale, item_scale, item_scale)),
-                    ),
-                );
-                if let Some(old) = self.id_to_model.get(&clip) {
-                    let transform = self
-                        .world
-                        .borrow::<View<PropPosition>>()
-                        .ok()
-                        .and_then(|v| {
-                            v.get(clip).ok().map(|p| {
-                                Matrix4::from_translation(p.position)
-                                    * Matrix4::from(p.rotation)
-                                    * Matrix4::from_scale(item_scale)
-                            })
-                        })
-                        .unwrap_or_else(|| old.get_transform());
-                    self.id_to_model.insert(
-                        clip,
-                        Model::transform(&magazine.as_ref().as_ref().unwrap().model, transform),
-                    );
-                    self.id_to_animation_player.remove(&clip);
-                }
-            }
-        }
-    }
 
     /// Per hand: the release target that will accept the held item. Flat's
     /// equivalent is the use-mode cursor item, the one RMB applies.
@@ -17389,28 +16276,6 @@ impl MissionCore {
         for msg in msgs {
             let world_pickup = matches!(msg, VirtualHandEffect::StoreWorldPickup { .. });
             match msg {
-                VirtualHandEffect::MoveSlide {
-                    entity_id,
-                    fraction,
-                } => {
-                    deferred.extend(crate::vr_weapon_action::move_slide(
-                        &mut self.world,
-                        entity_id,
-                        fraction,
-                    ));
-                }
-                VirtualHandEffect::MovePump {
-                    entity_id,
-                    motion,
-                    fraction,
-                } => {
-                    deferred.extend(crate::vr_shotgun_pump::move_pump(
-                        &mut self.world,
-                        entity_id,
-                        motion,
-                        fraction,
-                    ));
-                }
                 VirtualHandEffect::OutMessage { message } => {
                     if let MessagePayload::ProvideForConsumption { entity: tool } = message.payload
                         && crate::item_tools::is_tool(&self.world, tool)
@@ -17458,29 +16323,6 @@ impl MissionCore {
                         }
                     }
                     self.set_entity_position_rotation(entity_id, position, rotation, scale);
-                }
-                VirtualHandEffect::FitHeldItem {
-                    entity_id,
-                    size,
-                    center,
-                    scale,
-                } => {
-                    if let Ok(mut weapons) = self
-                        .world
-                        .borrow::<ViewMut<crate::runtime_props::RuntimePropGloveWeapon>>()
-                    {
-                        if let Ok(weapon) = (&mut weapons).get(entity_id) {
-                            weapon.item_scale = scale;
-                        }
-                    }
-                    let (size, center) = crate::rapier::collider_bounds(&self.world, entity_id)
-                        .map(|b| (b.size, b.center))
-                        .unwrap_or((size, center));
-                    self.physics.fit_held_item_cuboid(entity_id, size, center);
-                    if crate::pipe_melee::is_ranged_guard(&self.world, entity_id) {
-                        self.world
-                            .add_component(entity_id, crate::pipe_melee::GunGuard { size, center });
-                    }
                 }
                 VirtualHandEffect::SpawnEntity {
                     template_id,
@@ -17554,11 +16396,6 @@ impl MissionCore {
                         deferred.push(backpack_full_feedback(entity_id));
                         self.restore_refused_store_to_world(entity_id);
                     }
-                }
-                VirtualHandEffect::DropItem { entity_id, motion } => {
-                    self.drop_held_item_into_world(entity_id);
-                    self.thrown_items
-                        .launch(&self.world, &mut self.physics, entity_id, motion);
                 }
             }
         }
@@ -17659,8 +16496,7 @@ impl MissionCore {
         let hand = position - rotation.rotate_vector(grip * scale);
         self.world
             .remove::<crate::runtime_props::RuntimePropGloveWeapon>(entity_id);
-        let loose_scale = crate::vr_magazine::appearance(&self.world, entity_id)
-            .map_or(1.0, |magazine| magazine.item_scale);
+        let loose_scale = 1.0;
         self.set_entity_position_rotation(
             entity_id,
             hand,
@@ -19105,14 +17941,6 @@ impl crate::game_scene::DebuggableScene for MissionCore {
                     });
                 }
 
-                if let Ok(states) = self.world.borrow::<View<crate::pipe_melee::PipeAttack>>() {
-                    if let Ok(state) = states.get(id) {
-                        properties.push(DebugPropertyInfo {
-                            name: "PipeAttack".into(),
-                            value: serde_json::to_string(state).unwrap(),
-                        });
-                    }
-                }
                 // Cyber-module award amount (EXP trap `PropExp` / EXP-cookie
                 // stack count), so tests can read the exact award.
                 if let Some(exp) = exp_value {
@@ -19301,32 +18129,6 @@ impl crate::game_scene::DebuggableScene for MissionCore {
                         value: aim,
                     });
                 }
-                if crate::vr_shotgun_pump::enabled(&self.world, id) {
-                    let pump = crate::vr_shotgun_pump::state(&self.world, id);
-                    properties.push(DebugPropertyInfo {
-                        name: "ShotgunPump".into(),
-                        value: serde_json::to_string(&pump).unwrap(),
-                    });
-                }
-                if let Some(magazine) = crate::vr_magazine::appearance(&self.world, id) {
-                    properties.push(DebugPropertyInfo {
-                        name: "MagazineModel".into(),
-                        value: serde_json::to_string(&magazine).unwrap(),
-                    });
-                }
-                if let Ok(meshes) = self.world.borrow::<View<crate::runtime_props::RuntimePropGloveWeapon>>() {
-                    if let Ok(mesh) = meshes.get(id) {
-                        if mesh.magazine_anchor.is_some() {
-                            properties.push(DebugPropertyInfo {
-                                name: "MagazineSeated".into(),
-                                value: serde_json::json!({
-                                    "present": !crate::vr_magazine::removed(&self.world, id),
-                                    "rendered": !mesh.magazine_removed,
-                                }).to_string(),
-                            });
-                        }
-                    }
-                }
                 if let Ok(poses) = self.world.borrow::<View<crate::flat_weapon_animation::FlatWeaponPose>>() {
                     if let Ok(pose) = poses.get(id) {
                         properties.push(DebugPropertyInfo {
@@ -19468,81 +18270,17 @@ impl crate::game_scene::DebuggableScene for MissionCore {
     }
 
     fn hand_feedback(&self) -> serde_json::Value {
-        let mut feedback = self.interaction.hand_feedback_diagnostics();
-        if let Some(object) = feedback.as_object_mut() {
-            object.insert("rapiers".to_owned(), self.rapier_feedback.diagnostics());
-        }
-        if let (Some(object), Ok(_player)) = (
-            feedback.as_object_mut(),
-            self.world.borrow::<UniqueView<PlayerInfo>>(),
-        ) {
-            object.insert(
-                "haptics".to_owned(),
-                serde_json::to_value(
-                    &*self
-                        .world
-                        .borrow::<UniqueView<crate::haptics::HapticFeedback>>()
-                        .unwrap(),
-                )
-                .unwrap(),
-            );
-        }
-        feedback
+        serde_json::Value::Null
     }
 
     fn hand_grips(&self) -> serde_json::Value {
-        self.interaction.grip_diagnostics()
+        serde_json::json!([])
     }
 
     fn player_climb(&self) -> Option<crate::game_scene::DebugClimbState> {
-        let hand_name = |hand: crate::vr_config::Handedness| match hand {
-            crate::vr_config::Handedness::Left => "left",
-            crate::vr_config::Handedness::Right => "right",
-        };
-        let climb = self.interaction.hand_climb();
         Some(crate::game_scene::DebugClimbState {
             is_climbing: self.player_handle.is_climbing(),
             vaulting: self.player_handle.is_topping_out(),
-            anchor_hand: climb.and_then(|climb| climb.anchor()).map(hand_name),
-            grips: climb
-                .into_iter()
-                .flat_map(|climb| climb.grips())
-                .map(|(hand, anchor)| crate::game_scene::DebugClimbHold {
-                    hand: hand_name(hand),
-                    kind: match anchor.grip.kind {
-                        crate::physics::ClimbGripKind::Ladder => "ladder",
-                        crate::physics::ClimbGripKind::Ledge => "ledge",
-                        crate::physics::ClimbGripKind::Surface => "surface",
-                    },
-                    entity_id: anchor.grip.entity_id.map(|id| id.inner() as i32),
-                    point: [
-                        anchor.grip.point.x,
-                        anchor.grip.point.y,
-                        anchor.grip.point.z,
-                    ],
-                    grace: anchor.grace,
-                })
-                .collect(),
-            grace_remaining: climb.map_or(0, |climb| climb.grace_remaining()),
-            reach: self.interaction.climb_reach(),
-            release: {
-                let xyz = |v: Vector3<f32>| [v.x, v.y, v.z];
-                let preview = &self.climb_release;
-                let outcome = preview.outcome;
-                crate::game_scene::DebugClimbRelease {
-                    mode: outcome.map_or("none", |outcome| outcome.mode.as_str()),
-                    landing: outcome.map(|outcome| xyz(outcome.landing.center)),
-                    floor_y: outcome.map(|outcome| outcome.landing.floor_y),
-                    expected_drop: outcome.map(|outcome| outcome.drop),
-                    safe: preview.safe(),
-                    rejection: preview.gaze_rejection.map(|reason| reason.as_str()),
-                    gaze_candidate: preview.gaze_candidate.map(xyz),
-                    gliding_to: self
-                        .climb_release_glide
-                        .map(|outcome| xyz(outcome.landing.center)),
-                    exit_fade: self.climb_exit_teleport.map_or(0.0, |exit| exit.alpha()),
-                }
-            },
         })
     }
 
@@ -19629,9 +18367,6 @@ impl crate::game_scene::DebuggableScene for MissionCore {
         // Apply the teleportation using the same logic as Effect::SetPlayerPosition
         self.physics
             .set_player_translation(position, &mut self.player_handle);
-        // A relocation cancels a climb exit in progress, or it would move the
-        // body back to its landing.
-        self.climb_exit_teleport = None;
         self.player_footsteps.reset();
 
         // Keep PlayerInfo.pos consistent with the body immediately. It otherwise
@@ -20849,60 +19584,6 @@ mod saved_script_namespace_tests {
 mod held_item_restore_tests {
     use super::*;
 
-    #[test]
-    fn vr_restored_hands_survive_neutral_then_release_once_after_squeeze() {
-        let mut world = World::new();
-        let left = world.add_entity((PropModelName("test_item".into()),));
-        let right = world.add_entity((PropModelName("test_item".into()),));
-        let mut interaction = VrInteraction::new();
-        restore_held_item_interaction(&mut interaction, &world, Some(left), Some(right));
-        let physics = PhysicsWorld::new();
-        let mut input = InputContext::default();
-        for squeeze in [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0] {
-            input.left_hand.squeeze_value = squeeze;
-            input.right_hand.squeeze_value = squeeze;
-            let effects = interaction.update(&InteractionContext {
-                physics: &physics,
-                world: &world,
-                input: &input,
-                player_pos: vec3(0.0, 0.0, 0.0),
-                player_rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                flat_eye: death_camera::EyePose::flat(1.04, Quaternion::new(1.0, 0.0, 0.0, 0.0)),
-                step_dt: 1.0 / 60.0,
-                support_enabled: false,
-                reserved_releases: &[],
-            });
-            assert_eq!(interaction.held_entities(), (Some(left), Some(right)));
-            assert!(
-                !effects
-                    .iter()
-                    .any(|e| matches!(e, VirtualHandEffect::DropItem { .. }))
-            );
-        }
-        input.left_hand.squeeze_value = 0.0;
-        input.right_hand.squeeze_value = 0.0;
-        for expected_drops in [2, 0] {
-            let effects = interaction.update(&InteractionContext {
-                physics: &physics,
-                world: &world,
-                input: &input,
-                player_pos: vec3(0.0, 0.0, 0.0),
-                player_rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                flat_eye: death_camera::EyePose::flat(1.04, Quaternion::new(1.0, 0.0, 0.0, 0.0)),
-                step_dt: 1.0 / 60.0,
-                support_enabled: false,
-                reserved_releases: &[],
-            });
-            assert_eq!(
-                effects
-                    .iter()
-                    .filter(|e| matches!(e, VirtualHandEffect::DropItem { .. }))
-                    .count(),
-                expected_drops
-            );
-            assert_eq!(interaction.held_entities(), (None, None));
-        }
-    }
 
     /// #787: flat mode only has one wield slot, so restoring a VR save with
     /// two held items must retain the first grab's displacement effects. The
@@ -21984,62 +20665,12 @@ impl crate::game_scene::GameScene for MissionCore {
         self.vr_comfort.reset();
         self.reference_grid.reset();
         self.dismiss_amp_carousel();
-        crate::vr_psi_sway::suspend(&self.world);
         crate::vr_tracking::RoomscaleState::invalidate(&self.world);
         self.flat_ui.cancel_item_use();
     }
 
-    fn pose_workbench_open(&self) -> bool {
-        self.interaction.pose_workbench_open()
-    }
 
-    /// The workbench reads only its own controls: the toggle that closes it
-    /// and the face buttons that save or discard. Nothing reaches the world.
-    fn update_pose_workbench(
-        &mut self,
-        elapsed: std::time::Duration,
-        input: &InputContext,
-        actions: &crate::input::InputActionState,
-    ) {
-        for effect in crate::input::ActionDispatcher::dispatch(actions, input) {
-            match effect {
-                Effect::ToggleGripPoseTool => {
-                    self.interaction.toggle_grip_pose_tool();
-                    request_pulses(&self.world, self.interaction.take_pose_tool_pulses());
-                    return;
-                }
-                Effect::HandButton { hand, button } => {
-                    self.interaction.pose_tool_button(hand, button)
-                }
-                _ => {}
-            }
-        }
-        let mut input = input.clone();
-        input.shift_rig(crate::vr_tracking::RoomscaleState::offset(&self.world));
-        let (pawn_pos, pawn_rotation) = {
-            let player = self.world.borrow::<UniqueView<PlayerInfo>>().unwrap();
-            (player.pos, player.rotation)
-        };
-        // The real floor: the tracked stage's, else (synthetic input) the feet.
-        let floor_y = pawn_pos.y
-            + input.tracking.map_or_else(
-                || -crate::physics::player_center_above_floor(self.player_handle.is_crouched()),
-                |tracking| tracking.stage_to_pawn(Vector3::new(0.0, 0.0, 0.0)).y,
-            );
-        self.interaction.update_pose_workbench(
-            &self.world,
-            &input,
-            pawn_pos,
-            pawn_rotation,
-            floor_y,
-            elapsed.as_secs_f32(),
-        );
-        request_pulses(&self.world, self.interaction.take_pose_tool_pulses());
-    }
 
-    fn hold_pose_workbench(&mut self) {
-        self.interaction.hold_pose_workbench();
-    }
 
     fn on_exit(&mut self, audio_context: &mut AudioContext<EntityId, String>) {
         for (_, handle) in self.looping_sounds.drain() {

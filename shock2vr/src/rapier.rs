@@ -47,12 +47,8 @@ pub(crate) fn collider_bounds(world: &World, entity: EntityId) -> Option<VrHeldW
 
 #[derive(Default)]
 struct Activation {
-    amount: f32,
-    held: bool,
     hum: Option<AudioHandle>,
 }
-
-impl Activation {}
 
 #[derive(Default)]
 pub(crate) struct RapierFeedback(HashMap<EntityId, Activation>);
@@ -83,19 +79,6 @@ impl RapierFeedback {
         self.0.drain().filter_map(|(_, s)| s.hum).collect()
     }
 
-    pub fn diagnostics(&self) -> serde_json::Value {
-        serde_json::Value::Array(
-            self.0
-                .iter()
-                .map(|(id, state)| {
-                    serde_json::json!({
-                        "entity_id": id.inner(), "extension": state.amount, "held": state.held,
-                        "hum_handle": state.hum.as_ref().map(AudioHandle::id),
-                    })
-                })
-                .collect(),
-        )
-    }
 }
 
 #[cfg(test)]

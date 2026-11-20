@@ -1,4 +1,3 @@
-mod climb_landing;
 #[cfg(any(test, feature = "damage-query-audit", feature = "lazy-hitboxes"))]
 mod damage_queries;
 mod debug_render_pipeline;
@@ -9,9 +8,7 @@ mod profiling;
 #[cfg(feature = "lazy-hitboxes")]
 mod query_hitboxes;
 mod release_placement;
-#[cfg(test)]
-mod world_scale_tests;
-pub use held_recovery::{HeldRecovery, HeldRecoveryContext};
+pub use held_recovery::HeldRecovery;
 pub(crate) mod util;
 
 use collision::Aabb3;
@@ -5401,16 +5398,6 @@ impl PhysicsWorld {
         }
     }
 
-    /// Conservative selection bounds, including attached model-bounds colliders.
-    pub(crate) fn entity_world_aabb(&self, entity: EntityId) -> Option<Aabb3<f32>> {
-        let handle = *self.entity_id_to_body.get(&entity)?;
-        let (min, max) = self.body_world_aabb(handle)?;
-        Some(Aabb3 {
-            min: point3(min.x, min.y, min.z),
-            max: point3(max.x, max.y, max.z),
-        })
-    }
-
     pub fn get_position(&self, handle: RigidBodyHandle) -> Option<Vector3<f32>> {
         let maybe_rigid_body = self.rigid_body_set.get(handle);
 
@@ -5559,85 +5546,6 @@ impl PhysicsWorld {
         self.entity_id_to_body
             .get(&entity)
             .and_then(|handle| self.get_body_transform(*handle))
-    }
-
-    /// Sweep an attack sphere against one entity's actual colliders. Moving
-    /// guards are tested in their own frame using last tick's body pose, so a
-    /// fast wrench and pipe cannot simply exchange sides between samples.
-    pub(crate) fn sweep_sphere_against_entity(
-        &self,
-        from: Vector3<f32>,
-        to: Vector3<f32>,
-        radius: f32,
-        entity: EntityId,
-        previous_pose: Option<Isometry<Real>>,
-    ) -> Option<f32> {
-        let body = self
-            .rigid_body_set
-            .get(*self.entity_id_to_body.get(&entity)?)?;
-        body.colliders()
-            .iter()
-            .filter_map(|handle| {
-                let collider = &self.collider_set[*handle];
-                if !collider.is_enabled() {
-                    return None;
-                }
-                let local = collider.position_wrt_parent().copied().unwrap_or_default();
-                Self::sweep_sphere_against_shape(
-                    from,
-                    to,
-                    radius,
-                    collider.shape(),
-                    body.position() * local,
-                    previous_pose.map(|pose| pose * local),
-                )
-            })
-            .min_by(f32::total_cmp)
-    }
-
-    /// Relative-motion query also used by held guns without a rigid body.
-    pub(crate) fn sweep_sphere_against_shape(
-        from: Vector3<f32>,
-        to: Vector3<f32>,
-        radius: f32,
-        shape: &dyn rapier3d::parry::shape::Shape,
-        pose: Isometry<Real>,
-        previous_pose: Option<Isometry<Real>>,
-    ) -> Option<f32> {
-        let from = previous_pose
-            .unwrap_or(pose)
-            .inverse_transform_point(&point![from.x, from.y, from.z]);
-        let to = pose.inverse_transform_point(&point![to.x, to.y, to.z]);
-        let sphere_pose = Isometry::translation(from.x, from.y, from.z);
-        let sphere = Ball::new(radius);
-        // A zero-length cast can miss a sphere already inside a cuboid. Held
-        // guards and the opening damage sample must still recognize overlap.
-        if rapier3d::parry::query::intersection_test(
-            &sphere_pose,
-            &sphere,
-            &Isometry::identity(),
-            shape,
-        )
-        .unwrap_or(false)
-        {
-            return Some(0.0);
-        }
-        rapier3d::parry::query::cast_shapes(
-            &sphere_pose,
-            &(to - from),
-            &sphere,
-            &Isometry::identity(),
-            &Vector::zeros(),
-            shape,
-            rapier3d::parry::query::ShapeCastOptions {
-                max_time_of_impact: 1.0,
-                stop_at_penetration: true,
-                ..Default::default()
-            },
-        )
-        .ok()
-        .flatten()
-        .map(|hit| hit.time_of_impact)
     }
 
     /// Exact overlap of two entities' authored colliders, including sensors.
@@ -9936,79 +9844,6 @@ mod tests {
                 "a player-fired shot must still hit {still_solid:?}"
             );
         }
-    }
-
-    #[test]
-    fn pipe_sweep_catches_crossing_a_thin_guard_and_a_moving_guard() {
-        let mut world = PhysicsWorld::new();
-        let guard = EntityId::from_inner(123).unwrap();
-        world.add_dynamic(
-            guard,
-            vec3(0.0, 0.0, 0.0),
-            identity_quat(),
-            vec3(0.0, 0.0, 0.0),
-            PhysicsShape::Cuboid(vec3(0.05, 0.5, 0.05)),
-            CollisionGroup::held_melee(),
-            false,
-            DynamicPhysicsOptions::default(),
-        );
-        let hit = world
-            .sweep_sphere_against_entity(
-                vec3(-1.0, 0.0, 0.0),
-                vec3(1.0, 0.0, 0.0),
-                0.1,
-                guard,
-                None,
-            )
-            .expect("a pipe crossing the whole guard in one tick must still hit");
-        assert!(hit > 0.3 && hit < 0.5, "{hit}");
-        assert!(
-            world
-                .sweep_sphere_against_entity(
-                    vec3(-1.0, 2.0, 0.0),
-                    vec3(1.0, 2.0, 0.0),
-                    0.1,
-                    guard,
-                    None,
-                )
-                .is_none(),
-            "passing above the wrench is not a block"
-        );
-        assert_eq!(
-            world.sweep_sphere_against_entity(
-                vec3(0.0, 0.0, 0.0),
-                vec3(0.0, 0.0, 0.0),
-                0.1,
-                guard,
-                None,
-            ),
-            Some(0.0),
-            "an already overlapping stationary guard must count"
-        );
-        assert_eq!(
-            world.sweep_sphere_against_entity(
-                vec3(0.0, 2.0, 0.0),
-                vec3(0.0, 2.0, 0.0),
-                0.1,
-                guard,
-                None,
-            ),
-            None,
-            "stationary separation must not become a block"
-        );
-        world.set_position_rotation2(guard, vec3(1.0, 0.0, 0.0), identity_quat());
-        assert!(
-            world
-                .sweep_sphere_against_entity(
-                    vec3(0.0, 0.0, 0.0),
-                    vec3(0.0, 0.0, 0.0),
-                    0.1,
-                    guard,
-                    Some(Isometry::translation(-1.0, 0.0, 0.0)),
-                )
-                .is_some(),
-            "a moving wrench must not tunnel through a stationary pipe"
-        );
     }
 
     #[test]
@@ -14704,114 +14539,6 @@ mod tests {
         let at = |z: f32| world.surface_grip_at(vec3(-4.98, 3.0, z), vec3(-4.0, 3.0, z));
         assert!(at(0.0).is_none(), "between the rungs");
         assert!(at(0.75).is_some(), "the wall beside the ladder");
-    }
-
-    #[test]
-    fn a_held_ledge_consumes_blocked_pull_without_falling_or_storing_motion() {
-        use crate::vr_climb::{ClimbHandInput, HandClimb};
-        let (mut world, mut player) = grip_world();
-        let block = EntityId::from_inner(2027).unwrap();
-        world.add_kinematic(
-            block,
-            vec3(0.0, 1.5, 0.0),
-            identity_quat(),
-            vec3(0.0, 0.0, 0.0),
-            vec3(4.0, 3.0, 4.0),
-            CollisionGroup::entity(),
-            false,
-        );
-        step(&mut world, &mut player, 1);
-        world.set_player_translation(vec3(HANG_X, 2.0, 0.0), &mut player);
-        world.set_player_crouch_hanging(true, &mut player);
-        let mut climb = HandClimb::default();
-        let mut hand = vec3(-0.38, 1.04, 0.0);
-        let input = |local_position, squeeze| ClimbHandInput {
-            local_position,
-            squeeze,
-            is_empty: true,
-        };
-        let mut frame = climb.update(
-            world.get_player_next_translation(&player),
-            identity_quat(),
-            world.player_step_dt(),
-            [input(vec3(0.0, 0.0, 0.0), 0.0), input(hand, 1.0)],
-            |p, _| world.climbable_grip_at(p, CLIMB_GRIP_RADIUS, 0.0),
-            |_| true,
-        );
-        assert!(climb.holds_a_ledge(), "must acquire the actual box's top");
-        let surface = climb.anchor_grip().unwrap().grip.point;
-        for _ in 0..8 {
-            let requested = frame.translation.expect("squeezed ledge retains support");
-            world.update_player_movement(
-                PlayerMoveRequest::HandClimb {
-                    translation: requested,
-                },
-                &mut player,
-            );
-            climb.resolve_translation(requested, player.self_translation());
-            let center = world.get_player_next_translation(&player);
-            assert!(
-                center.x >= HANG_X - 0.01,
-                "wall must stop the inward pull: {center:?}"
-            );
-            assert!(
-                (center.y - 2.0).abs() < 0.01,
-                "held hand must suppress gravity"
-            );
-            hand.x += 0.2;
-            frame = climb.update(
-                center,
-                identity_quat(),
-                world.player_step_dt(),
-                [input(vec3(0.0, 0.0, 0.0), 0.0), input(hand, 1.0)],
-                |_, _| None,
-                |_| true,
-            );
-        }
-        // Settle the last requested pull, then freeze the tracked hand. There
-        // must be no stored correction to snap the body inward on a later frame.
-        let requested = frame.translation.unwrap();
-        world.update_player_movement(
-            PlayerMoveRequest::HandClimb {
-                translation: requested,
-            },
-            &mut player,
-        );
-        climb.resolve_translation(requested, player.self_translation());
-        frame = climb.update(
-            world.get_player_next_translation(&player),
-            identity_quat(),
-            world.player_step_dt(),
-            [input(vec3(0.0, 0.0, 0.0), 0.0), input(hand, 1.0)],
-            |_, _| None,
-            |_| true,
-        );
-        assert!(frame.translation.unwrap().magnitude() < 0.001);
-        assert_eq!(climb.anchor_grip().unwrap().grip.point, surface);
-        // A small reverse motion takes effect immediately and only by the
-        // amount moved, instead of first paying back the blocked 1.6-unit pull.
-        hand.x -= 0.1;
-        frame = climb.update(
-            world.get_player_next_translation(&player),
-            identity_quat(),
-            world.player_step_dt(),
-            [input(vec3(0.0, 0.0, 0.0), 0.0), input(hand, 1.0)],
-            |_, _| None,
-            |_| true,
-        );
-        assert!((frame.translation.unwrap().x - 0.1).abs() < 0.001);
-        // Opening the hand still drops the body normally.
-        frame = climb.update(
-            world.get_player_next_translation(&player),
-            identity_quat(),
-            world.player_step_dt(),
-            [input(vec3(0.0, 0.0, 0.0), 0.0), input(hand, 0.0)],
-            |_, _| None,
-            |_| true,
-        );
-        assert!(frame.translation.is_none());
-        step(&mut world, &mut player, 30);
-        assert!(world.get_player_translation(&player).y < 1.5);
     }
 
     #[test]
