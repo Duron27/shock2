@@ -15,6 +15,7 @@ pub enum Phase {
 /// Bound only for the actor whose nearest surface is in the scratch texture.
 #[derive(Clone, Copy)]
 pub struct Mask {
+    /// A GL texture name, or on Vulkan the backend's texture id.
     texture: u32,
     origin: [i32; 2],
 }
@@ -104,7 +105,12 @@ impl Uniforms {
                     0
                 },
             );
-            if let Some(mask) = mask {
+            if let Some(mask) = mask
+                && gfx::is_vulkan()
+            {
+                gfx::vk_backend::bind_texture_id(TEXTURE_UNIT, Some(mask.texture));
+                gfx::set_ivec2(self.origin, mask.origin);
+            } else if let Some(mask) = mask {
                 gl::ActiveTexture(gl::TEXTURE0 + TEXTURE_UNIT);
                 gl::BindTexture(texture_target(), mask.texture);
                 gfx::set_ivec2(self.origin, mask.origin);
@@ -132,6 +138,9 @@ impl Target {
         view: &Matrix4<f32>,
         scene: &Scene,
     ) -> Mask {
+        if crate::gfx::is_vulkan() {
+            return Self::render_vulkan(group, layer, engine, context, view, scene);
+        }
         unsafe {
             let mut viewport = [0; 4];
             let mut draw_framebuffer = 0;
@@ -247,6 +256,38 @@ impl Target {
                 texture: self.texture,
                 origin: [viewport[0], viewport[1]],
             }
+        }
+    }
+}
+
+impl Target {
+    /// Vulkan: the backend pauses the frame's pass and captures depth only
+    /// (state as below: no colour, depth write, LESS), then resumes it.
+    fn render_vulkan(
+        group: u64,
+        layer: RenderLayer,
+        engine: &OpenGLEngine,
+        context: &EngineRenderContext,
+        view: &Matrix4<f32>,
+        scene: &Scene,
+    ) -> Mask {
+        use crate::gfx::vk_backend;
+        let origin = vk_backend::begin_depth_capture().unwrap_or_default();
+        let context = EngineRenderContext {
+            self_depth: Phase::Capture,
+            ..*context
+        };
+        for object in scene
+            .objects_in_layer(layer)
+            .filter(|object| object.self_depth_group == Some(group))
+        {
+            if let Some(depth) = object.self_depth_object() {
+                depth.draw_opaque(engine, &context, view, scene.lights());
+            }
+        }
+        Mask {
+            texture: vk_backend::end_depth_capture().unwrap_or(0),
+            origin,
         }
     }
 }

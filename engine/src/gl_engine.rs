@@ -62,9 +62,6 @@ impl OpenGLEngine {
             for s in in_layer(layer) {
                 let mask = s
                     .self_depth_group
-                    // Self-depth masks render through GL framebuffers, not
-                    // yet ported to Vulkan.
-                    .filter(|_| !crate::gfx::is_vulkan())
                     .zip(self_depth_scene)
                     .map(|(group, scene)| {
                         if cached_mask.is_none_or(|(id, _)| id != group) {

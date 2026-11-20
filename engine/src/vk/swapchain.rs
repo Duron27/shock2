@@ -31,6 +31,8 @@ pub struct VkSwapchain {
     pub views: Vec<vk::ImageView>,
     pub depth: DepthBuffer,
     pub render_pass: vk::RenderPass,
+    /// `render_pass` loading instead of clearing (see `create_render_pass`).
+    pub resume_pass: vk::RenderPass,
     pub framebuffers: Vec<vk::Framebuffer>,
     /// The images can be copied from (screenshots).
     pub transfer_src: bool,
@@ -129,7 +131,10 @@ impl VkSwapchain {
             })
             .expect("no depth format");
         let depth = create_depth(ctx, depth_format, extent)?;
-        let render_pass = create_render_pass(ctx, surface_format.format, depth_format, false)?;
+        let render_pass =
+            create_render_pass(ctx, surface_format.format, depth_format, false, false)?;
+        let resume_pass =
+            create_render_pass(ctx, surface_format.format, depth_format, false, true)?;
         let framebuffers = views
             .iter()
             .map(|&view| {
@@ -157,6 +162,7 @@ impl VkSwapchain {
             views,
             depth,
             render_pass,
+            resume_pass,
             framebuffers,
             transfer_src: usage.contains(vk::ImageUsageFlags::TRANSFER_SRC),
         })
@@ -169,6 +175,7 @@ impl VkSwapchain {
                 ctx.device.destroy_framebuffer(fb, None);
             }
             ctx.device.destroy_render_pass(self.render_pass, None);
+            ctx.device.destroy_render_pass(self.resume_pass, None);
             ctx.device.destroy_image_view(self.depth.view, None);
             ctx.device.destroy_image(self.depth.image, None);
             ctx.device.free_memory(self.depth.memory, None);
@@ -273,35 +280,54 @@ fn create_depth(
 /// `sampled` the colour ends ready for a fragment shader to read (an
 /// offscreen frame, see `gamma`) instead of ready to present. Both versions
 /// are render-pass compatible, so pipelines built for one draw in the other.
+/// With `resume` the pass loads what an earlier pass over the same
+/// framebuffer left (a frame paused for a self-depth capture) instead of
+/// clearing it.
 pub(crate) fn create_render_pass(
     ctx: &VkContext,
     color: vk::Format,
     depth: vk::Format,
     sampled: bool,
+    resume: bool,
 ) -> Result<vk::RenderPass, vk::Result> {
+    let color_final = if sampled {
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+    } else {
+        vk::ImageLayout::PRESENT_SRC_KHR
+    };
+    let (load, color_initial, depth_initial) = if resume {
+        (
+            vk::AttachmentLoadOp::LOAD,
+            color_final,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        )
+    } else {
+        (
+            vk::AttachmentLoadOp::CLEAR,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::UNDEFINED,
+        )
+    };
     let attachments = [
         vk::AttachmentDescription::builder()
             .format(color)
             .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .load_op(load)
             .store_op(vk::AttachmentStoreOp::STORE)
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(if sampled {
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
-            } else {
-                vk::ImageLayout::PRESENT_SRC_KHR
-            })
+            .initial_layout(color_initial)
+            .final_layout(color_final)
             .build(),
         vk::AttachmentDescription::builder()
             .format(depth)
             .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
+            .load_op(load)
+            // Kept: a paused frame resumes on it.
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .initial_layout(depth_initial)
             .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             .build(),
     ];
@@ -335,9 +361,13 @@ pub(crate) fn create_render_pass(
             .dst_subpass(0)
             .src_stage_mask(stages | read_stage)
             .dst_stage_mask(stages)
-            .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-            .dst_access_mask(
+            .src_access_mask(
                 vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             )

@@ -259,6 +259,7 @@ enum Garbage {
     Image(vk::Image, vk::ImageView, Allocation),
     /// A submitted upload command buffer, from the upload pool.
     Commands(vk::CommandBuffer),
+    Framebuffer(vk::Framebuffer),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -326,6 +327,12 @@ struct Recording {
     render_pass: vk::RenderPass,
     formats: (i32, i32),
     extent: vk::Extent2D,
+    /// The frame's framebuffer and the pass that resumes drawing into it
+    /// after a depth capture paused it.
+    framebuffer: vk::Framebuffer,
+    resume_pass: vk::RenderPass,
+    /// While capturing: the frame's pass, formats, extent and GL state.
+    paused: Option<(vk::RenderPass, (i32, i32), vk::Extent2D, GlState)>,
     slot: usize,
     pipeline: vk::Pipeline,
     viewport: Option<[i32; 4]>,
@@ -372,7 +379,19 @@ struct State {
     /// Texture units, each holding a 2D and a cube binding as GL's do.
     units: [Option<u32>; MAX_UNITS],
     cube_units: [Option<u32>; MAX_UNITS],
+    depth_capture: Option<DepthCapture>,
 }
+
+/// The self-depth scratch: one depth image, sampled as a texture after a
+/// capture, resized with the viewport it captures.
+struct DepthCapture {
+    pass: vk::RenderPass,
+    image: Option<(u32, vk::Framebuffer, vk::Extent2D)>,
+}
+
+/// Sampled depth: D32_SFLOAT supports sampling and depth attachment on
+/// every desktop driver.
+const CAPTURE_DEPTH: vk::Format = vk::Format::D32_SFLOAT;
 
 /// Per-second counters, printed with `SHOCK2_VK_STATS=1`.
 #[derive(Default)]
@@ -492,6 +511,7 @@ pub fn install(ctx: &crate::vk::VkContext) {
         program: None,
         units: [None; MAX_UNITS],
         cube_units: [None; MAX_UNITS],
+        depth_capture: None,
     };
     state.zero_buffer = state.create_buffer(&[0u8; 16], vk::BufferUsageFlags::VERTEX_BUFFER);
     state.white = state.create_texture(
@@ -517,6 +537,16 @@ pub fn shutdown() {
     s.flush_uploads();
     let d = s.dev.device.clone();
     unsafe {
+        if let Some(capture) = s.depth_capture.take() {
+            if let Some((id, framebuffer, _)) = capture.image {
+                d.destroy_framebuffer(framebuffer, None);
+                if let Some(i) = s.images.remove(&id) {
+                    d.destroy_image_view(i.view, None);
+                    d.destroy_image(i.image, None);
+                }
+            }
+            d.destroy_render_pass(capture.pass, None);
+        }
         for (_, g) in s.garbage.drain(..) {
             destroy_garbage(&d, s.upload_pool, g);
         }
@@ -574,15 +604,24 @@ unsafe fn destroy_garbage(
                 d.free_command_buffers(upload_pool, &[cmd]);
                 None
             }
+            Garbage::Framebuffer(f) => {
+                d.destroy_framebuffer(f, None);
+                None
+            }
         }
     }
 }
 
 /// Start recording gfx draws into `commands`, inside an open render pass.
 /// `slot`'s previous frame has finished (its fence was waited on).
+/// `framebuffer` and `resume_pass` let a self-depth capture pause the
+/// frame's `render_pass` and pick it up again.
+#[allow(clippy::too_many_arguments)]
 pub fn begin_frame(
     commands: vk::CommandBuffer,
     render_pass: vk::RenderPass,
+    resume_pass: vk::RenderPass,
+    framebuffer: vk::Framebuffer,
     formats: (vk::Format, vk::Format),
     extent: vk::Extent2D,
     slot: usize,
@@ -619,6 +658,9 @@ pub fn begin_frame(
             render_pass,
             formats: (formats.0.as_raw(), formats.1.as_raw()),
             extent,
+            framebuffer,
+            resume_pass,
+            paused: None,
             slot,
             pipeline: vk::Pipeline::null(),
             viewport: None,
@@ -1237,7 +1279,14 @@ impl State {
             .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(mask)
             .build()];
-        let blend = vk::PipelineColorBlendStateCreateInfo::builder().attachments(&blend_attachment);
+        // A depth-only pass has no colour attachment to blend into.
+        let blend = vk::PipelineColorBlendStateCreateInfo::builder().attachments(
+            if key.formats.0 == vk::Format::UNDEFINED.as_raw() {
+                &[]
+            } else {
+                &blend_attachment[..]
+            },
+        );
         let dynamic_states = [
             vk::DynamicState::VIEWPORT,
             vk::DynamicState::SCISSOR,
@@ -1949,6 +1998,287 @@ pub fn clear(color: bool, depth: bool) {
             );
         }
     });
+}
+
+/// Pause the frame's render pass and capture depth only, into the self-depth
+/// image, at the size of the current viewport; GL's "bind a depth FBO and
+/// draw". Returns where that viewport's corner is in fragment coordinates
+/// (Vulkan's are top-left, so a mask lines up with `gl_FragCoord`).
+pub fn begin_depth_capture() -> Option<[i32; 2]> {
+    with(|s| s.begin_depth_capture()).flatten()
+}
+
+/// Finish a capture and resume the frame. Returns the depth image's texture
+/// id, for [`bind_texture_id`].
+pub fn end_depth_capture() -> Option<u32> {
+    with(|s| s.end_depth_capture()).flatten()
+}
+
+/// Bind a backend texture by id (the self-depth image) to a 2D unit.
+pub fn bind_texture_id(unit: u32, id: Option<u32>) {
+    with(|s| {
+        if let Some(u) = s.units.get_mut(unit as usize) {
+            *u = id;
+        }
+    });
+}
+
+impl State {
+    fn begin_depth_capture(&mut self) -> Option<[i32; 2]> {
+        let rec = self.recording.as_ref()?;
+        if rec.paused.is_some() {
+            return None;
+        }
+        let (cmd, frame_extent) = (rec.commands, rec.extent);
+        let h = frame_extent.height as i32;
+        let vp = self
+            .gl
+            .viewport
+            .unwrap_or([0, 0, frame_extent.width as i32, h]);
+        let size = vk::Extent2D {
+            width: vp[2].max(1) as u32,
+            height: vp[3].max(1) as u32,
+        };
+        let pass = self.depth_capture_pass();
+        let (id, framebuffer) = self.depth_capture_image(pass, size);
+        // Never sample the image being drawn into.
+        for unit in self.units.iter_mut() {
+            if *unit == Some(id) {
+                *unit = None;
+            }
+        }
+        let clears = [vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 1.0,
+                stencil: 0,
+            },
+        }];
+        unsafe {
+            let d = &self.dev.device;
+            d.cmd_end_render_pass(cmd);
+            d.cmd_begin_render_pass(
+                cmd,
+                &vk::RenderPassBeginInfo::builder()
+                    .render_pass(pass)
+                    .framebuffer(framebuffer)
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent: size,
+                    })
+                    .clear_values(&clears),
+                vk::SubpassContents::INLINE,
+            );
+        }
+        let gl = self.gl;
+        let rec = self.recording.as_mut().unwrap();
+        rec.paused = Some((rec.render_pass, rec.formats, rec.extent, gl));
+        rec.render_pass = pass;
+        rec.formats = (vk::Format::UNDEFINED.as_raw(), CAPTURE_DEPTH.as_raw());
+        rec.extent = size;
+        rec.pipeline = vk::Pipeline::null();
+        rec.viewport = None;
+        rec.scissor = None;
+        rec.bias = None;
+        // The GL path's state for the capture: depth only, nearest wins.
+        self.gl.viewport = Some([0, 0, size.width as i32, size.height as i32]);
+        self.gl.scissor_test = false;
+        self.gl.depth_test = true;
+        self.gl.depth_write = true;
+        self.gl.depth_func = DepthFunc::Less;
+        self.gl.color_mask = [false; 4];
+        Some([vp[0], h - vp[1] - vp[3]])
+    }
+
+    fn end_depth_capture(&mut self) -> Option<u32> {
+        let rec = self.recording.as_mut()?;
+        let (pass, formats, extent, gl) = rec.paused.take()?;
+        rec.render_pass = pass;
+        rec.formats = formats;
+        rec.extent = extent;
+        rec.pipeline = vk::Pipeline::null();
+        rec.viewport = None;
+        rec.scissor = None;
+        rec.bias = None;
+        let (cmd, resume, framebuffer) = (rec.commands, rec.resume_pass, rec.framebuffer);
+        self.gl = gl;
+        unsafe {
+            let d = &self.dev.device;
+            d.cmd_end_render_pass(cmd);
+            d.cmd_begin_render_pass(
+                cmd,
+                &vk::RenderPassBeginInfo::builder()
+                    .render_pass(resume)
+                    .framebuffer(framebuffer)
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent,
+                    }),
+                vk::SubpassContents::INLINE,
+            );
+        }
+        self.depth_capture
+            .as_ref()
+            .and_then(|c| c.image)
+            .map(|(id, _, _)| id)
+    }
+
+    fn depth_capture_pass(&mut self) -> vk::RenderPass {
+        if let Some(c) = &self.depth_capture {
+            return c.pass;
+        }
+        let attachments = [vk::AttachmentDescription::builder()
+            .format(CAPTURE_DEPTH)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .build()];
+        let depth_ref = vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
+        let subpass = [vk::SubpassDescription::builder()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .depth_stencil_attachment(&depth_ref)
+            .build()];
+        let tests = vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
+        let dependencies = [
+            // An earlier mask's sampling finishes before this one clears it.
+            vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER | tests)
+                .dst_stage_mask(tests)
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_access_mask(
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
+                .build(),
+            // The mask is sampled by the draws that follow.
+            vk::SubpassDependency::builder()
+                .src_subpass(0)
+                .dst_subpass(vk::SUBPASS_EXTERNAL)
+                .src_stage_mask(tests)
+                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+                .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .build(),
+        ];
+        let pass = unsafe {
+            self.dev.device.create_render_pass(
+                &vk::RenderPassCreateInfo::builder()
+                    .attachments(&attachments)
+                    .subpasses(&subpass)
+                    .dependencies(&dependencies),
+                None,
+            )
+        }
+        .expect("vkCreateRenderPass");
+        self.depth_capture = Some(DepthCapture { pass, image: None });
+        pass
+    }
+
+    /// The scratch image and framebuffer at `size`, rebuilt when it changes.
+    fn depth_capture_image(
+        &mut self,
+        pass: vk::RenderPass,
+        size: vk::Extent2D,
+    ) -> (u32, vk::Framebuffer) {
+        if let Some((id, framebuffer, extent)) = self.depth_capture.as_ref().and_then(|c| c.image) {
+            if extent == size {
+                return (id, framebuffer);
+            }
+            if let Some(i) = self.images.remove(&id) {
+                self.retire(Garbage::Image(i.image, i.view, i.alloc));
+            }
+            self.retire(Garbage::Framebuffer(framebuffer));
+        }
+        let d = self.dev.device.clone();
+        let image = unsafe {
+            d.create_image(
+                &vk::ImageCreateInfo::builder()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(CAPTURE_DEPTH)
+                    .extent(vk::Extent3D {
+                        width: size.width,
+                        height: size.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(
+                        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                            | vk::ImageUsageFlags::SAMPLED,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                None,
+            )
+        }
+        .expect("vkCreateImage");
+        let req = unsafe { d.get_image_memory_requirements(image) };
+        let alloc = self
+            .alloc
+            .alloc(&self.dev, req, vk::MemoryPropertyFlags::DEVICE_LOCAL, false);
+        unsafe { d.bind_image_memory(image, alloc.memory, alloc.offset) }
+            .expect("vkBindImageMemory");
+        let view = unsafe {
+            d.create_image_view(
+                &vk::ImageViewCreateInfo::builder()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(CAPTURE_DEPTH)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::DEPTH,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+                None,
+            )
+        }
+        .expect("vkCreateImageView");
+        let attachments = [view];
+        let framebuffer = unsafe {
+            d.create_framebuffer(
+                &vk::FramebufferCreateInfo::builder()
+                    .render_pass(pass)
+                    .attachments(&attachments)
+                    .width(size.width)
+                    .height(size.height)
+                    .layers(1),
+                None,
+            )
+        }
+        .expect("vkCreateFramebuffer");
+        let id = self.id();
+        self.images.insert(
+            id,
+            ImageObj {
+                image,
+                view,
+                alloc,
+                sampling: Sampling {
+                    filter: Filter::Nearest,
+                    wrap: false,
+                },
+                mips: 1,
+                layers: 1,
+            },
+        );
+        if let Some(c) = self.depth_capture.as_mut() {
+            c.image = Some((id, framebuffer, size));
+        }
+        (id, framebuffer)
+    }
 }
 
 /// A mesh's buffers. Dropping it retires them.

@@ -272,9 +272,18 @@ impl VkRenderer {
             );
         }
         crate::gfx::vk_backend::note_waits(fence_wait, acquired.elapsed());
+        let (resume_pass, framebuffer) = match (&self.gamma_target, gamma) {
+            (Some(target), Some(_)) => (target.resume_pass, target.framebuffer),
+            _ => (
+                swapchain.resume_pass,
+                swapchain.framebuffers[image_index as usize],
+            ),
+        };
         crate::gfx::vk_backend::begin_frame(
             slot.commands,
             swapchain.render_pass,
+            resume_pass,
+            framebuffer,
             (swapchain.format, swapchain.depth_format),
             swapchain.extent,
             self.slot,

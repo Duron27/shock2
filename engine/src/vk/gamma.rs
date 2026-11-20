@@ -41,6 +41,8 @@ pub(crate) struct GammaTarget {
     view: vk::ImageView,
     /// Clears and draws the scene into `image`, leaving it ready to sample.
     pub render_pass: vk::RenderPass,
+    /// `render_pass` loading instead of clearing, to resume a paused frame.
+    pub resume_pass: vk::RenderPass,
     pub framebuffer: vk::Framebuffer,
     sampler: vk::Sampler,
     set_layout: vk::DescriptorSetLayout,
@@ -108,9 +110,22 @@ impl GammaTarget {
                     None,
                 )
                 .map_err(vk_err("vkCreateImageView"))?;
-            let render_pass =
-                swapchain::create_render_pass(ctx, swapchain.format, swapchain.depth_format, true)
-                    .map_err(vk_err("vkCreateRenderPass"))?;
+            let render_pass = swapchain::create_render_pass(
+                ctx,
+                swapchain.format,
+                swapchain.depth_format,
+                true,
+                false,
+            )
+            .map_err(vk_err("vkCreateRenderPass"))?;
+            let resume_pass = swapchain::create_render_pass(
+                ctx,
+                swapchain.format,
+                swapchain.depth_format,
+                true,
+                true,
+            )
+            .map_err(vk_err("vkCreateRenderPass"))?;
             let attachments = [view, swapchain.depth.view];
             let framebuffer = d
                 .create_framebuffer(
@@ -203,6 +218,7 @@ impl GammaTarget {
                 memory,
                 view,
                 render_pass,
+                resume_pass,
                 framebuffer,
                 sampler,
                 set_layout,
@@ -276,6 +292,7 @@ impl GammaTarget {
             d.destroy_sampler(self.sampler, None);
             d.destroy_framebuffer(self.framebuffer, None);
             d.destroy_render_pass(self.render_pass, None);
+            d.destroy_render_pass(self.resume_pass, None);
             d.destroy_image_view(self.view, None);
             d.destroy_image(self.image, None);
             d.free_memory(self.memory, None);
