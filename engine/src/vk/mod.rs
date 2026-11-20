@@ -372,6 +372,9 @@ impl VkRenderer {
             ];
             unsafe {
                 device.cmd_end_render_pass(frame.commands);
+            }
+            target.record_mips(device, frame.commands);
+            unsafe {
                 device.cmd_begin_render_pass(
                     frame.commands,
                     &vk::RenderPassBeginInfo::builder()

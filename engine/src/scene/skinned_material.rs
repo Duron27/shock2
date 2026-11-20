@@ -190,6 +190,9 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             return texColor * radiance * lambertian;
         }
 
+        uniform float heldReflection;
+        uniform bool heldEnvironment;
+
         void main() {
             if (hiddenBySelfDepth()) discard;
             vec4 texColor = sampleMaterialPass(texture1, texCoord, worldPos, worldNormal);
@@ -226,6 +229,31 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             finalColor += texColor.rgb * light * litScale;
             vec4 shaded = applyShine(vec4(finalColor, texColor.a * (1.0 - transparency)), light, specular, 1.0 - transparency, texCoord, worldPos, normal);
 
+            // Held weapons are machined metal: they mirror the room, most
+            // where the finish is silver (bright, unsaturated texels) and a
+            // little where it is dark or painted. Scaled by the light that
+            // reaches the gun, so it doesn't glow in a dark corridor.
+            if (heldReflection > 0.0 && heldEnvironment) {
+                highp vec3 toEye = normalize(fogEyeDensity.xyz - worldPos);
+                float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
+                float top = max(texColor.r, max(texColor.g, texColor.b));
+                float sat = (top - min(texColor.r, min(texColor.g, texColor.b))) / max(top, 1e-3);
+                float metal = mix(0.12, 1.0, smoothstep(0.18, 0.55, lum) * (1.0 - smoothstep(0.12, 0.45, sat)));
+                float facing = clamp(abs(dot(normal, toEye)), 0.0, 1.0);
+                float fresnel = mix(0.55, 1.0, pow(1.0 - facing, 5.0));
+                vec3 mirrored = reflect(-toEye, normal);
+                vec3 seen = textureLod(shineEnvironment, environmentDirection(mirrored), 1.0).rgb;
+                float lit = clamp(dot(light, vec3(0.299, 0.587, 0.114)) * 1.5, 0.1, 1.0);
+                // Metal tints what it reflects with its own colour, and its
+                // colour *is* the reflection: blend toward it rather than
+                // adding, so a silver slide shows the room instead of
+                // clipping to white.
+                vec3 tint = mix(vec3(1.0), texColor.rgb / max(top, 1e-3), 0.4);
+                vec3 mirror = seen * tint * lit * (0.5 + top);
+                float amount = clamp(metal * fresnel * heldReflection * 0.75, 0.0, 0.85);
+                shaded.rgb = mix(shaded.rgb, mirror, amount);
+            }
+
             fragColor = applyMaterialPass(applyIncidence(shaded, texColor, worldPos, worldNormal), texColor, worldPos, worldNormal);
             fragColor.rgb *= fogFactor(worldPos);
         }
@@ -236,6 +264,8 @@ struct UnifiedUniforms {
     self_depth: super::self_depth::Uniforms,
     point_shadow: super::point_shadow::Uniforms,
     fog: super::fog::Uniforms,
+    held_reflection: gfx::Uniform,
+    held_environment: gfx::Uniform,
     incidence: IncidenceUniforms,
     render_pass: super::render_pass::Uniforms,
     shine: ShineUniforms,
@@ -347,6 +377,15 @@ impl SkinnedMaterial {
         uniforms.self_depth.bind(render_context.self_depth);
         uniforms.point_shadow.bind(lights, render_context);
         uniforms.fog.bind();
+        let held_environment = lights
+            .environment
+            .as_ref()
+            .filter(|_| lights.held_reflection > 0.0);
+        if let Some(environment) = held_environment {
+            environment.bind_to(super::shine::ENVIRONMENT_UNIT);
+        }
+        gfx::set_i32(uniforms.held_environment, i32::from(held_environment.is_some()));
+        gfx::set_f32(uniforms.held_reflection, lights.held_reflection);
         uniforms
             .incidence
             .bind(self.incidence.as_ref(), render_context, view_matrix);
@@ -575,6 +614,8 @@ impl Material for SkinnedMaterial {
                 self_depth: super::self_depth::Uniforms::new(&shader),
                 point_shadow: super::point_shadow::Uniforms::new(&shader),
                 fog: super::fog::Uniforms::new(&shader),
+                held_reflection: shader.uniform("heldReflection"),
+                held_environment: shader.uniform("heldEnvironment"),
                 incidence: IncidenceUniforms::new(&shader),
                 render_pass: super::render_pass::Uniforms::new(&shader),
                 shine: ShineUniforms::new(&shader),

@@ -195,6 +195,10 @@ pub struct LightArray {
     /// a capture or at 0.
     pub environment: Option<std::rc::Rc<crate::texture::CubeTexture>>,
     pub reflection: f32,
+    /// Polished-metal reflection of the capture on the player's held items
+    /// (weapons), weighted per texel by how silver it is; 0 for everything
+    /// else.
+    pub held_reflection: f32,
     /// Vein tuning for shine on growth and on the annelid weapons.
     pub growth_veins: super::shine::VeinTuning,
     pub weapon_veins: super::shine::VeinTuning,
@@ -212,6 +216,7 @@ impl LightArray {
             specular: 0.0,
             environment: None,
             reflection: 0.0,
+            held_reflection: 0.0,
             growth_veins: Default::default(),
             weapon_veins: Default::default(),
         }
@@ -296,6 +301,7 @@ impl LightArray {
             specular: self.specular,
             environment: self.environment.clone(),
             reflection: self.reflection,
+            held_reflection: self.held_reflection,
             growth_veins: self.growth_veins,
             weapon_veins: self.weapon_veins,
         };

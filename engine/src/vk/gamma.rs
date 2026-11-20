@@ -51,11 +51,21 @@ float hash(uvec3 v) {
 
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 // The frame is display-referred (8-bit), so "bright" means near white:
-// lamps, screens, flashes. A soft knee from 0.55 to 1.0; anything darker
-// contributes no glare, so a dim corridor stays clean.
+// lamps, screens, flashes. A knee from 0.65 to 1.0: lamps glow, while a
+// lit silver gun or a pale wall barely does.
+// Taps read mip 2 (a 4x4 average), so the sparse spiral sees smooth light
+// rather than single texels - no speckle, and thin bright edges such as a
+// lit gun's rim average away while a lamp's face survives.
 vec3 brightPart(vec2 at, vec2 size) {
-    vec3 s = texture(frame, at / size).rgb;
+    vec3 s = textureLod(frame, at / size, 2.0).rgb;
     return s * smoothstep(0.55, 1.0, dot(s, LUMA));
+}
+
+// The streak takes only near-white points (bulbs, flashes); a large bright
+// surface would otherwise smear sideways into ghost copies of itself.
+vec3 hotPart(vec2 at, vec2 size) {
+    vec3 s = textureLod(frame, at / size, 1.0).rgb;
+    return s * smoothstep(0.92, 1.0, dot(s, LUMA));
 }
 
 // Glare: a soft disc of light around bright sources (golden-angle spiral,
@@ -68,9 +78,11 @@ vec3 glare(vec2 size) {
         float weights = 0.0;
         // Turn the spiral per pixel: sparse taps then dither into fine
         // noise (hidden under the grain) instead of visible rings.
+        // White noise: fine speckle the film grain hides (a structured
+        // pattern such as interleaved gradient noise shows as hatching).
         float spin = hash(uvec3(uvec2(gl_FragCoord.xy), 7u)) * 6.28318;
-        for (int i = 0; i < 28; i++) {
-            float t = (float(i) + 0.5) / 28.0;
+        for (int i = 0; i < 40; i++) {
+            float t = (float(i) + 0.5) / 40.0;
             float a = float(i) * 2.39996 + spin;
             vec2 offset = vec2(cos(a), sin(a)) * sqrt(t) * radius;
             float w = 1.0 - 0.6 * t;
@@ -82,12 +94,15 @@ vec3 glare(vec2 size) {
     if (grade.streak > 0.0) {
         vec3 streak = vec3(0.0);
         float reach = size.x * 0.12;
-        for (int i = 1; i <= 10; i++) {
-            float t = float(i) / 10.0;
-            float w = exp(-3.0 * t);
+        // Jitter the tap spacing per pixel so the taps blur into a smooth
+        // line instead of stepping.
+        float jitter = hash(uvec3(uvec2(gl_FragCoord.xy), 11u));
+        for (int i = 0; i < 16; i++) {
+            float t = (float(i) + jitter) / 16.0;
+            float w = exp(-3.0 * t) * 0.6;
             vec2 offset = vec2(t * reach, 0.0);
-            streak += (brightPart(gl_FragCoord.xy + offset, size)
-                + brightPart(gl_FragCoord.xy - offset, size)) * w;
+            streak += (hotPart(gl_FragCoord.xy + offset, size)
+                + hotPart(gl_FragCoord.xy - offset, size)) * w;
         }
         // A cool tint, like the coating on a lens.
         sum += streak * vec3(0.75, 0.85, 1.0) * grade.streak;
@@ -178,10 +193,19 @@ impl Grade {
 
 /// The offscreen frame and the copy that applies gamma to it. Built for one
 /// swapchain; rebuild it with the swapchain.
+/// Mip levels of the offscreen frame. Level 0 is the frame; the rest are
+/// rebuilt every frame (see [`GammaTarget::record_mips`]) so the glare taps
+/// read pre-blurred light instead of speckling on single texels.
+const LEVELS: u32 = 4;
+
 pub(crate) struct GammaTarget {
     image: vk::Image,
     memory: vk::DeviceMemory,
+    /// Level 0 only: the scene pass renders into it.
     view: vk::ImageView,
+    /// Every level: what the copy samples.
+    sampled_view: vk::ImageView,
+    extent: vk::Extent2D,
     /// Clears and draws the scene into `image`, leaving it ready to sample.
     pub render_pass: vk::RenderPass,
     /// `render_pass` loading instead of clearing, to resume a paused frame.
@@ -219,11 +243,16 @@ impl GammaTarget {
                             height: extent.height,
                             depth: 1,
                         })
-                        .mip_levels(1)
+                        .mip_levels(LEVELS)
                         .array_layers(1)
                         .samples(vk::SampleCountFlags::TYPE_1)
                         .tiling(vk::ImageTiling::OPTIMAL)
-                        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+                        .usage(
+                            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                                | vk::ImageUsageFlags::SAMPLED
+                                | vk::ImageUsageFlags::TRANSFER_SRC
+                                | vk::ImageUsageFlags::TRANSFER_DST,
+                        )
                         .sharing_mode(vk::SharingMode::EXCLUSIVE)
                         .initial_layout(vk::ImageLayout::UNDEFINED),
                     None,
@@ -250,6 +279,19 @@ impl GammaTarget {
                         .view_type(vk::ImageViewType::TYPE_2D)
                         .format(swapchain.format)
                         .subresource_range(swapchain::subresource(vk::ImageAspectFlags::COLOR)),
+                    None,
+                )
+                .map_err(vk_err("vkCreateImageView"))?;
+            let sampled_view = d
+                .create_image_view(
+                    &vk::ImageViewCreateInfo::builder()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(swapchain.format)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            level_count: LEVELS,
+                            ..swapchain::subresource(vk::ImageAspectFlags::COLOR)
+                        }),
                     None,
                 )
                 .map_err(vk_err("vkCreateImageView"))?;
@@ -295,7 +337,8 @@ impl GammaTarget {
                         .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                         .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                         .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                        .max_lod(0.0),
+                        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                        .max_lod(LEVELS as f32),
                     None,
                 )
                 .map_err(vk_err("vkCreateSampler"))?;
@@ -335,7 +378,7 @@ impl GammaTarget {
             // in SHADER_READ_ONLY_OPTIMAL.
             let image_info = [vk::DescriptorImageInfo {
                 sampler,
-                image_view: view,
+                image_view: sampled_view,
                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             }];
             d.update_descriptor_sets(
@@ -365,6 +408,8 @@ impl GammaTarget {
                 image,
                 memory,
                 view,
+                sampled_view,
+                extent,
                 render_pass,
                 resume_pass,
                 framebuffer,
@@ -376,6 +421,112 @@ impl GammaTarget {
                 pipeline,
             })
         }
+    }
+
+    /// Rebuild levels 1.. from the finished frame (level 0, left in
+    /// SHADER_READ_ONLY by the scene pass), leaving every level ready to
+    /// sample. Recorded between the scene pass and the swapchain pass.
+    pub fn record_mips(&self, d: &ash::Device, cmd: vk::CommandBuffer) {
+        let range = |level: u32, count: u32| vk::ImageSubresourceRange {
+            base_mip_level: level,
+            level_count: count,
+            ..swapchain::subresource(vk::ImageAspectFlags::COLOR)
+        };
+        let barrier = |level: u32,
+                       count: u32,
+                       from: vk::ImageLayout,
+                       to: vk::ImageLayout,
+                       src: (vk::PipelineStageFlags, vk::AccessFlags),
+                       dst: (vk::PipelineStageFlags, vk::AccessFlags)| unsafe {
+            d.cmd_pipeline_barrier(
+                cmd,
+                src.0,
+                dst.0,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::builder()
+                    .src_access_mask(src.1)
+                    .dst_access_mask(dst.1)
+                    .old_layout(from)
+                    .new_layout(to)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(self.image)
+                    .subresource_range(range(level, count))
+                    .build()],
+            );
+        };
+        let transfer = (vk::PipelineStageFlags::TRANSFER, vk::AccessFlags::TRANSFER_WRITE);
+        let read = (vk::PipelineStageFlags::TRANSFER, vk::AccessFlags::TRANSFER_READ);
+        barrier(
+            0,
+            1,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ),
+            read,
+        );
+        let size = |level: u32| {
+            [
+                (self.extent.width >> level).max(1) as i32,
+                (self.extent.height >> level).max(1) as i32,
+            ]
+        };
+        for level in 1..LEVELS {
+            // Last frame's contents are dead: start from UNDEFINED.
+            barrier(
+                level,
+                1,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty()),
+                transfer,
+            );
+            let [sw, sh] = size(level - 1);
+            let [dw, dh] = size(level);
+            let layers = |level: u32| vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: level,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            unsafe {
+                d.cmd_blit_image(
+                    cmd,
+                    self.image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    self.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[vk::ImageBlit {
+                        src_subresource: layers(level - 1),
+                        src_offsets: [vk::Offset3D::default(), vk::Offset3D { x: sw, y: sh, z: 1 }],
+                        dst_subresource: layers(level),
+                        dst_offsets: [vk::Offset3D::default(), vk::Offset3D { x: dw, y: dh, z: 1 }],
+                    }],
+                    vk::Filter::LINEAR,
+                );
+            }
+            barrier(
+                level,
+                1,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                transfer,
+                read,
+            );
+        }
+        barrier(
+            0,
+            LEVELS,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            read,
+            (vk::PipelineStageFlags::FRAGMENT_SHADER, vk::AccessFlags::SHADER_READ),
+        );
     }
 
     /// Record the copy into the open swapchain render pass.
@@ -453,6 +604,7 @@ impl GammaTarget {
             d.destroy_render_pass(self.render_pass, None);
             d.destroy_render_pass(self.resume_pass, None);
             d.destroy_image_view(self.view, None);
+            d.destroy_image_view(self.sampled_view, None);
             d.destroy_image(self.image, None);
             d.free_memory(self.memory, None);
         }

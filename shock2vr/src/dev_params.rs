@@ -571,6 +571,9 @@ dev_params! {
     /// their light, so far corridors fall into black (0 off). Not in the
     /// original; part of this port's horror look.
     DISTANCE_DARKNESS = Lighting::float("distance_darkness", "Distance dark", 0.04, 0.0, 0.1, 0.005),
+    /// How strongly held weapons mirror the room (25AE capture), weighted
+    /// per texel by how silver the finish is; 0 off.
+    HELD_REFLECTION = Lighting::float("held_reflection", "Weapon reflection", 0.8, 0.0, 2.0, 0.05),
     /// Reflections on the world: floors (and walls, less) mirror the
     /// mission's environment capture and catch highlights from nearby
     /// lamps (0 off). The capture exists on 25AE installs only; lamp
@@ -578,8 +581,9 @@ dev_params! {
     WORLD_GLOSS = Lighting::float("world_gloss", "World gloss", 0.6, 0.0, 2.0, 0.05),
     /// Glow around bright sources - lamps, screens, flashes (0 off).
     SCREEN_BLOOM = Lighting::float("screen_bloom", "Glare bloom", 0.8, 0.0, 2.0, 0.05),
-    /// Horizontal lens streak through bright sources (0 off).
-    SCREEN_STREAK = Lighting::float("screen_streak", "Glare streak", 0.5, 0.0, 2.0, 0.05),
+    /// Horizontal lens streak through near-white points (0 off). Off by
+    /// default: it also catches the lit first-person gun and HUD digits.
+    SCREEN_STREAK = Lighting::float("screen_streak", "Glare streak", 0.0, 0.0, 2.0, 0.05),
     /// Darkening toward the screen edges (0 off). Not in the original: part
     /// of this port's horror grade, applied in the final screen copy.
     SCREEN_VIGNETTE = Lighting::float("screen_vignette", "Vignette", 0.5, 0.0, 1.0, 0.05),

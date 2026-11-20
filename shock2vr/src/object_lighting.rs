@@ -61,10 +61,12 @@ impl<'a> ObjectLighting<'a> {
         } else {
             self.player_position
         };
-        std::rc::Rc::new(with_ambient_floor(
+        let mut lights = with_ambient_floor(
             self.lights_at(position),
             dev_params::get(dev_params::HELD_LIGHT_FLOOR),
-        ))
+        );
+        lights.held_reflection = dev_params::get(dev_params::HELD_REFLECTION);
+        std::rc::Rc::new(lights)
     }
 
     pub fn at_position(&self, position: Vector3<f32>) -> std::rc::Rc<LightArray> {
