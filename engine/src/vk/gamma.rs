@@ -1,9 +1,9 @@
-//! Display gamma (the Options menu's Brightness) on Vulkan.
+//! Display gamma (the Options menu's Brightness).
 //!
-//! The same curve as `engine::gamma` on GL: the frame renders into an
-//! offscreen image the size of the swapchain, then one full-screen triangle
-//! copies it to the swapchain image through `pow(c, 1/gamma)`. At gamma 1.0
-//! the renderer skips this and draws straight to the swapchain.
+//! The frame renders into an offscreen image the size of the swapchain,
+//! then one full-screen triangle copies it to the swapchain image through
+//! `pow(c, 1/gamma)`. At gamma 1.0 the renderer skips this and draws
+//! straight to the swapchain.
 //!
 //! The offscreen image has the swapchain's format and shares its depth
 //! buffer, so its render pass is compatible with the swapchain's and every

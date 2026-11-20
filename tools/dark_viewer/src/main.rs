@@ -35,8 +35,6 @@ use shock2vr::paths;
 use shock2vr::scenes::{is_cutscene_file, resolve_cutscene_path};
 use tracing::trace;
 
-extern crate gl;
-
 use cgmath::prelude::*;
 use cgmath::vec2;
 use cgmath::{Quaternion, Vector3, vec3};
@@ -338,7 +336,7 @@ pub fn main() {
         window.set_cursor_mode(glfw::CursorMode::Disabled);
     }
 
-    let engine = engine::opengl();
+    let engine = engine::renderer();
     let bundle_storage = engine.get_storage();
     let mut game = shock2vr::Game::init(GameOptions::default(), bundle_storage);
 
@@ -434,7 +432,6 @@ pub fn main() {
             head_rotation: orig_camera_rot,
             projection_matrix,
             screen_size: vec2(SCR_WIDTH as f32, SCR_HEIGHT as f32),
-            multiview: None,
         };
 
         let full_scene = Scene::from_objects(scene_objects);

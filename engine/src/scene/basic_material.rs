@@ -1,4 +1,3 @@
-extern crate gl;
 use std::any::Any;
 use std::ops::Deref;
 

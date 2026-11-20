@@ -1,5 +1,3 @@
-extern crate gl;
-
 use crate::Font;
 use crate::render_log;
 // pub trait SceneObject {
@@ -19,7 +17,7 @@ use cgmath::vec4;
 pub use crate::scene::Geometry;
 pub use crate::scene::Material;
 
-use crate::gl_engine::OpenGLEngine;
+use crate::renderer::Renderer;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -498,41 +496,23 @@ impl SceneObject {
         Some(depth)
     }
 
-    /// Under Vulkan, a material still drawing with raw GL is skipped until it
-    /// is ported (there is no GL context to call).
-    fn renders_on_backend(&self) -> bool {
-        !gfx::is_vulkan() || self.material.borrow().uses_gfx()
-    }
-
     fn draw_context(&self, render_context: &EngineRenderContext) -> EngineRenderContext {
         EngineRenderContext {
             world_wave: self.world_wave,
             projection_matrix: self
                 .projection_override
                 .unwrap_or(render_context.projection_matrix),
-            multiview: render_context
-                .multiview
-                .map(|views| crate::multiview::Views {
-                    projection: self
-                        .projection_override
-                        .map_or(views.projection, |p| [p; 2]),
-                    only_eye: self.only_eye,
-                    ..views
-                }),
             ..*render_context
         }
     }
 
     pub fn draw_opaque(
         &self,
-        engine_context: &OpenGLEngine,
+        engine_context: &Renderer,
         render_context: &EngineRenderContext,
         view: &Matrix4<f32>,
         lights: &crate::scene::light::LightArray,
     ) {
-        if !self.renders_on_backend() {
-            return;
-        }
         if !self.material.borrow().has_initialized() {
             self.material
                 .borrow_mut()
@@ -606,14 +586,11 @@ impl SceneObject {
     }
     pub fn draw_transparent(
         &self,
-        engine_context: &OpenGLEngine,
+        engine_context: &Renderer,
         render_context: &EngineRenderContext,
         view: &Matrix4<f32>,
         lights: &crate::scene::light::LightArray,
     ) {
-        if !self.renders_on_backend() {
-            return;
-        }
         let render_context = self.draw_context(render_context);
         if let Some(stack) = self
             .material_stack
@@ -675,7 +652,7 @@ impl SceneObject {
 
     fn draw_material_stack(
         &self,
-        engine: &OpenGLEngine,
+        engine: &Renderer,
         context: &EngineRenderContext,
         view: &Matrix4<f32>,
         lights: &crate::scene::light::LightArray,
@@ -689,9 +666,6 @@ impl SceneObject {
         let transparency = self.effective_transparency();
         for pass in &stack.passes {
             let mut material = pass.material.borrow_mut();
-            if gfx::is_vulkan() && !material.uses_gfx() {
-                continue;
-            }
             if !material.has_initialized() {
                 material.initialize(engine.is_opengl_es);
             }

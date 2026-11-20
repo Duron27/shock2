@@ -151,10 +151,6 @@ where
         self.has_initialized = true;
     }
 
-    fn uses_gfx(&self) -> bool {
-        true
-    }
-
     fn draw_opaque(
         &self,
         render_context: &EngineRenderContext,

@@ -1,4 +1,3 @@
-extern crate gl;
 use cgmath::{vec2, vec3};
 use once_cell::sync::OnceCell;
 

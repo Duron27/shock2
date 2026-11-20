@@ -35,7 +35,7 @@ use lifecycle::{DEFAULT_IDLE_TIMEOUT_SECS, IDLE_POLL_INTERVAL, IdleWatchdog};
 
 // Game engine imports
 extern crate glfw;
-use self::glfw::{Context, WindowEvent};
+use self::glfw::WindowEvent;
 use cgmath::{InnerSpace, Quaternion, Rotation3, vec2, vec3};
 use dark::SCALE_FACTOR;
 use engine::{profile, scene::Scene, util::compute_view_matrix_from_render_context};
@@ -97,9 +97,6 @@ where
 #[command(name = "debug_runtime")]
 #[command(about = "HTTP-controlled game runtime for LLM testing and automation")]
 struct Args {
-    /// `vulkan` (default) or `gl`.
-    #[arg(long, default_value = "vulkan")]
-    renderer: String,
     #[command(flatten)]
     update_benchmark: update_benchmark::Options,
     /// Load the same fixed-camera workload used by Quest benchmarks.
@@ -579,26 +576,11 @@ fn run_game_blocking(
     info!("Step 1: Initializing GLFW...");
     let mut glfw = glfw::init(glfw::fail_on_errors)?;
     info!("GLFW initialized successfully");
-    let vulkan = match args.renderer.as_str() {
-        "gl" | "opengl" => false,
-        "vk" | "vulkan" => true,
-        other => anyhow::bail!("unknown --renderer {other} (gl or vulkan)"),
-    };
-    if vulkan {
-        glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
-    } else {
-        glfw.window_hint(glfw::WindowHint::ContextVersion(4, 1));
-        glfw.window_hint(glfw::WindowHint::OpenGlProfile(
-            glfw::OpenGlProfileHint::Core,
-        ));
-        #[cfg(target_os = "macos")]
-        glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
-    }
+    glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
 
     // Default to a hidden window so the runtime never steals focus or pops to
     // the foreground - it's an HTTP-driven automation tool. A hidden window
-    // still has a valid GL context and default framebuffer, so rendering and
-    // `/v1/screenshot` work unchanged. `--visible` opts into a normal window.
+    // still has a swapchain, so rendering and `/v1/screenshot` work unchanged. `--visible` opts into a normal window.
     glfw.window_hint(glfw::WindowHint::Visible(args.visible));
 
     // Create window
@@ -614,10 +596,10 @@ fn run_game_blocking(
         .expect("Failed to create GLFW window");
     info!("GLFW window created successfully");
 
-    info!("Step 3: Setting up OpenGL context...");
+    info!("Step 3: Setting up Vulkan...");
     // Vulkan presents without vsync: a hidden window is never composited, so
     // a FIFO present could wait on a vblank that does not come.
-    let mut vk_renderer = if vulkan {
+    let mut renderer = {
         let extensions = glfw
             .get_required_instance_extensions()
             .ok_or_else(|| anyhow::anyhow!("GLFW reports no Vulkan support"))?;
@@ -633,25 +615,14 @@ fn run_game_blocking(
         let renderer = engine::vk::VkRenderer::new(ctx, (w as u32, h as u32), false)
             .map_err(|e| anyhow::anyhow!("Vulkan renderer: {e}"))?;
         info!("Vulkan device: {}", renderer.device_name());
-        Some(renderer)
-    } else {
-        window.make_current();
-        None
+        renderer
     };
     window.set_key_polling(true);
     window.set_framebuffer_size_polling(true);
 
-    // Load OpenGL function pointers
-    if !vulkan {
-        gl::load_with(|symbol| window.get_proc_address(symbol) as *const _);
-    }
-
-    info!("OpenGL initialized successfully");
-
     // Initialize the game engine
     info!("Step 4: Initializing engine...");
-    let engine = engine::opengl();
-    let gamma_pass = engine::gamma::GammaPass::default();
+    let engine = engine::renderer();
     let bundle_storage = engine.get_storage();
     info!("Engine initialized successfully");
 
@@ -821,11 +792,7 @@ fn run_game_blocking(
                     window.set_should_close(true);
                 }
                 WindowEvent::FramebufferSize(width, height) => {
-                    if let Some(renderer) = vk_renderer.as_mut() {
-                        renderer.resize(width.max(0) as u32, height.max(0) as u32);
-                    } else {
-                        unsafe { gl::Viewport(0, 0, width, height) };
-                    }
+                    renderer.resize(width.max(0) as u32, height.max(0) as u32);
                 }
                 _ => {}
             }
@@ -1240,15 +1207,6 @@ fn run_game_blocking(
             continue;
         }
 
-        // Clear the screen to a visible color first (dark blue). Vulkan
-        // clears when its frame opens, just before drawing.
-        if vk_renderer.is_none() {
-            unsafe {
-                gl::ClearColor(0.1, 0.2, 0.3, 1.0);
-                gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-            }
-        }
-
         // Combine scene objects
         scene.extend(per_eye_scene);
 
@@ -1303,21 +1261,14 @@ fn run_game_blocking(
         // Actually render the scene (through the Options menu's Brightness,
         // like the desktop runtime, so screenshots match what a player sees).
         let brightness = shock2vr::user_settings::get().pc.brightness;
-        let vk_frame = vk_renderer.as_mut().and_then(|renderer| {
-            renderer.set_gamma(brightness);
-            renderer.begin_frame([0.1, 0.2, 0.3, 1.0])
-        });
-        if vk_renderer.is_none() {
-            gamma_pass.begin(brightness, [scr_width as i32, scr_height as i32]);
-        }
-        if vk_renderer.is_none() || vk_frame.is_some() {
+        // The frame clears to dark blue when it opens.
+        renderer.set_gamma(brightness);
+        let vk_frame = renderer.begin_frame([0.1, 0.2, 0.3, 1.0]);
+        if vk_frame.is_some() {
             profile!(
                 "engine.render",
                 engine.render(&render_context, &scene_for_render)
             );
-        }
-        if vk_renderer.is_none() {
-            gamma_pass.end();
         }
         if pending_step_reply.is_some() {
             frames_rendered_this_step += 1;
@@ -1327,11 +1278,11 @@ fn run_game_blocking(
             game.finish_render(view, projection_matrix, screen_size)
         });
 
-        // Vulkan: submit and present, reading the frame back if a screenshot
-        // waits on it. (A frame that could not open - a rebuilt swapchain -
+        // Submit and present, reading the frame back if a screenshot waits
+        // on it. (A frame that could not open - a rebuilt swapchain -
         // leaves screenshots pending for the next.)
         let mut vk_capture = None;
-        if let (Some(renderer), Some(frame)) = (vk_renderer.as_mut(), vk_frame) {
+        if let Some(frame) = vk_frame {
             if !pending_screenshots.is_empty() {
                 renderer.request_capture();
             }
@@ -1339,21 +1290,14 @@ fn run_game_blocking(
             vk_capture = renderer.take_capture();
         }
 
-        // Service deferred screenshots now that the frame is fully drawn to the
-        // back buffer (before the swap, so we read the just-rendered contents).
-        if !pending_screenshots.is_empty() && (vk_renderer.is_none() || vk_capture.is_some()) {
+        // Service deferred screenshots from the frame just read back.
+        if let Some(capture) = vk_capture.as_ref() {
             for (spec, reply) in pending_screenshots.drain(..) {
-                let result =
-                    capture_screenshot_to_result(spec, scr_width, scr_height, vk_capture.as_ref());
+                let result = capture_screenshot_to_result(spec, scr_width, scr_height, capture);
                 if reply.send(result).is_err() {
                     tracing::warn!("Failed to send screenshot result - receiver dropped");
                 }
             }
-        }
-
-        // Swap buffers
-        if vk_renderer.is_none() {
-            window.swap_buffers();
         }
 
         // Finish the step only after its final image and render diagnostics exist.
@@ -4336,7 +4280,7 @@ fn capture_screenshot_to_result(
     spec: ScreenshotSpec,
     width: u32,
     height: u32,
-    vk_capture: Option<&engine::vk::Capture>,
+    capture: &engine::vk::Capture,
 ) -> Result<ScreenshotResult, String> {
     let filename = spec.filename.unwrap_or_else(|| {
         format!(
@@ -4351,20 +4295,17 @@ fn capture_screenshot_to_result(
     });
     let full_path = screenshots_dir.join(&filename);
 
-    let saved = match vk_capture {
-        Some(capture) => image::RgbImage::from_vec(
-            capture.width,
-            capture.height,
-            capture
-                .rgba
-                .chunks_exact(4)
-                .flat_map(|p| [p[0], p[1], p[2]])
-                .collect(),
-        )
-        .ok_or_else(|| "Vulkan capture has the wrong size".into())
-        .and_then(|img| save_screenshot(&full_path, img, width, height, spec.max_width)),
-        None => capture_screenshot(&full_path, width, height, spec.max_width),
-    };
+    let saved = image::RgbImage::from_vec(
+        capture.width,
+        capture.height,
+        capture
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect(),
+    )
+    .ok_or_else(|| "Vulkan capture has the wrong size".into())
+    .and_then(|img| save_screenshot(&full_path, img, width, height, spec.max_width));
     let (size_bytes, resolution) = saved.map_err(|error| {
         format!(
             "failed to write screenshot to {}: {error}",
@@ -4415,88 +4356,6 @@ fn screenshot_target_size(
     let target_width = ((fb_width as f64 * scale).round() as u32).max(1);
     let target_height = ((fb_height as f64 * scale).round() as u32).max(1);
     (target_width, target_height)
-}
-
-/// Capture the current OpenGL framebuffer and save it as a PNG.
-///
-/// Returns the file size and the true dimensions of the saved image.
-fn capture_screenshot(
-    path: &std::path::Path,
-    width: u32,
-    height: u32,
-    max_width: Option<u32>,
-) -> Result<(u64, [u32; 2]), Box<dyn std::error::Error>> {
-    unsafe {
-        // Ensure all rendering for this frame has completed before reading back,
-        // so we never capture a partially-drawn buffer.
-        gl::Finish();
-
-        // Query the current viewport to see what size it actually is
-        let mut viewport: [i32; 4] = [0; 4];
-        gl::GetIntegerv(gl::VIEWPORT, viewport.as_mut_ptr());
-        tracing::info!(
-            "Current viewport: x={}, y={}, width={}, height={}",
-            viewport[0],
-            viewport[1],
-            viewport[2],
-            viewport[3]
-        );
-
-        // Use actual viewport size for screenshot, falling back to requested size if needed
-        let actual_width = if viewport[2] > 0 {
-            viewport[2] as u32
-        } else {
-            tracing::warn!(
-                "Viewport width unavailable, using requested width {}",
-                width
-            );
-            width
-        };
-        let actual_height = if viewport[3] > 0 {
-            viewport[3] as u32
-        } else {
-            tracing::warn!(
-                "Viewport height unavailable, using requested height {}",
-                height
-            );
-            height
-        };
-
-        // Read pixels from the framebuffer using actual viewport size
-        let mut pixels: Vec<u8> = vec![0; (actual_width * actual_height * 3) as usize];
-        // Tightly packed rows: the default 4-byte alignment pads RGB rows whose
-        // width isn't a multiple of 4 (e.g. `--window-size 801x600`), overrunning `pixels`.
-        gl::PixelStorei(gl::PACK_ALIGNMENT, 1);
-        gl::ReadPixels(
-            0,
-            0,
-            actual_width as i32,
-            actual_height as i32,
-            gl::RGB,
-            gl::UNSIGNED_BYTE,
-            pixels.as_mut_ptr() as *mut gl::types::GLvoid,
-        );
-
-        // Check for OpenGL errors
-        let error = gl::GetError();
-        if error != gl::NO_ERROR {
-            return Err(format!("OpenGL error during ReadPixels: {}", error).into());
-        }
-
-        // Flip the image vertically (OpenGL origin is bottom-left, PNG is top-left)
-        let mut flipped_pixels: Vec<u8> = vec![0; pixels.len()];
-        for y in 0..actual_height {
-            let src_row = y as usize * actual_width as usize * 3;
-            let dst_row = (actual_height - 1 - y) as usize * actual_width as usize * 3;
-            flipped_pixels[dst_row..dst_row + actual_width as usize * 3]
-                .copy_from_slice(&pixels[src_row..src_row + actual_width as usize * 3]);
-        }
-
-        // Create image and save as PNG using actual dimensions
-        let img = image::RgbImage::from_vec(actual_width, actual_height, flipped_pixels)
-            .ok_or("Failed to create image from pixel data")?;
-        save_screenshot(path, img, width, height, max_width)
-    }
 }
 
 /// Save a top-row-first frame as the screenshot PNG, downscaled to the

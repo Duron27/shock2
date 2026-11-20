@@ -1,7 +1,6 @@
 use std::mem::size_of;
 
 use cgmath::{Vector2, Vector3, Vector4};
-use gl::types;
 
 pub struct TextVertex {
     pub position: Vector2<f32>,
@@ -167,7 +166,7 @@ pub enum VertexAttributeType {
 pub struct VertexAttribute {
     pub attribute_type: VertexAttributeType,
     pub offset: usize,
-    pub size: types::GLint,
+    pub size: i32,
 }
 
 pub trait Vertex {

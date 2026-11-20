@@ -164,7 +164,7 @@ Before making any changes, review these documents:
 This is a Rust-based VR port of System Shock 2. Key components:
 
 - `dark/` - Dark engine file format readers (bin, mis, cal, gam, etc)
-- `engine/` - Core OpenGL rendering engine
+- `engine/` - Core Vulkan rendering engine
 - `shock2vr/` - Core gameplay logic
   - `scripts/` - Object script implementations
   - `mission/` - Mission running logic
@@ -936,7 +936,7 @@ export DARK_ASSET_PATH=/path/to/your/shock2/data
 cargo run -p dark_query -- entities
 ```
 
-**Note**: The `engine` crate cannot depend on `shock2vr`, so `engine/src/gl_engine.rs` keeps its hardcoded path.
+**Note**: The `engine` crate cannot depend on `shock2vr`, so `engine/src/renderer.rs` keeps its hardcoded `./assets/` path.
 
 ## Testing
 

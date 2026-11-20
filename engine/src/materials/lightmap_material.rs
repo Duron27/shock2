@@ -1,4 +1,3 @@
-extern crate gl;
 use crate::engine::EngineRenderContext;
 use crate::gfx;
 use crate::gfx::Program as ShaderProgram;

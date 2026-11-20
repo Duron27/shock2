@@ -113,10 +113,6 @@ impl Material for ScreenSpaceMaterial {
         });
     }
 
-    fn uses_gfx(&self) -> bool {
-        true
-    }
-
     fn draw_opaque(
         &self,
         _render_context: &EngineRenderContext,

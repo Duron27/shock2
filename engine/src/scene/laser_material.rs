@@ -1,5 +1,4 @@
 //! Unlit laser spot and cylindrical core/halo. No scene-wide fog or trails.
-extern crate gl;
 use crate::engine::EngineRenderContext;
 use crate::gfx;
 use crate::gfx::Program as ShaderProgram;

@@ -809,7 +809,6 @@ dependencies = [
  "dark",
  "engine",
  "engine_ffmpeg",
- "gl",
  "glfw",
  "image 0.24.7",
  "shock2vr",
@@ -843,7 +842,6 @@ dependencies = [
  "clap",
  "dark",
  "engine",
- "gl",
  "glfw",
  "humantime",
  "image 0.24.7",
@@ -893,7 +891,6 @@ dependencies = [
  "clap",
  "dark",
  "engine",
- "gl",
  "glfw",
  "image 0.24.7",
  "shock2vr",
@@ -950,7 +947,6 @@ dependencies = [
  "cgmath",
  "collision",
  "fbxcel-dom",
- "gl",
  "glfw",
  "image 0.24.7",
  "jni 0.19.0",
@@ -1215,26 +1211,6 @@ name = "gimli"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fb8d784f27acf97159b40fc4db5ecd8aa23b9ad5ef69cdd136d3bc80665f0c0"
-
-[[package]]
-name = "gl"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a94edab108827d67608095e269cf862e60d920f144a5026d3dbcfd8b877fb404"
-dependencies = [
- "gl_generator",
-]
-
-[[package]]
-name = "gl_generator"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a95dfc23a2b4a9a2f5ab41d194f8bfda3cabec42af4e39f08c339eb2a0c124d"
-dependencies = [
- "khronos_api",
- "log",
- "xml-rs",
-]
 
 [[package]]
 name = "glam"
@@ -1838,12 +1814,6 @@ dependencies = [
  "futures-util",
  "wasm-bindgen",
 ]
-
-[[package]]
-name = "khronos_api"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "lazy_static"
@@ -4092,12 +4062,6 @@ name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
-
-[[package]]
-name = "xml-rs"
-version = "0.8.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bab77e97b50aee93da431f2cee7cd0f43b4d1da3c408042f2d7d164187774f0a"
 
 [[package]]
 name = "zerocopy"

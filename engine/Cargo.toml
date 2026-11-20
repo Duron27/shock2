@@ -22,7 +22,6 @@ libloading = "0.8"
 cgmath = "0.18.0"
 collision = { version = "0.20.1", git = "https://github.com/rustgd/collision-rs" }
 fbxcel-dom = "0.0.10"
-gl = "0.14.0"
 image = "0.24.3"
 lazy_static = "1.4.0"
 once_cell = "1.17.0"

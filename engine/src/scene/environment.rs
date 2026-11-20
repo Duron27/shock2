@@ -1,6 +1,5 @@
 //! The mission's captured environment cubemap: the direction mapping every
 //! sampler shares, and a debug preview that paints it around the camera.
-extern crate gl;
 use crate::engine::EngineRenderContext;
 use crate::gfx;
 use crate::gfx::Program as ShaderProgram;

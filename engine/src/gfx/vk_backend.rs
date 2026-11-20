@@ -526,7 +526,6 @@ pub fn install(ctx: &crate::vk::VkContext) {
     );
     state.white_cube = state.create_cube(1, &[255; 24]);
     STATE.with(|s| *s.borrow_mut() = Some(state));
-    super::set_backend(super::Backend::Vulkan);
 }
 
 /// Destroy every object the backend made. The device must be idle.
@@ -580,7 +579,6 @@ pub fn shutdown() {
         d.destroy_command_pool(s.upload_pool, None);
     }
     s.alloc.destroy(&d);
-    super::set_backend(super::Backend::OpenGl);
 }
 
 /// Destroy `g`, returning the memory it held to free.

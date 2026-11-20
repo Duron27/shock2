@@ -8,7 +8,7 @@ For player controls, see the [Quest player guide](docs/playing.md) or
 
 - `shock2quest`
   - `dark` - module that reads dark engine file formats (bin, mis, cal, gam, etc)
-  - `engine` - core OpenGL rendering engine
+  - `engine` - core Vulkan rendering engine
   - `references` - just some output that was useful to refer to (ie, text form of the namemaps)
   - `runtimes`
     - `desktop_runtime` - code for running the desktop version

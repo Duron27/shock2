@@ -1,4 +1,3 @@
-extern crate gl;
 use std::rc::Rc;
 
 use super::incidence::{IncidencePass, IncidenceUniforms};

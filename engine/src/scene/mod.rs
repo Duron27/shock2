@@ -2,7 +2,7 @@ pub mod incidence;
 pub mod render_pass;
 pub mod scene;
 pub mod veins;
-pub use scene::{LegacyScene, OffscreenPass, Scene};
+pub use scene::{LegacyScene, Scene};
 
 /// Number of base joint slots in the skinning palette.
 pub const MAX_SKINNED_JOINTS: usize = 40;
@@ -90,8 +90,6 @@ pub use clipped_screen_material::ClippedScreenMaterial;
 
 pub mod self_depth;
 
-pub mod pass_focus;
-pub mod render_target;
 pub mod sphere;
 
 pub mod world_wave;

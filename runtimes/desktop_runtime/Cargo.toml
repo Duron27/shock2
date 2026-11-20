@@ -6,7 +6,6 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-gl = "0.14.0"
 glfw = { version = "0.56.0", features = ["vulkan"] }
 engine = { path = "../../engine" }
 image = "0.24"

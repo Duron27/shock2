@@ -129,7 +129,6 @@ impl CameraPose {
             head_rotation: self.head_rotation,
             projection_matrix,
             screen_size,
-            multiview: None,
         }
     }
 }
