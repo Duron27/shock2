@@ -179,7 +179,13 @@ where
     }
 
     pub fn generate_textures(&self) -> Vec<Rc<Texture>> {
-        self.generate_textures_with(&crate::texture::TextureOptions::default())
+        // No mips: an atlas's minified levels bleed neighbouring entries
+        // into each other, and lightmap atlases are re-uploaded as lights
+        // animate, which would rebuild the chain every time.
+        self.generate_textures_with(&crate::texture::TextureOptions {
+            filter: crate::texture::TextureFilter::Linear,
+            ..Default::default()
+        })
     }
 
     /// [`generate_textures`](Self::generate_textures) with explicit sampling.

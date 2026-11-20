@@ -345,6 +345,8 @@ impl CutscenePlayerScene {
                     texture_data,
                     &TextureOptions {
                         wrap: false,
+                        // A fresh texture per video frame: skip the mip blits.
+                        filter: engine::texture::TextureFilter::Linear,
                         ..Default::default()
                     },
                 )),

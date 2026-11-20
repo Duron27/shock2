@@ -195,6 +195,8 @@ struct Dev {
     queue: vk::Queue,
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     ubo_align: u64,
+    /// Anisotropy for mipmapped samplers, or `None` when the device lacks it.
+    anisotropy: Option<f32>,
 }
 
 impl Dev {
@@ -498,6 +500,12 @@ pub fn install(ctx: &crate::vk::VkContext) {
         queue: ctx.queue,
         memory_properties: ctx.memory_properties,
         ubo_align: ctx.limits.min_uniform_buffer_offset_alignment.max(16),
+        // Floors seen at a grazing angle are where plain trilinear blurs
+        // most; 8x keeps them sharp for a small bandwidth cost.
+        anisotropy: ctx
+            .sampler_anisotropy
+            .then(|| ctx.limits.max_sampler_anisotropy.min(8.0))
+            .filter(|&a| a > 1.0),
     };
     let upload_pool = unsafe {
         dev.device.create_command_pool(
@@ -1155,6 +1163,10 @@ impl State {
             Filter::Linear => (vk::Filter::LINEAR, vk::SamplerMipmapMode::NEAREST, 0.0),
             Filter::LinearMipmap => (vk::Filter::LINEAR, vk::SamplerMipmapMode::LINEAR, 1000.0),
         };
+        let aniso = self
+            .dev
+            .anisotropy
+            .filter(|_| sampling.filter == Filter::LinearMipmap);
         let wrap = if sampling.wrap {
             vk::SamplerAddressMode::REPEAT
         } else {
@@ -1169,6 +1181,8 @@ impl State {
                     .address_mode_u(wrap)
                     .address_mode_v(wrap)
                     .address_mode_w(wrap)
+                    .anisotropy_enable(aniso.is_some())
+                    .max_anisotropy(aniso.unwrap_or(1.0))
                     .max_lod(max_lod),
                 None,
             )
@@ -2121,7 +2135,11 @@ impl State {
         let pass = match self.depth_capture.as_mut() {
             Some(c) => {
                 c.active = target;
-                if self.capture_kept { c.load_pass } else { c.pass }
+                if self.capture_kept {
+                    c.load_pass
+                } else {
+                    c.pass
+                }
             }
             None => clear_pass,
         };

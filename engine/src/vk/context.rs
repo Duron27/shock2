@@ -63,6 +63,8 @@ pub struct VkContext {
     pub physical_device: vk::PhysicalDevice,
     pub device_name: String,
     pub limits: vk::PhysicalDeviceLimits,
+    /// Whether `samplerAnisotropy` was enabled on the device.
+    pub sampler_anisotropy: bool,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub queue_family: u32,
     pub device: Device,
@@ -185,6 +187,7 @@ impl VkContext {
             physical_device,
             device_name,
             limits: properties.limits,
+            sampler_anisotropy: supported.sampler_anisotropy == vk::TRUE,
             memory_properties,
             queue_family,
             device,

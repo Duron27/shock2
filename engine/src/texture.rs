@@ -240,7 +240,9 @@ impl Default for TextureOptions {
             transparent_index_0: false,
             luminance_alpha_tint: None,
             luminance_alpha_range: [0, 255],
-            filter: TextureFilter::Linear,
+            // World and model textures are mostly seen smaller than their
+            // texels; without mips they shimmer and crawl as the view moves.
+            filter: TextureFilter::LinearMipmap,
         }
     }
 }
