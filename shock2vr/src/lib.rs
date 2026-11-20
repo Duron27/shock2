@@ -3108,6 +3108,17 @@ impl Game {
         self.active_game_scene.get_hand_lights(&self.options)
     }
 
+    /// Reflection strength for `Scene::world_gloss`.
+    pub fn world_gloss(&self) -> f32 {
+        dev_params::get(dev_params::WORLD_GLOSS)
+    }
+
+    /// The mission's environment capture, which world reflections mirror;
+    /// `None` on a classic install or outside a mission.
+    pub fn environment(&self) -> Option<std::rc::Rc<engine::texture::CubeTexture>> {
+        self.active_game_scene.environment()
+    }
+
     /// Distance darkness density for `Scene::fog_density` (0 in menus and
     /// while loading, where there is no world to fade).
     pub fn fog_density(&self) -> f32 {
@@ -3985,6 +3996,20 @@ impl App {
         match self {
             App::Ready(game) => game.get_shadow_lights(),
             App::MissingAssets(_) => (Vec::new(), 0.0),
+        }
+    }
+
+    pub fn world_gloss(&self) -> f32 {
+        match self {
+            App::Ready(game) => game.world_gloss(),
+            App::MissingAssets(_) => 0.0,
+        }
+    }
+
+    pub fn environment(&self) -> Option<std::rc::Rc<engine::texture::CubeTexture>> {
+        match self {
+            App::Ready(game) => game.environment(),
+            App::MissingAssets(_) => None,
         }
     }
 

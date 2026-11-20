@@ -310,6 +310,10 @@ impl crate::game_scene::GameScene for Mission {
         self.mission_core.get_shadow_lights()
     }
 
+    fn environment(&self) -> Option<std::rc::Rc<engine::texture::CubeTexture>> {
+        crate::GameScene::environment(&self.mission_core)
+    }
+
     fn active_world_panel(&self) -> Option<EntityId> {
         self.mission_core.gui.active_panel()
     }

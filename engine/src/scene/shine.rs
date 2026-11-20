@@ -178,7 +178,7 @@ vec4 applyShine(vec4 base, vec3 light, vec3 specular, float opacity, vec2 uv, ve
 
 const MASK_UNIT: u32 = 2;
 const RAMP_UNIT: u32 = 3;
-const ENVIRONMENT_UNIT: u32 = 4;
+pub(crate) const ENVIRONMENT_UNIT: u32 = 4;
 const VEINS_UNIT: u32 = 5;
 
 pub(crate) struct ShineUniforms {

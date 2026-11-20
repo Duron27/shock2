@@ -23,6 +23,13 @@ highp float fogFactor(highp vec3 worldPos) {
 
 thread_local! {
     static FRAME: Cell<[f32; 4]> = const { Cell::new([0.0; 4]) };
+    /// World gloss strength (see lightmap_material); rides along with the
+    /// fog because both are per-frame view settings. 0 is off.
+    static GLOSS: Cell<f32> = const { Cell::new(0.0) };
+}
+
+pub fn set_world_gloss(strength: f32) {
+    GLOSS.with(|g| g.set(if strength.is_finite() { strength.max(0.0) } else { 0.0 }));
 }
 
 /// Set this frame's eye (from the view matrix) and density.
@@ -41,17 +48,21 @@ pub fn set_frame(view: &Matrix4<f32>, density: f32) {
 
 pub struct Uniforms {
     eye_density: gfx::Uniform,
+    /// Only the world shader declares it; elsewhere setting it is a no-op.
+    world_gloss: gfx::Uniform,
 }
 
 impl Uniforms {
     pub fn new(program: &gfx::Program) -> Self {
         Self {
             eye_density: program.uniform("fogEyeDensity"),
+            world_gloss: program.uniform("worldGloss"),
         }
     }
 
     pub fn bind(&self) {
         gfx::set_vec4(self.eye_density, FRAME.with(Cell::get));
+        gfx::set_f32(self.world_gloss, GLOSS.with(Cell::get));
     }
 }
 

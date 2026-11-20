@@ -20832,6 +20832,10 @@ impl crate::game_scene::GameScene for MissionCore {
         self.get_shadow_lights()
     }
 
+    fn environment(&self) -> Option<std::rc::Rc<engine::texture::CubeTexture>> {
+        self.environment.clone()
+    }
+
     fn world(&self) -> &World {
         &self.world
     }

@@ -65,6 +65,10 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
         uniform vec4 layerColorAlpha;
         uniform bool layerEnabled;
         uniform bool layerAlphaTest;
+        // Polished-deck reflections; 0 is off. worldEnvironment says whether
+        // the mission's capture is bound to shineEnvironment.
+        uniform float worldGloss;
+        uniform bool worldEnvironment;
 
         // Spotlight array uniforms (up to 6 spotlights)
         uniform highp vec3 spotlightPos[6];
@@ -161,6 +165,40 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                 finalColor = max(finalColor, ambientColor);
             }
 
+            // Reflections. Decks are polished metal and tile: floors most of
+            // all, walls a little. The capture is a lit photograph of the
+            // deck, so it is scaled by the light this spot actually gets -
+            // a dark corner reflects nothing. Nearby lamps add sharp
+            // highlights, which is what reads as a reflective floor.
+            if (!unlit && worldGloss > 0.0) {
+                highp vec3 toEye = normalize(fogEyeDensity.xyz - worldPos);
+                float up = smoothstep(0.5, 0.9, normal.y);
+                float gloss = worldGloss * mix(0.08, 1.0, up);
+                float facing = clamp(dot(normal, toEye), 0.0, 1.0);
+                float fresnel = mix(0.12, 1.0, pow(1.0 - facing, 5.0));
+                float lit = clamp(dot(lightmapColor.rgb, vec3(0.299, 0.587, 0.114)) * 3.0, 0.0, 1.0);
+                vec3 reflected = vec3(0.0);
+                if (worldEnvironment) {
+                    vec3 mirrored = reflect(-toEye, normal);
+                    reflected += textureLod(shineEnvironment, environmentDirection(mirrored), 1.2).rgb
+                        * fresnel * lit;
+                }
+                for (int k = 0; k < POINT_SHADOW_MAX; k++) {
+                    highp vec4 lamp = pointShadowLights[k];
+                    if (lamp.w <= 0.0) continue;
+                    highp vec3 toLamp = lamp.xyz - worldPos;
+                    highp float distance = length(toLamp);
+                    if (distance >= lamp.w) continue;
+                    vec3 l = toLamp / max(distance, 0.00001);
+                    float ndl = max(dot(normal, l), 0.0);
+                    float spec = pow(max(dot(normal, normalize(l + toEye)), 0.0), 72.0) * ndl;
+                    float falloff = 1.0 - distance / lamp.w;
+                    reflected += pointShadowColor[k].rgb * pointShadowColor[k].w
+                        * spec * falloff * (0.6 + 2.0 * fresnel);
+                }
+                finalColor += reflected * gloss;
+            }
+
             // Add dynamic spotlight contributions on top of baked lighting
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
@@ -189,6 +227,7 @@ struct UnifiedUniforms {
     layer_color_alpha_loc: gfx::Uniform,
     layer_enabled_loc: gfx::Uniform,
     layer_alpha_test_loc: gfx::Uniform,
+    world_environment_loc: gfx::Uniform,
     // Basic transformation matrices
     world_loc: gfx::Uniform,
     view_loc: gfx::Uniform,
@@ -338,6 +377,11 @@ impl LightmapMaterial {
         uniforms.world_wave.bind(render_context.world_wave);
         uniforms.point_shadow.bind(lights, render_context);
         uniforms.fog.bind();
+        let environment = lights.environment.as_ref();
+        if let Some(environment) = environment {
+            environment.bind_to(crate::scene::shine::ENVIRONMENT_UNIT);
+        }
+        gfx::set_i32(uniforms.world_environment_loc, i32::from(environment.is_some()));
         let strength = render_context.terrain_wetness;
         let shine = self
             .shine
@@ -500,6 +544,7 @@ impl Material for LightmapMaterial {
                 layer_color_alpha_loc: shader.uniform("layerColorAlpha"),
                 layer_enabled_loc: shader.uniform("layerEnabled"),
                 layer_alpha_test_loc: shader.uniform("layerAlphaTest"),
+                world_environment_loc: shader.uniform("worldEnvironment"),
                 uv_offset_loc: shader.uniform("diffuseUvOffset"),
                 unlit_loc: shader.uniform("unlit"),
                 world_wave: crate::scene::world_wave::Uniforms::new(&shader),

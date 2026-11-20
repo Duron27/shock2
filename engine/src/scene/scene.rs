@@ -23,6 +23,9 @@ pub struct Scene {
 
     /// Distance darkness density (see [`fog`](super::fog)); 0 is off.
     pub fog_density: f32,
+
+    /// Polished-deck reflection strength on the world; 0 is off.
+    pub world_gloss: f32,
 }
 
 impl Scene {
@@ -34,6 +37,7 @@ impl Scene {
             point_shadows: Vec::new(),
             point_shadow_strength: 0.0,
             fog_density: 0.0,
+            world_gloss: 0.0,
         }
     }
 
@@ -45,6 +49,7 @@ impl Scene {
             point_shadows: Vec::new(),
             point_shadow_strength: 0.0,
             fog_density: 0.0,
+            world_gloss: 0.0,
         }
     }
 

@@ -276,6 +276,11 @@ pub trait GameScene {
         Vec::new()
     }
 
+    /// The mission's environment capture, for world reflections.
+    fn environment(&self) -> Option<std::rc::Rc<engine::texture::CubeTexture>> {
+        None
+    }
+
     /// Access to the ECS world (required for most game systems)
     fn world(&self) -> &World;
 

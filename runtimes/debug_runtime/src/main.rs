@@ -1258,6 +1258,9 @@ fn run_game_blocking(
         ) = game.get_shadow_lights();
         scene_for_render.fog_density = game.fog_density();
         scene_for_render.world_gloss = game.world_gloss();
+        // Reflection strength 0: only the world shader mirrors it from here;
+        // objects carry their own capture and strength.
+        scene_for_render.lights_mut().environment = game.environment();
 
         // Actually render the scene (through the Options menu's Brightness,
         // like the desktop runtime, so screenshots match what a player sees).
