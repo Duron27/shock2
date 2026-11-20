@@ -3107,6 +3107,17 @@ impl Game {
         self.active_game_scene.get_hand_lights(&self.options)
     }
 
+    /// The screen grade `[vignette, grain, contrast, saturation]` for
+    /// `Renderer::set_grade`.
+    pub fn screen_grade(&self) -> [f32; 4] {
+        [
+            dev_params::get(dev_params::SCREEN_VIGNETTE),
+            dev_params::get(dev_params::SCREEN_GRAIN),
+            dev_params::get(dev_params::SCREEN_CONTRAST),
+            dev_params::get(dev_params::SCREEN_SATURATION),
+        ]
+    }
+
     /// Mission lamps that cast shadows this frame, and how strongly an
     /// object's shadow darkens the world (0..1).
     pub fn get_shadow_lights(&self) -> (Vec<engine::scene::point_shadow::ShadowLight>, f32) {
@@ -3365,12 +3376,9 @@ impl Game {
             ));
         }
 
-        let mut pause_objects = self.pause_menu.render(
-            &mut self.asset_cache,
-            &self.options,
-            pawn_to_world,
-            false,
-        );
+        let mut pause_objects =
+            self.pause_menu
+                .render(&mut self.asset_cache, &self.options, pawn_to_world, false);
         for object in &mut pause_objects {
             object.set_render_layer(RenderLayer::SystemOverlay);
         }
@@ -3955,6 +3963,13 @@ impl App {
         match self {
             App::Ready(game) => game.get_shadow_lights(),
             App::MissingAssets(_) => (Vec::new(), 0.0),
+        }
+    }
+
+    pub fn screen_grade(&self) -> [f32; 4] {
+        match self {
+            App::Ready(game) => game.screen_grade(),
+            App::MissingAssets(_) => [0.0, 0.0, 1.0, 1.0],
         }
     }
 

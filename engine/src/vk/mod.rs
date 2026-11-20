@@ -34,7 +34,7 @@ pub struct Frame {
     pub extent: vk::Extent2D,
     image_index: u32,
     /// Drawn offscreen, copied to the swapchain through this gamma at the end.
-    gamma: Option<f32>,
+    gamma: Option<gamma::Grade>,
 }
 
 pub struct VkRenderer {
@@ -54,7 +54,7 @@ pub struct VkRenderer {
     rebuilds: u32,
     capture: bool,
     captured: Option<Capture>,
-    gamma: f32,
+    grade: gamma::Grade,
     /// Built on first use for the current swapchain.
     gamma_target: Option<gamma::GammaTarget>,
     pub ctx: VkContext,
@@ -94,7 +94,7 @@ impl VkRenderer {
             rebuilds: 0,
             capture: false,
             captured: None,
-            gamma: 1.0,
+            grade: gamma::Grade::NEUTRAL,
             gamma_target: None,
             ctx,
         };
@@ -138,7 +138,25 @@ impl VkRenderer {
     /// the next frame.
     /// Display gamma (Brightness): 1.0 draws straight to the swapchain.
     pub fn set_gamma(&mut self, gamma: f32) {
-        self.gamma = gamma;
+        self.grade.gamma = gamma;
+    }
+
+    /// The screen grade on top of gamma (see [`Grade`]); neutral values
+    /// (0, 0, 1, 1) cost nothing. `time` (seconds) animates the grain - the
+    /// caller's clock, so a fixed-step runtime screenshots deterministically.
+    pub fn set_grade(
+        &mut self,
+        vignette: f32,
+        grain: f32,
+        contrast: f32,
+        saturation: f32,
+        time: f32,
+    ) {
+        self.grade.time = time;
+        self.grade.vignette = vignette;
+        self.grade.grain = grain;
+        self.grade.contrast = contrast;
+        self.grade.saturation = saturation;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -220,13 +238,13 @@ impl VkRenderer {
             self.rebuild_swapchain();
         }
         let swapchain = self.swapchain.as_ref()?;
-        let gamma = ((self.gamma - 1.0).abs() >= 1.0e-3).then_some(self.gamma);
+        let gamma = (!self.grade.is_neutral()).then_some(self.grade);
         if gamma.is_some() && self.gamma_target.is_none() {
             match gamma::GammaTarget::new(&self.ctx, swapchain) {
                 Ok(target) => self.gamma_target = Some(target),
                 Err(e) => {
                     warn!("{e}; brightness off");
-                    self.gamma = 1.0;
+                    self.grade = gamma::Grade::NEUTRAL;
                 }
             }
         }
@@ -367,7 +385,7 @@ impl VkRenderer {
                     vk::SubpassContents::INLINE,
                 );
             }
-            target.record_copy(device, frame.commands, swapchain.extent, gamma);
+            target.record_copy(device, frame.commands, swapchain.extent, &gamma);
         }
         let readback = if std::mem::take(&mut self.capture) {
             self.record_readback(frame.commands, swapchain, frame.image_index)

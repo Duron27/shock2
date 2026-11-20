@@ -1041,7 +1041,12 @@ fn run_game_blocking(
             // An in-game transition (a frobbed bulkhead button, a trigger
             // volume) starts here; land it now for the same reason a warp does.
             if !args.defer_transitions {
-                complete_pending_transition(&mut game, &game_time, &current_input, &mut action_state);
+                complete_pending_transition(
+                    &mut game,
+                    &game_time,
+                    &current_input,
+                    &mut action_state,
+                );
             }
 
             if step_requested {
@@ -1117,7 +1122,12 @@ fn run_game_blocking(
                 game.update(&zero_time, &current_input, &mut action_state)
             );
             if !args.defer_transitions {
-                complete_pending_transition(&mut game, &zero_time, &current_input, &mut action_state);
+                complete_pending_transition(
+                    &mut game,
+                    &zero_time,
+                    &current_input,
+                    &mut action_state,
+                );
             }
         }
 
@@ -1227,6 +1237,15 @@ fn run_game_blocking(
         let brightness = shock2vr::user_settings::get().pc.brightness;
         // The frame clears to dark blue when it opens.
         renderer.set_gamma(brightness);
+        let [vignette, grain, contrast, saturation] = game.screen_grade();
+        // Grain animates on the stepped frame clock, so screenshots repeat.
+        renderer.set_grade(
+            vignette,
+            grain,
+            contrast,
+            saturation,
+            frame_counter as f32 / 60.0,
+        );
         let vk_frame = renderer.begin_frame([0.1, 0.2, 0.3, 1.0]);
         if vk_frame.is_some() {
             profile!(
@@ -2370,8 +2389,6 @@ fn input_snapshot_from_context(input: &InputContext) -> InputSnapshot {
         roomscale_bounds: input.roomscale_bounds,
     }
 }
-
-
 
 /// The camera this frame renders from: the crouch-aware eye height shared with
 /// desktop and the flat controller via `Game::player_eye_height` (so the
@@ -4429,8 +4446,6 @@ fn parse_input_patches(body: &serde_json::Value) -> Result<Vec<commands::InputPa
         .map(|(channel, value)| commands::InputPatch { channel, value })
         .collect())
 }
-
-
 
 /// HTTP endpoint handler: Set one or more input channel values.
 async fn set_input_channel(

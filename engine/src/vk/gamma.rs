@@ -1,8 +1,9 @@
-//! Display gamma (the Options menu's Brightness).
+//! Display gamma (the Options menu's Brightness) and the screen grade
+//! (vignette, film grain, contrast, saturation).
 //!
 //! The frame renders into an offscreen image the size of the swapchain,
 //! then one full-screen triangle copies it to the swapchain image through
-//! `pow(c, 1/gamma)`. At gamma 1.0 the renderer skips this and draws
+//! [`Grade`]. With a neutral grade the renderer skips this and draws
 //! straight to the swapchain.
 //!
 //! The offscreen image has the swapchain's format and shares its depth
@@ -26,13 +27,85 @@ void main() {
 const FRAGMENT: &str = r#"
 layout(set = 0, binding = 0) uniform sampler2D frame;
 // Offset 0 is the vertex stage's flip_y (see shader::to_vulkan_glsl).
-layout(push_constant) uniform GammaPush { layout(offset = 4) float invGamma; } gamma;
+layout(push_constant) uniform GammaPush {
+    layout(offset = 4) float invGamma;
+    float vignette;
+    float grain;
+    float time;
+    float contrast;
+    float saturation;
+} grade;
 layout(location = 0) out vec4 fragColor;
+
+// Integer hash: stable per pixel and frame, no texture.
+float hash(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return float(v.x & 0xffffu) / 65535.0;
+}
+
 void main() {
-    vec3 c = texelFetch(frame, ivec2(gl_FragCoord.xy), 0).rgb;
-    fragColor = vec4(pow(max(c, vec3(0.0)), vec3(gamma.invGamma)), 1.0);
+    ivec2 pixel = ivec2(gl_FragCoord.xy);
+    vec3 c = texelFetch(frame, pixel, 0).rgb;
+    c = pow(max(c, vec3(0.0)), vec3(grade.invGamma));
+
+    float luma = dot(c, vec3(0.299, 0.587, 0.114));
+    c = max(mix(vec3(luma), c, grade.saturation), vec3(0.0));
+    // Contrast pivots low: midtones keep their level while shadows sink,
+    // which is where a dark corridor reads as dark.
+    const float pivot = 0.3;
+    c = max((c - pivot) * grade.contrast + pivot, vec3(0.0));
+
+    vec2 size = vec2(textureSize(frame, 0));
+    vec2 centred = (gl_FragCoord.xy / size - 0.5) * vec2(size.x / size.y, 1.0);
+    float edge = smoothstep(0.35, 1.05, length(centred));
+    c *= 1.0 - grade.vignette * edge;
+
+    // Grain shows most in the dark, as film and sensor noise do.
+    float n = hash(uvec3(uvec2(pixel), uint(grade.time * 60.0))) - 0.5;
+    c += grade.grain * n * (1.0 - 0.6 * min(luma, 1.0));
+
+    fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
 "#;
+
+/// The screen grade applied by the copy. [`Grade::NEUTRAL`] leaves pixels
+/// as drawn (and lets the renderer skip the offscreen copy).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grade {
+    pub gamma: f32,
+    /// Edge darkening, 0..1.
+    pub vignette: f32,
+    /// Film grain amplitude, 0..~0.1.
+    pub grain: f32,
+    /// Slope around a low pivot; 1 is unchanged.
+    pub contrast: f32,
+    /// 1 is unchanged, 0 is greyscale.
+    pub saturation: f32,
+    /// Seconds, animating the grain.
+    pub time: f32,
+}
+
+impl Grade {
+    pub const NEUTRAL: Grade = Grade {
+        gamma: 1.0,
+        vignette: 0.0,
+        grain: 0.0,
+        contrast: 1.0,
+        saturation: 1.0,
+        time: 0.0,
+    };
+
+    pub fn is_neutral(&self) -> bool {
+        (self.gamma - 1.0).abs() < 1.0e-3
+            && self.vignette.abs() < 1.0e-3
+            && self.grain.abs() < 1.0e-4
+            && (self.contrast - 1.0).abs() < 1.0e-3
+            && (self.saturation - 1.0).abs() < 1.0e-3
+    }
+}
 
 /// The offscreen frame and the copy that applies gamma to it. Built for one
 /// swapchain; rebuild it with the swapchain.
@@ -129,11 +202,8 @@ impl GammaTarget {
                 true,
             )
             .map_err(vk_err("vkCreateRenderPass"))?;
-            let attachments = swapchain::scene_attachments(
-                view,
-                &swapchain.depth,
-                swapchain.msaa_color.as_ref(),
-            );
+            let attachments =
+                swapchain::scene_attachments(view, &swapchain.depth, swapchain.msaa_color.as_ref());
             let framebuffer = d
                 .create_framebuffer(
                     &vk::FramebufferCreateInfo::builder()
@@ -209,7 +279,7 @@ impl GammaTarget {
             let push = [vk::PushConstantRange {
                 stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 offset: 0,
-                size: 8,
+                size: 28,
             }];
             let layout = d
                 .create_pipeline_layout(
@@ -243,10 +313,18 @@ impl GammaTarget {
         d: &ash::Device,
         cmd: vk::CommandBuffer,
         extent: vk::Extent2D,
-        gamma: f32,
+        grade: &Grade,
     ) {
         // flip_y is irrelevant (the triangle covers the screen either way).
-        let push = [1.0f32, 1.0 / gamma.max(0.1)];
+        let push = [
+            1.0f32,
+            1.0 / grade.gamma.max(0.1),
+            grade.vignette,
+            grade.grain,
+            grade.time,
+            grade.contrast,
+            grade.saturation,
+        ];
         let bytes: Vec<u8> = push.iter().flat_map(|f| f.to_ne_bytes()).collect();
         unsafe {
             d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -345,8 +423,8 @@ unsafe fn build_pipeline(
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::NONE)
             .line_width(1.0);
-        let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
-            .rasterization_samples(samples);
+        let multisample =
+            vk::PipelineMultisampleStateCreateInfo::builder().rasterization_samples(samples);
         let depth = vk::PipelineDepthStencilStateCreateInfo::default();
         let blend_attachment = [vk::PipelineColorBlendAttachmentState::builder()
             .color_write_mask(vk::ColorComponentFlags::RGBA)

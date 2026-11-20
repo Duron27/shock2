@@ -567,6 +567,15 @@ dev_params! {
     /// How much of a shadowing lamp's light the world loses under an
     /// object's shadow (objects themselves are always fully occluded).
     POINT_SHADOW_STRENGTH = Lighting::float("point_shadow_strength", "Shadow strength", 1.0, 0.0, 1.0, 0.05),
+    /// Darkening toward the screen edges (0 off). Not in the original: part
+    /// of this port's horror grade, applied in the final screen copy.
+    SCREEN_VIGNETTE = Lighting::float("screen_vignette", "Vignette", 0.5, 0.0, 1.0, 0.05),
+    /// Animated film grain amplitude, strongest in the dark (0 off).
+    SCREEN_GRAIN = Lighting::float("screen_grain", "Film grain", 0.035, 0.0, 0.15, 0.005),
+    /// Contrast around a low pivot: shadows sink, midtones hold (1 off).
+    SCREEN_CONTRAST = Lighting::float("screen_contrast", "Contrast", 1.12, 0.5, 2.0, 0.02),
+    /// Colour saturation (1 off, 0 greyscale).
+    SCREEN_SATURATION = Lighting::float("screen_saturation", "Saturation", 0.85, 0.0, 1.5, 0.05),
     /// Strength of the moving highlight on wet organic surfaces (eggs, grubs,
     /// arachnids, growth). 0 leaves only the authored view-angle sheen.
     OBJECT_SPECULAR = Lighting::float("object_specular", "Obj specular", 1.5, 0.0, 4.0, 0.1),

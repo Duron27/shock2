@@ -301,8 +301,7 @@ pub(crate) fn supported_samples(ctx: &VkContext, wanted: u32) -> vk::SampleCount
             .get_physical_device_properties(ctx.physical_device)
     }
     .limits;
-    let supported =
-        limits.framebuffer_color_sample_counts & limits.framebuffer_depth_sample_counts;
+    let supported = limits.framebuffer_color_sample_counts & limits.framebuffer_depth_sample_counts;
     [
         vk::SampleCountFlags::TYPE_8,
         vk::SampleCountFlags::TYPE_4,
