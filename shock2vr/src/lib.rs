@@ -3140,6 +3140,12 @@ impl Game {
     /// for `Renderer::set_grade`. Danger rises from 0 at 40% health to 1 at
     /// 10%, and is 0 while dead (the death sequence owns the screen then).
     pub fn screen_grade(&self) -> [f32; 7] {
+        // Frontend screens and cutscenes (the non-pausable scenes) show their
+        // art as authored: the horror grade is for the world, and its grain
+        // would also make two shots of an unchanged menu differ.
+        if !self.active_game_scene.is_pausable() {
+            return NEUTRAL_SCREEN_GRADE;
+        }
         let danger = if self.pending_save_load.is_some() {
             0.0
         } else {
@@ -4037,7 +4043,7 @@ impl App {
     pub fn screen_grade(&self) -> [f32; 7] {
         match self {
             App::Ready(game) => game.screen_grade(),
-            App::MissingAssets(_) => [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            App::MissingAssets(_) => NEUTRAL_SCREEN_GRADE,
         }
     }
 
@@ -4234,6 +4240,10 @@ pub mod plant_animation;
 
 /// The player's hit points as a fraction of their maximum, when the scene has
 /// a player (missions; not menus or cutscenes).
+/// The final-copy grade that leaves the image untouched: no vignette, grain,
+/// danger, bloom or streak; unit contrast and saturation.
+const NEUTRAL_SCREEN_GRADE: [f32; 7] = [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0];
+
 fn player_health_fraction(world: &shipyard::World) -> Option<f32> {
     use shipyard::{Get, UniqueView, View};
     let player = world
