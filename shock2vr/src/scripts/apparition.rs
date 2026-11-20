@@ -5,7 +5,7 @@
 //! ScriptMessage("ApparBegin") / ScriptMessage("ApparEnd"), which reach this
 //! script as signals: materialize (+ play the authored apparition sound) and
 //! vanish again.
-use dark::properties::PropObjectSound;
+use dark::properties::{PropObjectSound, PropRenderType, RenderType};
 use engine::audio::AudioHandle;
 use shipyard::{EntityId, Get, View, World};
 use tracing::info;
@@ -52,6 +52,23 @@ impl Script for Apparition {
                     },
                     Err(_) => Effect::NoEffect,
                 };
+                // The ghosts are authored `EditorOnly` on the object itself
+                // (their `Apparitions` archetype says `FullBright`), which the
+                // scene never draws; the original shows them once they
+                // materialize, so give them the archetype's unlit look.
+                let hidden_type = world
+                    .borrow::<View<PropRenderType>>()
+                    .unwrap()
+                    .get(entity_id)
+                    .is_ok_and(|r| matches!(r.0, RenderType::EditorOnly | RenderType::NoRender));
+                let render_effect = if hidden_type {
+                    Effect::SetRenderType {
+                        entity_id,
+                        render_type: RenderType::FullBright,
+                    }
+                } else {
+                    Effect::NoEffect
+                };
                 Effect::Combined {
                     effects: vec![
                         Effect::SetVisibility {
@@ -59,6 +76,7 @@ impl Script for Apparition {
                             visible: true,
                         },
                         sound_effect,
+                        render_effect,
                     ],
                 }
             }
@@ -105,5 +123,28 @@ mod tests {
         assert!(
             matches!(script.handle_message(ghost, &world, &physics, &MessagePayload::Signal { name: "ApparEnd".into() }), Effect::SetVisibility { entity_id, visible: false } if entity_id == ghost)
         );
+    }
+    /// Every MedSci ghost is authored `EditorOnly` on the object itself (its
+    /// `Apparitions` archetype says `FullBright`); the scene skips editor-only
+    /// objects, so materializing has to make it drawable too.
+    #[test]
+    fn materializing_an_editor_only_ghost_makes_it_drawable() {
+        use dark::properties::{PropRenderType, RenderType};
+        let mut world = World::new();
+        let ghost = world.add_entity((PropRenderType(RenderType::EditorOnly),));
+        let mut script = Apparition::new();
+        let physics = PhysicsWorld::new();
+        let begin = script.handle_message(
+            ghost,
+            &world,
+            &physics,
+            &MessagePayload::Signal {
+                name: "ApparBegin".into(),
+            },
+        );
+        assert!(Effect::flatten(vec![begin]).iter().any(|e| matches!(
+            e,
+            Effect::SetRenderType { entity_id, render_type: RenderType::FullBright } if *entity_id == ghost
+        )));
     }
 }
