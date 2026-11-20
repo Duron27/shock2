@@ -1371,6 +1371,32 @@ fn upgraded_texture(asset_cache: &AssetCache, texture: &str, kind: ImageKind) ->
         .unwrap_or_else(|| texture.to_owned())
 }
 
+/// Interface art named as the upgraded `.png` when only the classic `.pcx`
+/// exists (an original install has no PNGs in `iface.crf`).
+fn classic_fallback(asset_cache: &mut AssetCache, texture: String, kind: ImageKind) -> String {
+    let options = texture_options(kind);
+    if asset_cache
+        .get_ext_opt(&TEXTURE_IMPORTER, &texture, &options)
+        .is_some()
+    {
+        return texture;
+    }
+    match texture.strip_suffix(".png") {
+        Some(stem) => {
+            let pcx = format!("{stem}.pcx");
+            if asset_cache
+                .get_ext_opt(&TEXTURE_IMPORTER, &pcx, &options)
+                .is_some()
+            {
+                pcx
+            } else {
+                texture
+            }
+        }
+        None => texture,
+    }
+}
+
 fn place_image(
     asset_cache: &mut AssetCache,
     position: Vector2<f32>,
@@ -1379,7 +1405,11 @@ fn place_image(
     alpha: f32,
     kind: ImageKind,
 ) -> PlacedElement {
-    let texture = upgraded_texture(asset_cache, texture, kind);
+    let texture = classic_fallback(
+        asset_cache,
+        upgraded_texture(asset_cache, texture, kind),
+        kind,
+    );
     let loaded = asset_cache.get_ext(&TEXTURE_IMPORTER, &texture, &texture_options(kind));
     // Replacement icons have more texels, not a larger inventory footprint.
     // Keep the classic bitmap's authored size while drawing the upgraded art.
