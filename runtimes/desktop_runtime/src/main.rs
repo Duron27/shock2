@@ -79,11 +79,15 @@ fn apply_display_settings(
             );
         }
     }
-    glfw.set_swap_interval(if pc.vsync {
-        glfw::SwapInterval::Sync(1)
-    } else {
-        glfw::SwapInterval::None
-    });
+    // Vulkan has no GL context to set an interval on; its renderer reads
+    // the setting itself.
+    if !engine::gfx::is_vulkan() {
+        glfw.set_swap_interval(if pc.vsync {
+            glfw::SwapInterval::Sync(1)
+        } else {
+            glfw::SwapInterval::None
+        });
+    }
     *applied = Some(wanted);
 }
 
@@ -177,6 +181,9 @@ struct Args {
     // count: u8,
     #[arg(short, long, default_value = None)]
     experimental: Option<Vec<String>>,
+    /// `gl` (default) or `vulkan` (in progress: unported materials don't draw).
+    #[arg(long, default_value = "gl")]
+    renderer: String,
 }
 struct MouseUpdateResult {
     delta_x: f32,
@@ -327,12 +334,21 @@ pub fn main() {
     let mut glfw = glfw::init(glfw::fail_on_errors).unwrap();
     // TODO: Figure out ANGLE
     // glfw.window_hint(glfw::WindowHint::ClientApi(glfw::OpenGlEs));
-    glfw.window_hint(glfw::WindowHint::ContextVersion(4, 1));
-    glfw.window_hint(glfw::WindowHint::OpenGlProfile(
-        glfw::OpenGlProfileHint::Core,
-    ));
-    #[cfg(target_os = "macos")]
-    glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
+    let vulkan = match args.renderer.as_str() {
+        "gl" | "opengl" => false,
+        "vk" | "vulkan" => true,
+        other => panic!("unknown --renderer {other} (gl or vulkan)"),
+    };
+    if vulkan {
+        glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
+    } else {
+        glfw.window_hint(glfw::WindowHint::ContextVersion(4, 1));
+        glfw.window_hint(glfw::WindowHint::OpenGlProfile(
+            glfw::OpenGlProfileHint::Core,
+        ));
+        #[cfg(target_os = "macos")]
+        glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
+    }
 
     // glfw window creation
     // --------------------
@@ -345,7 +361,31 @@ pub fn main() {
         )
         .expect("Failed to create GLFW window");
 
-    window.make_current();
+    let mut vk_renderer = if vulkan {
+        let extensions = glfw
+            .get_required_instance_extensions()
+            .expect("GLFW reports no Vulkan support");
+        let ctx = engine::vk::VkContext::new("Shock Engine", &extensions, |instance| {
+            let mut surface = engine::vk::ash::vk::SurfaceKHR::null();
+            match window.create_window_surface(instance, std::ptr::null(), &mut surface) {
+                engine::vk::ash::vk::Result::SUCCESS => Ok(surface),
+                e => Err(e),
+            }
+        })
+        .expect("Vulkan device");
+        let (w, h) = window.get_framebuffer_size();
+        let renderer = engine::vk::VkRenderer::new(
+            ctx,
+            (w as u32, h as u32),
+            shock2vr::user_settings::get().pc.vsync,
+        )
+        .expect("Vulkan renderer");
+        println!("Vulkan device: {}", renderer.device_name());
+        Some(renderer)
+    } else {
+        window.make_current();
+        None
+    };
     window.set_key_polling(true);
     window.set_cursor_pos_polling(true);
     window.set_framebuffer_size_polling(true);
@@ -353,16 +393,20 @@ pub fn main() {
 
     // gl: load all OpenGL function pointers
     // ---------------------------------------
-    gl::load_with(|symbol| window.get_proc_address(symbol) as *const _);
+    if !vulkan {
+        gl::load_with(|symbol| window.get_proc_address(symbol) as *const _);
+    }
 
-    println!(
-        "es2 extension supported: {}",
-        glfw.extension_supported("GL_ARB_ES2_compatibility")
-    );
-    println!(
-        "es3 extension supported: {}",
-        glfw.extension_supported("GL_ARB_ES3_compatibility")
-    );
+    if !vulkan {
+        println!(
+            "es2 extension supported: {}",
+            glfw.extension_supported("GL_ARB_ES2_compatibility")
+        );
+        println!(
+            "es3 extension supported: {}",
+            glfw.extension_supported("GL_ARB_ES3_compatibility")
+        );
+    }
     println!(
         "camera eye height (standing): {} SS2 units = {} world units (above pawn)",
         shock2vr::PLAYER_EYE_HEIGHT,
@@ -587,19 +631,46 @@ pub fn main() {
             scene_for_render.lights_mut().add_light(spotlight);
         }
 
-        gamma_pass.begin(
-            shock2vr::user_settings::get().pc.brightness,
-            [fb_width as i32, fb_height as i32],
-        );
-        profile!(
-            "engine.render",
-            engine.render(&render_context, &scene_for_render)
-        );
-        gamma_pass.end();
+        if let Some(renderer) = vk_renderer.as_mut() {
+            renderer.resize(fb_width as u32, fb_height as u32);
+            renderer.set_vsync(shock2vr::user_settings::get().pc.vsync);
+            // Brightness (the gamma pass) is a GL render target; not yet on Vulkan.
+            if let Some(frame) = renderer.begin_frame([0.0, 0.0, 0.0, 1.0]) {
+                profile!(
+                    "engine.render",
+                    engine.render(&render_context, &scene_for_render)
+                );
+                // SHOCK2_VK_CAPTURE=path[@frame]: save one presented frame.
+                if let Ok(spec) = std::env::var("SHOCK2_VK_CAPTURE") {
+                    let at = spec.split_once('@').map_or("300", |(_, at)| at);
+                    if _frame == at.parse::<u64>().unwrap_or(300) {
+                        renderer.request_capture();
+                    }
+                }
+                renderer.end_frame(frame);
+                if let Some(c) = renderer.take_capture() {
+                    let path = std::env::var("SHOCK2_VK_CAPTURE").unwrap_or_default();
+                    let path = path.split('@').next().unwrap_or_default().to_owned();
+                    image::save_buffer(&path, &c.rgba, c.width, c.height, image::ColorType::Rgba8)
+                        .expect("save capture");
+                    println!("SHOCK2_VK_CAPTURED {path}");
+                }
+            }
+        } else {
+            gamma_pass.begin(
+                shock2vr::user_settings::get().pc.brightness,
+                [fb_width as i32, fb_height as i32],
+            );
+            profile!(
+                "engine.render",
+                engine.render(&render_context, &scene_for_render)
+            );
+            gamma_pass.end();
 
-        // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
-        // -------------------------------------------------------------------------------
-        window.swap_buffers();
+            // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
+            // -------------------------------------------------------------------------------
+            window.swap_buffers();
+        }
         glfw.poll_events();
     }
 }
@@ -671,7 +742,9 @@ fn process_events(
             glfw::WindowEvent::FramebufferSize(width, height) => {
                 // make sure the viewport matches the new window dimensions; note that width and
                 // height will be significantly larger than specified on retina displays.
-                unsafe { gl::Viewport(0, 0, width, height) }
+                if !engine::gfx::is_vulkan() {
+                    unsafe { gl::Viewport(0, 0, width, height) }
+                }
             }
             glfw::WindowEvent::Key(Key::E, _, Action::Press, Modifiers::Alt) => {
                 window.set_cursor_mode(glfw::CursorMode::Normal);
@@ -869,7 +942,6 @@ fn process_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     fn ctx(yaw: f32, pitch: f32) -> CameraContext {
         CameraContext {

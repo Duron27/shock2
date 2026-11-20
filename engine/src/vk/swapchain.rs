@@ -32,6 +32,8 @@ pub struct VkSwapchain {
     pub depth: DepthBuffer,
     pub render_pass: vk::RenderPass,
     pub framebuffers: Vec<vk::Framebuffer>,
+    /// The images can be copied from (screenshots).
+    pub transfer_src: bool,
 }
 
 impl VkSwapchain {
@@ -156,6 +158,7 @@ impl VkSwapchain {
             depth,
             render_pass,
             framebuffers,
+            transfer_src: usage.contains(vk::ImageUsageFlags::TRANSFER_SRC),
         })
     }
 

@@ -12,6 +12,7 @@
 //! Everything here runs on the render thread only.
 
 mod gl_backend;
+pub mod vk_backend;
 
 use std::cell::Cell;
 
@@ -57,6 +58,7 @@ unsafe impl Sync for Program {}
 
 enum ProgramInner {
     Gl(gl_backend::GlProgram),
+    Vk(u32),
 }
 
 /// A uniform's location in one program, resolved once by name. A name the
@@ -65,6 +67,7 @@ enum ProgramInner {
 #[derive(Clone, Copy, Debug)]
 pub struct Uniform {
     gl: i32,
+    vk: u32,
 }
 
 impl Program {
@@ -72,7 +75,7 @@ impl Program {
         Program {
             inner: match backend() {
                 Backend::OpenGl => ProgramInner::Gl(gl_backend::GlProgram::new(vertex, fragment)),
-                Backend::Vulkan => unimplemented!("Vulkan programs"),
+                Backend::Vulkan => ProgramInner::Vk(vk_backend::create_program(vertex, fragment)),
             },
         }
     }
@@ -81,6 +84,11 @@ impl Program {
         match &self.inner {
             ProgramInner::Gl(p) => Uniform {
                 gl: p.uniform(name),
+                vk: vk_backend::NO_UNIFORM,
+            },
+            ProgramInner::Vk(p) => Uniform {
+                gl: -1,
+                vk: vk_backend::uniform(*p, name),
             },
         }
     }
@@ -89,6 +97,7 @@ impl Program {
     pub fn bind(&self) {
         match &self.inner {
             ProgramInner::Gl(p) => p.bind(),
+            ProgramInner::Vk(p) => vk_backend::bind_program(*p),
         }
     }
 
@@ -96,46 +105,99 @@ impl Program {
     pub fn gl_id(&self) -> u32 {
         match &self.inner {
             ProgramInner::Gl(p) => p.id(),
+            ProgramInner::Vk(_) => 0,
         }
     }
 }
 
 /// Uniform values. Each sets `uniform` in the program bound last, like GL.
 pub fn set_f32(uniform: Uniform, value: f32) {
-    gl_backend::set_f32(uniform.gl, value)
+    if is_vulkan() {
+        vk_backend::set_floats(uniform.vk, &[value], 1)
+    } else {
+        gl_backend::set_f32(uniform.gl, value)
+    }
 }
 pub fn set_i32(uniform: Uniform, value: i32) {
-    gl_backend::set_i32(uniform.gl, value)
+    if is_vulkan() {
+        vk_backend::set_ints(uniform.vk, &[value])
+    } else {
+        gl_backend::set_i32(uniform.gl, value)
+    }
 }
 pub fn set_vec2(uniform: Uniform, value: [f32; 2]) {
-    gl_backend::set_vec2(uniform.gl, value)
+    if is_vulkan() {
+        vk_backend::set_floats(uniform.vk, &value, 2)
+    } else {
+        gl_backend::set_vec2(uniform.gl, value)
+    }
 }
 pub fn set_vec3(uniform: Uniform, value: [f32; 3]) {
-    gl_backend::set_vec3(uniform.gl, value)
+    if is_vulkan() {
+        vk_backend::set_floats(uniform.vk, &value, 3)
+    } else {
+        gl_backend::set_vec3(uniform.gl, value)
+    }
 }
 pub fn set_vec4(uniform: Uniform, value: [f32; 4]) {
-    gl_backend::set_vec4(uniform.gl, value)
+    if is_vulkan() {
+        vk_backend::set_floats(uniform.vk, &value, 4)
+    } else {
+        gl_backend::set_vec4(uniform.gl, value)
+    }
 }
 pub fn set_mat3(uniform: Uniform, value: &cgmath::Matrix3<f32>) {
-    gl_backend::set_mat3(uniform.gl, value)
+    if is_vulkan() {
+        vk_backend::set_matrices(uniform.vk, AsRef::<[f32; 9]>::as_ref(value), 3)
+    } else {
+        gl_backend::set_mat3(uniform.gl, value)
+    }
 }
 pub fn set_mat4(uniform: Uniform, value: &cgmath::Matrix4<f32>) {
-    gl_backend::set_mat4(uniform.gl, value)
+    if is_vulkan() {
+        vk_backend::set_matrices(uniform.vk, AsRef::<[f32; 16]>::as_ref(value), 4)
+    } else {
+        gl_backend::set_mat4(uniform.gl, value)
+    }
 }
 pub fn set_f32_array(uniform: Uniform, values: &[f32]) {
-    gl_backend::set_f32_array(uniform.gl, values)
+    if is_vulkan() {
+        vk_backend::set_floats(uniform.vk, values, 1)
+    } else {
+        gl_backend::set_f32_array(uniform.gl, values)
+    }
 }
 pub fn set_i32_array(uniform: Uniform, values: &[i32]) {
-    gl_backend::set_i32_array(uniform.gl, values)
+    if is_vulkan() {
+        vk_backend::set_ints(uniform.vk, values)
+    } else {
+        gl_backend::set_i32_array(uniform.gl, values)
+    }
 }
 pub fn set_vec3_array(uniform: Uniform, values: &[[f32; 3]]) {
-    gl_backend::set_vec3_array(uniform.gl, values)
+    if is_vulkan() {
+        vk_backend::set_floats(uniform.vk, values.as_flattened(), 3)
+    } else {
+        gl_backend::set_vec3_array(uniform.gl, values)
+    }
 }
 pub fn set_vec4_array(uniform: Uniform, values: &[[f32; 4]]) {
-    gl_backend::set_vec4_array(uniform.gl, values)
+    if is_vulkan() {
+        vk_backend::set_floats(uniform.vk, values.as_flattened(), 4)
+    } else {
+        gl_backend::set_vec4_array(uniform.gl, values)
+    }
 }
 pub fn set_mat4_array(uniform: Uniform, values: &[cgmath::Matrix4<f32>]) {
-    gl_backend::set_mat4_array(uniform.gl, values)
+    if is_vulkan() {
+        let flat: Vec<f32> = values
+            .iter()
+            .flat_map(|m| *AsRef::<[f32; 16]>::as_ref(m))
+            .collect();
+        vk_backend::set_matrices(uniform.vk, &flat, 4)
+    } else {
+        gl_backend::set_mat4_array(uniform.gl, values)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,20 +240,32 @@ pub enum FrontFace {
     CounterClockwise,
 }
 
+macro_rules! dispatch {
+    ($vk:expr, $gl:expr) => {
+        if is_vulkan() { $vk } else { $gl }
+    };
+}
+
 pub fn enable(cap: Cap) {
-    gl_backend::set_cap(cap, true)
+    dispatch!(
+        vk_backend::set_cap(cap, true),
+        gl_backend::set_cap(cap, true)
+    )
 }
 pub fn disable(cap: Cap) {
-    gl_backend::set_cap(cap, false)
+    dispatch!(
+        vk_backend::set_cap(cap, false),
+        gl_backend::set_cap(cap, false)
+    )
 }
 pub fn depth_mask(write: bool) {
-    gl_backend::depth_mask(write)
+    dispatch!(vk_backend::depth_mask(write), gl_backend::depth_mask(write))
 }
 pub fn depth_func(func: DepthFunc) {
-    gl_backend::depth_func(func)
+    dispatch!(vk_backend::depth_func(func), gl_backend::depth_func(func))
 }
 pub fn blend_func(src: BlendFactor, dst: BlendFactor) {
-    gl_backend::blend_func_separate(src, dst, src, dst)
+    blend_func_separate(src, dst, src, dst)
 }
 pub fn blend_func_separate(
     src: BlendFactor,
@@ -199,33 +273,54 @@ pub fn blend_func_separate(
     src_alpha: BlendFactor,
     dst_alpha: BlendFactor,
 ) {
-    gl_backend::blend_func_separate(src, dst, src_alpha, dst_alpha)
+    dispatch!(
+        vk_backend::blend_func_separate([src, dst, src_alpha, dst_alpha]),
+        gl_backend::blend_func_separate(src, dst, src_alpha, dst_alpha)
+    )
 }
 /// Cull back faces (the only face GL code here ever culls).
 pub fn cull_back_faces() {
-    gl_backend::cull_back()
+    // Vulkan bakes back-face culling into the pipeline.
+    if !is_vulkan() {
+        gl_backend::cull_back()
+    }
 }
 pub fn front_face(face: FrontFace) {
-    gl_backend::front_face(face)
+    dispatch!(vk_backend::front_face(face), gl_backend::front_face(face))
 }
 pub fn polygon_offset(factor: f32, units: f32) {
-    gl_backend::polygon_offset(factor, units)
+    dispatch!(
+        vk_backend::polygon_offset(factor, units),
+        gl_backend::polygon_offset(factor, units)
+    )
 }
 pub fn color_mask(r: bool, g: bool, b: bool, a: bool) {
-    gl_backend::color_mask(r, g, b, a)
+    dispatch!(
+        vk_backend::color_mask([r, g, b, a]),
+        gl_backend::color_mask(r, g, b, a)
+    )
 }
 /// Scissor rect in framebuffer pixels, origin bottom-left (GL's convention).
 pub fn scissor(x: i32, y: i32, width: i32, height: i32) {
-    gl_backend::scissor(x, y, width, height)
+    dispatch!(
+        vk_backend::scissor([x, y, width, height]),
+        gl_backend::scissor(x, y, width, height)
+    )
 }
 pub fn viewport(x: i32, y: i32, width: i32, height: i32) {
-    gl_backend::viewport(x, y, width, height)
+    dispatch!(
+        vk_backend::viewport([x, y, width, height]),
+        gl_backend::viewport(x, y, width, height)
+    )
 }
 pub fn clear_color(rgba: [f32; 4]) {
-    gl_backend::clear_color(rgba)
+    dispatch!(vk_backend::clear_color(rgba), gl_backend::clear_color(rgba))
 }
 pub fn clear(color: bool, depth: bool) {
-    gl_backend::clear(color, depth)
+    dispatch!(
+        vk_backend::clear(color, depth),
+        gl_backend::clear(color, depth)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +391,7 @@ unsafe impl Sync for Mesh {}
 
 enum MeshInner {
     Gl(gl_backend::GlMesh),
+    Vk(vk_backend::VkMesh),
 }
 
 impl Mesh {
@@ -310,7 +406,7 @@ impl Mesh {
         Mesh {
             inner: match backend() {
                 Backend::OpenGl => MeshInner::Gl(gl_backend::GlMesh::new(bytes, &layout, indices)),
-                Backend::Vulkan => unimplemented!("Vulkan meshes"),
+                Backend::Vulkan => MeshInner::Vk(vk_backend::VkMesh::new(bytes, &layout, indices)),
             },
             vertex_count: vertices.len() as u32,
             index_count: indices.map(|i| i.len() as u32),
@@ -331,6 +427,7 @@ impl Mesh {
         };
         match &self.inner {
             MeshInner::Gl(m) => m.update_vertices(bytes),
+            MeshInner::Vk(m) => m.update_vertices(bytes),
         }
     }
 
@@ -347,6 +444,7 @@ impl Mesh {
         }
         match &self.inner {
             MeshInner::Gl(m) => m.draw(topology, first, count, self.index_count.is_some()),
+            MeshInner::Vk(m) => m.draw(topology, first, count),
         }
     }
 }
@@ -388,6 +486,7 @@ unsafe impl Sync for Texture2D {}
 
 enum TextureInner {
     Gl(gl_backend::GlTexture),
+    Vk(vk_backend::VkTexture),
 }
 
 impl Texture2D {
@@ -405,7 +504,9 @@ impl Texture2D {
                 Backend::OpenGl => TextureInner::Gl(gl_backend::GlTexture::new(
                     width, height, format, pixels, sampling,
                 )),
-                Backend::Vulkan => unimplemented!("Vulkan textures"),
+                Backend::Vulkan => TextureInner::Vk(vk_backend::VkTexture::new(
+                    width, height, format, pixels, sampling,
+                )),
             },
             width,
             height,
@@ -424,6 +525,9 @@ impl Texture2D {
     pub fn update_rgb_region(&self, x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) {
         match &self.inner {
             TextureInner::Gl(t) => t.update_rgb_region(x, y, width, height, pixels),
+            TextureInner::Vk(t) => {
+                t.update_rgb_region(x, y, width, height, pixels, (self.width, self.height))
+            }
         }
     }
 
@@ -431,6 +535,7 @@ impl Texture2D {
     pub fn bind(&self, unit: u32) {
         match &self.inner {
             TextureInner::Gl(t) => t.bind(unit),
+            TextureInner::Vk(t) => t.bind(unit),
         }
     }
 
@@ -438,6 +543,7 @@ impl Texture2D {
     pub fn gl_id(&self) -> u32 {
         match &self.inner {
             TextureInner::Gl(t) => t.id(),
+            TextureInner::Vk(_) => 0,
         }
     }
 }

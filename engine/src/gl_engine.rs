@@ -62,6 +62,9 @@ impl OpenGLEngine {
             for s in in_layer(layer) {
                 let mask = s
                     .self_depth_group
+                    // Self-depth masks render through GL framebuffers, not
+                    // yet ported to Vulkan.
+                    .filter(|_| !crate::gfx::is_vulkan())
                     .zip(self_depth_scene)
                     .map(|(group, scene)| {
                         if cached_mask.is_none_or(|(id, _)| id != group) {
@@ -125,6 +128,10 @@ impl OpenGLEngine {
     /// Draws each of `scene`'s on-screen offscreen passes from
     /// `render_context`'s eye and records on its target how materials sample it.
     unsafe fn draw_offscreen_passes(&self, render_context: &EngineRenderContext, scene: &Scene) {
+        // Render targets are still GL framebuffers.
+        if crate::gfx::is_vulkan() {
+            return;
+        }
         let view = util::compute_view_matrix_from_render_context(render_context);
         for pass in &scene.offscreen_passes {
             let Some(camera) = crate::scene::pass_focus::pass_camera(
