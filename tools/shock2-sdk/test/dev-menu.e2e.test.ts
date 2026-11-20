@@ -366,11 +366,10 @@ for (const vr of [false, true]) {
 
       await press(back);
       await press(back);
-      // Root also contains GamePig intro, invulnerability and AI speed; scroll
-      // three times to expose Locked in the last visible row.
-      await press([447, 308]);
-      await press([447, 308]);
-      await press([447, 308]);
+      // Locked is the root's last entry. Scrolling clamps at the end, so
+      // scroll past it to put Locked in the last visible row however many
+      // root params exist (a fixed count went stale as params were added).
+      for (let i = 0; i < 16; i++) await press([447, 308]);
       await press(category(8)); // Locked
       await press(category(0)); // Hands & gloves
       const locked = (await game.devParams.list()).params.find(p => p.key === "glove_forward_cm");
