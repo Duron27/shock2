@@ -571,6 +571,10 @@ dev_params! {
     /// their light, so far corridors fall into black (0 off). Not in the
     /// original; part of this port's horror look.
     DISTANCE_DARKNESS = Lighting::float("distance_darkness", "Distance dark", 0.04, 0.0, 0.1, 0.005),
+    /// Glow around bright sources - lamps, screens, flashes (0 off).
+    SCREEN_BLOOM = Lighting::float("screen_bloom", "Glare bloom", 0.8, 0.0, 2.0, 0.05),
+    /// Horizontal lens streak through bright sources (0 off).
+    SCREEN_STREAK = Lighting::float("screen_streak", "Glare streak", 0.5, 0.0, 2.0, 0.05),
     /// Darkening toward the screen edges (0 off). Not in the original: part
     /// of this port's horror grade, applied in the final screen copy.
     SCREEN_VIGNETTE = Lighting::float("screen_vignette", "Vignette", 0.5, 0.0, 1.0, 0.05),

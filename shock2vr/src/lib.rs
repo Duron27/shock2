@@ -3117,10 +3117,11 @@ impl Game {
         dev_params::get(dev_params::DISTANCE_DARKNESS)
     }
 
-    /// The screen grade `[vignette, grain, contrast, saturation, danger]`
+    /// The screen grade `[vignette, grain, contrast, saturation, danger,
+    /// bloom, streak]`
     /// for `Renderer::set_grade`. Danger rises from 0 at 40% health to 1 at
     /// 10%, and is 0 while dead (the death sequence owns the screen then).
-    pub fn screen_grade(&self) -> [f32; 5] {
+    pub fn screen_grade(&self) -> [f32; 7] {
         let danger = if self.pending_save_load.is_some() {
             0.0
         } else {
@@ -3134,6 +3135,8 @@ impl Game {
             dev_params::get(dev_params::SCREEN_CONTRAST),
             dev_params::get(dev_params::SCREEN_SATURATION),
             danger,
+            dev_params::get(dev_params::SCREEN_BLOOM),
+            dev_params::get(dev_params::SCREEN_STREAK),
         ]
     }
 
@@ -3992,10 +3995,10 @@ impl App {
         }
     }
 
-    pub fn screen_grade(&self) -> [f32; 5] {
+    pub fn screen_grade(&self) -> [f32; 7] {
         match self {
             App::Ready(game) => game.screen_grade(),
-            App::MissingAssets(_) => [0.0, 0.0, 1.0, 1.0, 0.0],
+            App::MissingAssets(_) => [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
         }
     }
 

@@ -35,6 +35,8 @@ layout(push_constant) uniform GammaPush {
     float contrast;
     float saturation;
     float danger;
+    float bloom;
+    float streak;
 } grade;
 layout(location = 0) out vec4 fragColor;
 
@@ -47,9 +49,56 @@ float hash(uvec3 v) {
     return float(v.x & 0xffffu) / 65535.0;
 }
 
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+// The frame is display-referred (8-bit), so "bright" means near white:
+// lamps, screens, flashes. A soft knee from 0.55 to 1.0; anything darker
+// contributes no glare, so a dim corridor stays clean.
+vec3 brightPart(vec2 at, vec2 size) {
+    vec3 s = texture(frame, at / size).rgb;
+    return s * smoothstep(0.55, 1.0, dot(s, LUMA));
+}
+
+// Glare: a soft disc of light around bright sources (golden-angle spiral,
+// bilinear taps so each covers four texels), plus a faint horizontal
+// streak like light scattered in a lens. One pass, no extra targets.
+vec3 glare(vec2 size) {
+    vec3 sum = vec3(0.0);
+    if (grade.bloom > 0.0) {
+        float radius = size.y * 0.08;
+        float weights = 0.0;
+        // Turn the spiral per pixel: sparse taps then dither into fine
+        // noise (hidden under the grain) instead of visible rings.
+        float spin = hash(uvec3(uvec2(gl_FragCoord.xy), 7u)) * 6.28318;
+        for (int i = 0; i < 28; i++) {
+            float t = (float(i) + 0.5) / 28.0;
+            float a = float(i) * 2.39996 + spin;
+            vec2 offset = vec2(cos(a), sin(a)) * sqrt(t) * radius;
+            float w = 1.0 - 0.6 * t;
+            sum += brightPart(gl_FragCoord.xy + offset, size) * w * grade.bloom;
+            weights += w;
+        }
+        sum /= weights / 2.0;
+    }
+    if (grade.streak > 0.0) {
+        vec3 streak = vec3(0.0);
+        float reach = size.x * 0.12;
+        for (int i = 1; i <= 10; i++) {
+            float t = float(i) / 10.0;
+            float w = exp(-3.0 * t);
+            vec2 offset = vec2(t * reach, 0.0);
+            streak += (brightPart(gl_FragCoord.xy + offset, size)
+                + brightPart(gl_FragCoord.xy - offset, size)) * w;
+        }
+        // A cool tint, like the coating on a lens.
+        sum += streak * vec3(0.75, 0.85, 1.0) * grade.streak;
+    }
+    return sum;
+}
+
 void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
-    vec3 c = texelFetch(frame, pixel, 0).rgb;
+    vec2 size = vec2(textureSize(frame, 0));
+    vec3 c = texelFetch(frame, pixel, 0).rgb + glare(size);
     c = pow(max(c, vec3(0.0)), vec3(grade.invGamma));
 
     float luma = dot(c, vec3(0.299, 0.587, 0.114));
@@ -62,7 +111,6 @@ void main() {
     const float pivot = 0.3;
     c = max((c - pivot) * grade.contrast + pivot, vec3(0.0));
 
-    vec2 size = vec2(textureSize(frame, 0));
     vec2 centred = (gl_FragCoord.xy / size - 0.5) * vec2(size.x / size.y, 1.0);
     float edge = smoothstep(0.35, 1.05, length(centred));
     float beatPhase = fract(grade.time * 1.15);
@@ -97,6 +145,10 @@ pub struct Grade {
     pub time: f32,
     /// Low-health state, 0..1: drains colour and pulses the edges red.
     pub danger: f32,
+    /// Glow around bright sources, 0..~1.5.
+    pub bloom: f32,
+    /// Horizontal lens streak through bright sources, 0..~1.5.
+    pub streak: f32,
 }
 
 impl Grade {
@@ -108,6 +160,8 @@ impl Grade {
         saturation: 1.0,
         time: 0.0,
         danger: 0.0,
+        bloom: 0.0,
+        streak: 0.0,
     };
 
     pub fn is_neutral(&self) -> bool {
@@ -117,6 +171,8 @@ impl Grade {
             && (self.contrast - 1.0).abs() < 1.0e-3
             && (self.saturation - 1.0).abs() < 1.0e-3
             && self.danger <= 0.0
+            && self.bloom <= 0.0
+            && self.streak <= 0.0
     }
 }
 
@@ -232,8 +288,10 @@ impl GammaTarget {
             let sampler = d
                 .create_sampler(
                     &vk::SamplerCreateInfo::builder()
-                        .mag_filter(vk::Filter::NEAREST)
-                        .min_filter(vk::Filter::NEAREST)
+                        // Linear for the glare taps; the copy itself uses
+                        // texelFetch, which ignores filtering.
+                        .mag_filter(vk::Filter::LINEAR)
+                        .min_filter(vk::Filter::LINEAR)
                         .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                         .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                         .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
@@ -292,7 +350,7 @@ impl GammaTarget {
             let push = [vk::PushConstantRange {
                 stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 offset: 0,
-                size: 32,
+                size: 40,
             }];
             let layout = d
                 .create_pipeline_layout(
@@ -338,6 +396,8 @@ impl GammaTarget {
             grade.contrast,
             grade.saturation,
             grade.danger,
+            grade.bloom,
+            grade.streak,
         ];
         let bytes: Vec<u8> = push.iter().flat_map(|f| f.to_ne_bytes()).collect();
         unsafe {
