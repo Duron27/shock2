@@ -799,6 +799,25 @@ FOV is a per-object projection override, preserving world positions/normals
 for lighting; its emissive attachments and the HUD remain independent.
 This is no longer an experimental flag.
 
+### Horror atmosphere (non-original, on by default)
+
+This branch biases the look darker than the original. Every piece is a
+`Lighting` dev param (`POST /v1/dev-params`), so 0 (or 1 for the
+multipliers) turns it off for a faithful comparison:
+
+- `point_shadows` / `point_shadow_strength` / `point_shadow_lights` - the
+  nearest mission lamps cast creature shadows (`engine/src/scene/point_shadow.rs`).
+- `distance_darkness` - lit surfaces fade toward black with distance
+  (`engine/src/scene/fog.rs`); emissive surfaces keep glowing.
+- `screen_vignette`, `screen_grain`, `screen_contrast`, `screen_saturation` -
+  the final-copy grade (`engine/src/vk/gamma.rs`). Below 40% health the
+  grade also drains colour and pulses the edges red (not a dev param).
+- Muzzle flashes and explosions add short point lights
+  (`shock2vr/src/muzzle_lighting.rs`).
+
+Authored `P$AnimLight` Flicker/Random/SemiRandom lamps animate per Dark's
+timer (faithful, not part of the above).
+
 ### Code Quality
 
 - Check code: `cargo check`
