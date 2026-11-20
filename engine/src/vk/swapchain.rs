@@ -129,7 +129,7 @@ impl VkSwapchain {
             })
             .expect("no depth format");
         let depth = create_depth(ctx, depth_format, extent)?;
-        let render_pass = create_render_pass(ctx, surface_format.format, depth_format)?;
+        let render_pass = create_render_pass(ctx, surface_format.format, depth_format, false)?;
         let framebuffers = views
             .iter()
             .map(|&view| {
@@ -269,10 +269,15 @@ fn create_depth(
     })
 }
 
-fn create_render_pass(
+/// The frame's render pass: colour cleared and stored, depth cleared. With
+/// `sampled` the colour ends ready for a fragment shader to read (an
+/// offscreen frame, see `gamma`) instead of ready to present. Both versions
+/// are render-pass compatible, so pipelines built for one draw in the other.
+pub(crate) fn create_render_pass(
     ctx: &VkContext,
     color: vk::Format,
     depth: vk::Format,
+    sampled: bool,
 ) -> Result<vk::RenderPass, vk::Result> {
     let attachments = [
         vk::AttachmentDescription::builder()
@@ -283,7 +288,11 @@ fn create_render_pass(
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .final_layout(if sampled {
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+            } else {
+                vk::ImageLayout::PRESENT_SRC_KHR
+            })
             .build(),
         vk::AttachmentDescription::builder()
             .format(depth)
@@ -310,28 +319,49 @@ fn create_render_pass(
         .depth_stencil_attachment(&depth_ref)
         .build()];
     // The previous frame's use of the colour and depth attachments must finish
-    // before this frame clears them.
+    // before this frame clears them; an offscreen colour was last read by the
+    // copy's fragment shader.
     let stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
         | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
         | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
-    let dependency = [vk::SubpassDependency::builder()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(stages)
-        .dst_stage_mask(stages)
-        .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        )
-        .build()];
+    let read_stage = if sampled {
+        vk::PipelineStageFlags::FRAGMENT_SHADER
+    } else {
+        vk::PipelineStageFlags::empty()
+    };
+    let mut dependencies = vec![
+        vk::SubpassDependency::builder()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(stages | read_stage)
+            .dst_stage_mask(stages)
+            .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .build(),
+    ];
+    if sampled {
+        // The copy samples what this pass wrote.
+        dependencies.push(
+            vk::SubpassDependency::builder()
+                .src_subpass(0)
+                .dst_subpass(vk::SUBPASS_EXTERNAL)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .build(),
+        );
+    }
     unsafe {
         ctx.device.create_render_pass(
             &vk::RenderPassCreateInfo::builder()
                 .attachments(&attachments)
                 .subpasses(&subpass)
-                .dependencies(&dependency),
+                .dependencies(&dependencies),
             None,
         )
     }

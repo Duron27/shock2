@@ -650,7 +650,7 @@ pub fn main() {
         if let Some(renderer) = vk_renderer.as_mut() {
             renderer.resize(fb_width as u32, fb_height as u32);
             renderer.set_vsync(shock2vr::user_settings::get().pc.vsync);
-            // Brightness (the gamma pass) is a GL render target; not yet on Vulkan.
+            renderer.set_gamma(shock2vr::user_settings::get().pc.brightness);
             if let Some(frame) = renderer.begin_frame([0.0, 0.0, 0.0, 1.0]) {
                 profile!(
                     "engine.render",

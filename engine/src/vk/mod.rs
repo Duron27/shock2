@@ -7,6 +7,7 @@
 //! frames are in flight, so the CPU records one while the GPU draws the other.
 
 mod context;
+mod gamma;
 pub mod shader;
 mod swapchain;
 
@@ -32,6 +33,8 @@ pub struct Frame {
     pub commands: vk::CommandBuffer,
     pub extent: vk::Extent2D,
     image_index: u32,
+    /// Drawn offscreen, copied to the swapchain through this gamma at the end.
+    gamma: Option<f32>,
 }
 
 pub struct VkRenderer {
@@ -48,6 +51,9 @@ pub struct VkRenderer {
     rebuilds: u32,
     capture: bool,
     captured: Option<Capture>,
+    gamma: f32,
+    /// Built on first use for the current swapchain.
+    gamma_target: Option<gamma::GammaTarget>,
     pub ctx: VkContext,
 }
 
@@ -75,6 +81,8 @@ impl VkRenderer {
             rebuilds: 0,
             capture: false,
             captured: None,
+            gamma: 1.0,
+            gamma_target: None,
             ctx,
         };
         crate::gfx::vk_backend::install(&renderer.ctx);
@@ -115,6 +123,11 @@ impl VkRenderer {
 
     /// The window's framebuffer changed size; the swapchain follows before
     /// the next frame.
+    /// Display gamma (Brightness): 1.0 draws straight to the swapchain.
+    pub fn set_gamma(&mut self, gamma: f32) {
+        self.gamma = gamma;
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if (width, height) != self.size {
             self.size = (width, height);
@@ -132,6 +145,9 @@ impl VkRenderer {
     fn rebuild_swapchain(&mut self) {
         unsafe {
             let _ = self.ctx.device.device_wait_idle();
+        }
+        if let Some(mut target) = self.gamma_target.take() {
+            target.destroy(&self.ctx.device);
         }
         if let Some(mut old) = self.swapchain.take() {
             old.destroy(&self.ctx);
@@ -170,6 +186,17 @@ impl VkRenderer {
             self.rebuild_swapchain();
         }
         let swapchain = self.swapchain.as_ref()?;
+        let gamma = ((self.gamma - 1.0).abs() >= 1.0e-3).then_some(self.gamma);
+        if gamma.is_some() && self.gamma_target.is_none() {
+            match gamma::GammaTarget::new(&self.ctx, swapchain) {
+                Ok(target) => self.gamma_target = Some(target),
+                Err(e) => {
+                    warn!("{e}; brightness off");
+                    self.gamma = 1.0;
+                }
+            }
+        }
+        let gamma = gamma.filter(|_| self.gamma_target.is_some());
         let device = &self.ctx.device;
         let slot = &self.slots[self.slot];
         let waited = std::time::Instant::now();
@@ -212,6 +239,14 @@ impl VkRenderer {
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                 )
                 .expect("vkBeginCommandBuffer");
+            // With gamma the scene goes offscreen; end_frame copies it over.
+            let (render_pass, framebuffer) = match (&self.gamma_target, gamma) {
+                (Some(target), Some(_)) => (target.render_pass, target.framebuffer),
+                _ => (
+                    swapchain.render_pass,
+                    swapchain.framebuffers[image_index as usize],
+                ),
+            };
             let clears = [
                 vk::ClearValue {
                     color: vk::ClearColorValue { float32: clear },
@@ -226,8 +261,8 @@ impl VkRenderer {
             device.cmd_begin_render_pass(
                 slot.commands,
                 &vk::RenderPassBeginInfo::builder()
-                    .render_pass(swapchain.render_pass)
-                    .framebuffer(swapchain.framebuffers[image_index as usize])
+                    .render_pass(render_pass)
+                    .framebuffer(framebuffer)
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D::default(),
                         extent: swapchain.extent,
@@ -248,6 +283,7 @@ impl VkRenderer {
             commands: slot.commands,
             extent: swapchain.extent,
             image_index,
+            gamma,
         })
     }
 
@@ -260,6 +296,35 @@ impl VkRenderer {
         let slot = &self.slots[self.slot];
         let render_finished = self.render_finished[frame.image_index as usize];
         crate::gfx::vk_backend::end_frame();
+        if let (Some(gamma), Some(target)) = (frame.gamma, &self.gamma_target) {
+            let clears = [
+                vk::ClearValue {
+                    color: vk::ClearColorValue { float32: [0.0; 4] },
+                },
+                vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                },
+            ];
+            unsafe {
+                device.cmd_end_render_pass(frame.commands);
+                device.cmd_begin_render_pass(
+                    frame.commands,
+                    &vk::RenderPassBeginInfo::builder()
+                        .render_pass(swapchain.render_pass)
+                        .framebuffer(swapchain.framebuffers[frame.image_index as usize])
+                        .render_area(vk::Rect2D {
+                            offset: vk::Offset2D::default(),
+                            extent: swapchain.extent,
+                        })
+                        .clear_values(&clears),
+                    vk::SubpassContents::INLINE,
+                );
+            }
+            target.record_copy(device, frame.commands, swapchain.extent, gamma);
+        }
         let readback = if std::mem::take(&mut self.capture) {
             self.record_readback(frame.commands, swapchain, frame.image_index)
         } else {
@@ -411,6 +476,9 @@ impl Drop for VkRenderer {
         unsafe {
             let _ = device.device_wait_idle();
             crate::gfx::vk_backend::shutdown();
+            if let Some(mut target) = self.gamma_target.take() {
+                target.destroy(device);
+            }
             for slot in &self.slots {
                 device.destroy_command_pool(slot.pool, None);
                 device.destroy_semaphore(slot.image_available, None);
