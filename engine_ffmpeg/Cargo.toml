@@ -9,4 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 engine = { path = "../engine" }
-ffmpeg-next = { version = "7.0" }
+ffmpeg-next = { version = "9.1" }

@@ -40,5 +40,3 @@ members = [
 # See: https://github.com/rust-num/num-derive/issues
 non_local_definitions = "allow"
 
-[patch.crates-io]
-ffmpeg-sys-next = { path = "vendor/ffmpeg-sys-next" }
