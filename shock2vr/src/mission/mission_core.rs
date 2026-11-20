@@ -13886,7 +13886,7 @@ impl MissionCore {
         let mut lights = self.world.borrow::<ViewMut<PropAnimLight>>().unwrap();
         for (entity_id, light) in (&mut lights).iter().with_id() {
             let previous_intensity = light.initial_intensity();
-            if light.advance_alternating(elapsed) {
+            if light.advance_timed(elapsed) {
                 let intensity = light.initial_intensity();
                 if let Some(controller) = &mut self.animated_lightmaps {
                     controller.set_light_intensity(light.light_number, intensity);

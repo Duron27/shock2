@@ -196,6 +196,78 @@ impl PropAnimLight {
         before != self.initial_intensity()
     }
 
+    /// Advance Dark's timer-driven discrete modes: FLIP (Alternate), and
+    /// FLICKER / RANDOM / RANDOM_COIN_FLIP (`AnimLightUpdateTimer`). Flicker
+    /// alternates max and min like FLIP but holds each for a random part of
+    /// its interval; Random picks a level between min and max; SemiRandom a
+    /// coin flip between them. The "random" here is a hash of the light and
+    /// its phase, so a replay or a reload repeats the same pattern.
+    pub fn advance_timed(&mut self, elapsed: std::time::Duration) -> bool {
+        match self.mode {
+            AnimLightMode::Alternate => self.advance_alternating(elapsed),
+            AnimLightMode::Flicker | AnimLightMode::Random | AnimLightMode::SemiRandom => {
+                self.advance_random(elapsed)
+            }
+            _ => false,
+        }
+    }
+
+    fn advance_random(&mut self, elapsed: std::time::Duration) -> bool {
+        if self.inactive || elapsed.is_zero() {
+            return false;
+        }
+        let before = self.initial_intensity();
+        if self.brighten_time_ms < 5 {
+            self.brighten_time_ms = 63;
+        }
+        if self.dim_time_ms < 5 {
+            self.dim_time_ms = 63;
+        }
+        let mut remaining = f64::from(self.countdown_ms) + self.countdown_fraction_ms
+            - elapsed.as_secs_f64() * 1000.0;
+        let mut changes = 0;
+        // Bounded: a huge step only needs the last phase to be right.
+        while remaining < 0.0 && changes < 64 {
+            changes += 1;
+            let roll = phase_hash(self.light_number, self.countdown_ms, changes);
+            let (level, hold) = match self.mode {
+                AnimLightMode::Flicker => {
+                    self.rising = !self.rising;
+                    let (level, interval) = if self.rising {
+                        (self.max_brightness, self.brighten_time_ms)
+                    } else {
+                        (self.min_brightness, self.dim_time_ms)
+                    };
+                    (level, 1 + (roll % interval.max(1) as u32) as i32)
+                }
+                AnimLightMode::SemiRandom => {
+                    let high = roll & 1 == 1;
+                    self.rising = high;
+                    let level = if high {
+                        self.max_brightness
+                    } else {
+                        self.min_brightness
+                    };
+                    (level, self.brighten_time_ms)
+                }
+                _ => {
+                    let t = (roll >> 8) as f32 / (u32::MAX >> 8) as f32;
+                    let level =
+                        self.min_brightness + (self.max_brightness - self.min_brightness) * t;
+                    (level, self.brighten_time_ms)
+                }
+            };
+            self.brightness = Some(level);
+            remaining += f64::from(hold);
+        }
+        if remaining < 0.0 {
+            remaining = 0.0;
+        }
+        self.countdown_ms = remaining.floor() as i32;
+        self.countdown_fraction_ms = remaining.fract();
+        before != self.initial_intensity()
+    }
+
     pub fn turn_off_intensity(&self) -> f32 {
         match self.mode {
             AnimLightMode::MinBrightness
@@ -206,8 +278,74 @@ impl PropAnimLight {
     }
 }
 
+fn phase_hash(light: i16, countdown: i32, step: u32) -> u32 {
+    let mut h = (light as u16 as u32).wrapping_mul(0x9e37_79b9)
+        ^ (countdown as u32).wrapping_mul(0x85eb_ca6b)
+        ^ step.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^ (h >> 16)
+}
+
 #[cfg(test)]
 mod tests {
+    fn flicker_light() -> PropAnimLight {
+        PropAnimLight {
+            offset: Vector3::new(0.0, 0.0, 0.0),
+            cell_index: 0,
+            hit_cells: 0,
+            light_number: 7,
+            mode: AnimLightMode::Flicker,
+            brighten_time_ms: 400,
+            dim_time_ms: 100,
+            min_brightness: 0.0,
+            max_brightness: 100.0,
+            brightness: None,
+            rising: false,
+            countdown_ms: 0,
+            countdown_fraction_ms: 0.0,
+            inactive: false,
+            radius: 10.0,
+        }
+    }
+
+    #[test]
+    fn flicker_alternates_with_random_holds_and_repeats() {
+        let run = || {
+            let mut light = flicker_light();
+            let mut levels = Vec::new();
+            for _ in 0..600 {
+                light.advance_timed(std::time::Duration::from_millis(16));
+                levels.push(light.initial_intensity());
+            }
+            levels
+        };
+        let levels = run();
+        assert!(
+            levels.contains(&1.0) && levels.contains(&0.0),
+            "flickers both ways"
+        );
+        let switches = levels.windows(2).filter(|w| w[0] != w[1]).count();
+        // 9.6 s with mean holds of 200 + 50 ms: far more than FLIP's
+        // fixed 500 ms cycle would give, and never every frame.
+        assert!((20..300).contains(&switches), "{switches} switches");
+        assert_eq!(levels, run(), "deterministic");
+    }
+
+    #[test]
+    fn random_stays_within_authored_range() {
+        let mut light = flicker_light();
+        light.mode = AnimLightMode::Random;
+        light.min_brightness = 20.0;
+        for _ in 0..200 {
+            light.advance_timed(std::time::Duration::from_millis(50));
+            let i = light.initial_intensity();
+            assert!((0.2..=1.0).contains(&i), "{i}");
+        }
+    }
+
     use std::io::Cursor;
 
     use super::*;
