@@ -190,6 +190,68 @@ impl Default for VrSettings {
 #[serde(default)]
 pub struct UserSettings {
     pub vr: VrSettings,
+    /// Flatscreen (mouse and keyboard) preferences; absent from older files.
+    pub pc: PcSettings,
+}
+
+/// Mouse-sensitivity steps the Options menu cycles through.
+pub const MOUSE_SENSITIVITIES: [f32; 9] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
+/// Vertical field-of-view steps, in degrees (45 is the engine's historic flat FOV).
+pub const FIELDS_OF_VIEW: [f32; 7] = [45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0];
+/// Display gamma steps (the Options menu's Brightness); 1.0 is unchanged.
+pub const BRIGHTNESSES: [f32; 9] = [1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4, 0.8];
+/// Volume steps, 0..=1.
+pub const VOLUMES: [f32; 11] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PcSettings {
+    /// Multiplier on the desktop runtime's mouse-look speed.
+    pub mouse_sensitivity: f32,
+    pub invert_mouse_y: bool,
+    /// Vertical field of view in degrees.
+    pub field_of_view: f32,
+    pub fullscreen: bool,
+    pub vsync: bool,
+    /// Display gamma: the frame is shown through `pow(c, 1/brightness)`.
+    pub brightness: f32,
+    pub master_volume: f32,
+    pub music_volume: f32,
+    pub effects_volume: f32,
+}
+
+impl Default for PcSettings {
+    fn default() -> Self {
+        Self {
+            mouse_sensitivity: 1.0,
+            invert_mouse_y: false,
+            field_of_view: 45.0,
+            fullscreen: false,
+            vsync: true,
+            brightness: 1.4,
+            master_volume: 1.0,
+            music_volume: 1.0,
+            effects_volume: 1.0,
+        }
+    }
+}
+
+impl PcSettings {
+    fn normalized(mut self) -> Self {
+        let defaults = Self::default();
+        let snap = |value: &mut f32, steps: &[f32], default: f32| {
+            if !steps.iter().any(|step| (step - *value).abs() < 1e-4) {
+                *value = default;
+            }
+        };
+        snap(&mut self.mouse_sensitivity, &MOUSE_SENSITIVITIES, defaults.mouse_sensitivity);
+        snap(&mut self.field_of_view, &FIELDS_OF_VIEW, defaults.field_of_view);
+        snap(&mut self.brightness, &BRIGHTNESSES, defaults.brightness);
+        snap(&mut self.master_volume, &VOLUMES, defaults.master_volume);
+        snap(&mut self.music_volume, &VOLUMES, defaults.music_volume);
+        snap(&mut self.effects_volume, &VOLUMES, defaults.effects_volume);
+        self
+    }
 }
 
 impl UserSettings {
@@ -209,6 +271,7 @@ impl UserSettings {
         if ![45.0, 60.0, 90.0, 120.0, 180.0].contains(&self.vr.smooth_speed) {
             self.vr.smooth_speed = 90.0;
         }
+        self.pc = self.pc.normalized();
         self
     }
 }

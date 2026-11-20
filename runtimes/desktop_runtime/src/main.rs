@@ -36,6 +36,49 @@ use std::time::Duration;
 // settings
 const SCR_WIDTH: u32 = 800;
 const SCR_HEIGHT: u32 = 600;
+/// Mouse-look degrees per pixel at sensitivity 1x (what the old frame-time
+/// scaling gave at 60 fps).
+const MOUSE_DEGREES_PER_PIXEL: f32 = 0.15;
+
+/// Switch fullscreen and vsync when the Options menu changes them.
+fn apply_display_settings(
+    glfw: &mut glfw::Glfw,
+    window: &mut glfw::PWindow,
+    applied: &mut Option<(bool, bool)>,
+) {
+    let pc = shock2vr::user_settings::get().pc;
+    let wanted = (pc.fullscreen, pc.vsync);
+    if *applied == Some(wanted) {
+        return;
+    }
+    let was_fullscreen = applied.map_or(false, |(fullscreen, _)| fullscreen);
+    if pc.fullscreen != was_fullscreen {
+        if pc.fullscreen {
+            glfw.with_primary_monitor(|_, monitor| {
+                let Some(monitor) = monitor else { return };
+                let Some(mode) = monitor.get_video_mode() else {
+                    return;
+                };
+                window.set_monitor(
+                    glfw::WindowMode::FullScreen(monitor),
+                    0,
+                    0,
+                    mode.width,
+                    mode.height,
+                    Some(mode.refresh_rate),
+                );
+            });
+        } else {
+            window.set_monitor(glfw::WindowMode::Windowed, 100, 100, SCR_WIDTH, SCR_HEIGHT, None);
+        }
+    }
+    glfw.set_swap_interval(if pc.vsync {
+        glfw::SwapInterval::Sync(1)
+    } else {
+        glfw::SwapInterval::None
+    });
+    *applied = Some(wanted);
+}
 
 struct MousePosition {
     x: f32,
@@ -343,6 +386,7 @@ pub fn main() {
     );
 
     let engine = engine::opengl();
+    let gamma_pass = engine::gamma::GammaPass::default();
     let bundle_storage = engine.get_storage();
     let experimental_features: HashSet<String> =
         args.experimental.unwrap_or(vec![]).into_iter().collect();
@@ -412,6 +456,8 @@ pub fn main() {
     // held press until every button is released.
     let mut suppress_mouse_until_release = false;
     let mut action_state = InputActionState::new();
+    // The Options menu's fullscreen / vsync, as last applied to the window.
+    let mut applied_display: Option<(bool, bool)> = None;
 
     let _mode = Mode::Gameplay;
     // render loop
@@ -419,6 +465,7 @@ pub fn main() {
     while !window.should_close() {
         // events
         // -----
+        apply_display_settings(&mut glfw, &mut window, &mut applied_display);
         let time = glfw.get_time() as f32;
         let delta_time = time - last_time;
         last_time = time;
@@ -437,7 +484,8 @@ pub fn main() {
                 // unbounded accumulator - garbage as a screen pointer. Start
                 // the visible cursor centered and sync the tracked position
                 // so the first CursorPos event doesn't produce a huge delta.
-                let (cx, cy) = (SCR_WIDTH as f64 / 2.0, SCR_HEIGHT as f64 / 2.0);
+                let (w, h) = window.get_size();
+                let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
                 window.set_cursor_pos(cx, cy);
                 camera_context.mouse_position = Some(MousePosition {
                     x: cx as f32,
@@ -510,7 +558,9 @@ pub fn main() {
 
         // Built after `game.update` so this frame's `desired_fov_deg()` is
         // reflected immediately rather than lagging a frame.
-        let ratio = SCR_WIDTH as f32 / SCR_HEIGHT as f32;
+        let (fb_width, fb_height) = window.get_framebuffer_size();
+        let (fb_width, fb_height) = (fb_width.max(1) as f32, fb_height.max(1) as f32);
+        let ratio = fb_width / fb_height;
         let projection_matrix: cgmath::Matrix4<f32> = cgmath::perspective(
             cgmath::Deg(game.desired_fov_deg()),
             ratio,
@@ -518,7 +568,7 @@ pub fn main() {
             shock2vr::FAR_PLANE,
         );
 
-        let screen_size = vec2(SCR_WIDTH as f32, SCR_HEIGHT as f32);
+        let screen_size = vec2(fb_width, fb_height);
 
         let (mut scene, pawn_offset, pawn_rotation) = profile!("game.render", game.render());
 
@@ -559,10 +609,15 @@ pub fn main() {
             scene_for_render.lights_mut().add_light(spotlight);
         }
 
+        gamma_pass.begin(
+            shock2vr::user_settings::get().pc.brightness,
+            [fb_width as i32, fb_height as i32],
+        );
         profile!(
             "engine.render",
             engine.render(&render_context, &scene_for_render)
         );
+        gamma_pass.end();
 
         // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
         // -------------------------------------------------------------------------------
@@ -618,7 +673,6 @@ fn process_events(
     presentation: shock2vr::PresentationMode,
 ) -> InputContext {
     let _speed = 20.0;
-    let head_rot_speed = 10.0;
 
     let _movement = cgmath::Vector3::new(0.0, 0.0, 0.0);
 
@@ -653,13 +707,22 @@ fn process_events(
             //     engine::audio::play_audio(audio)
             // }
             glfw::WindowEvent::CursorPos(x, y) => {
+                // Sum every event this frame: keeping only the last one
+                // dropped motion whenever the OS delivered several.
                 let mouse_update = camera_update_mouse(camera_context, x as f32, y as f32);
-                rot_yaw = 1.0 * mouse_update.delta_x;
-                rot_pitch = 1.0 * mouse_update.delta_y;
+                rot_yaw += mouse_update.delta_x;
+                rot_pitch += mouse_update.delta_y;
             }
             _ => {}
         }
     }
+
+    // Mouse look is degrees per pixel - like any PC shooter, independent of
+    // frame rate (it used to scale by frame time, so it sped up as FPS fell).
+    let pc = shock2vr::user_settings::get().pc;
+    let look_scale = MOUSE_DEGREES_PER_PIXEL * pc.mouse_sensitivity;
+    rot_yaw *= look_scale;
+    rot_pitch *= look_scale * if pc.invert_mouse_y { -1.0 } else { 1.0 };
 
     let mouse_pressed = |button| window.get_mouse_button(button) == Action::Press;
     let look_target = mouse_look_target(
@@ -670,17 +733,17 @@ fn process_events(
     );
     match look_target {
         MouseLookTarget::RightHand => {
-            hand_context.right_hand_context.yaw += rot_yaw * head_rot_speed * delta_time;
-            hand_context.right_hand_context.pitch += rot_pitch * head_rot_speed * delta_time;
+            hand_context.right_hand_context.yaw += rot_yaw;
+            hand_context.right_hand_context.pitch += rot_pitch;
         }
         MouseLookTarget::LeftHand => {
-            hand_context.left_hand_context.yaw += rot_yaw * head_rot_speed * delta_time;
-            hand_context.left_hand_context.pitch += rot_pitch * head_rot_speed * delta_time;
+            hand_context.left_hand_context.yaw += rot_yaw;
+            hand_context.left_hand_context.pitch += rot_pitch;
         }
         target @ (MouseLookTarget::Head | MouseLookTarget::Cursor) => {
             if target == MouseLookTarget::Head {
-                camera_context.yaw += rot_yaw * head_rot_speed * delta_time;
-                camera_context.pitch += rot_pitch * head_rot_speed * delta_time;
+                camera_context.yaw += rot_yaw;
+                camera_context.pitch += rot_pitch;
             }
 
             hand_context.left_hand_context.yaw = REST_HAND_YAW;
@@ -809,7 +872,10 @@ fn process_events(
     if wants_pointer {
         if let Some(MousePosition { x, y }) = &camera_context.mouse_position {
             input_context.pointer = Some(shock2vr::input_context::Pointer2D {
-                position: vec2(x / SCR_WIDTH as f32, y / SCR_HEIGHT as f32),
+                position: {
+                    let (w, h) = window.get_size();
+                    vec2(x / w.max(1) as f32, y / h.max(1) as f32)
+                },
                 secondary: window.get_mouse_button(MouseButton::Button2) == Action::Press,
                 pressed: window.get_mouse_button(MouseButton::Button1) == Action::Press,
             });

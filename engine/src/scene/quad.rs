@@ -81,8 +81,11 @@ pub struct QuadUv {
 }
 
 thread_local! {
-    static UV_QUAD_GEOMETRY: RefCell<HashMap<[u32; 4], Rc<Mesh>>> =
-        RefCell::new(HashMap::new());
+    // `ManuallyDrop`: thread-local destructors run at process exit, after the
+    // window's GL context is gone, and deleting a VAO then segfaults. The OS
+    // reclaims the GPU objects anyway.
+    static UV_QUAD_GEOMETRY: std::mem::ManuallyDrop<RefCell<HashMap<[u32; 4], Rc<Mesh>>>> =
+        std::mem::ManuallyDrop::new(RefCell::new(HashMap::new()));
 }
 
 pub fn create_with_uv(uv_min: Vector2<f32>, uv_max: Vector2<f32>) -> QuadUv {

@@ -622,6 +622,7 @@ fn run_game_blocking(
     // Initialize the game engine
     info!("Step 4: Initializing engine...");
     let engine = engine::opengl();
+    let gamma_pass = engine::gamma::GammaPass::default();
     let bundle_storage = engine.get_storage();
     info!("Engine initialized successfully");
 
@@ -1281,11 +1282,17 @@ fn run_game_blocking(
             scene_for_render.lights_mut().add_light(spotlight);
         }
 
-        // Actually render the scene
+        // Actually render the scene (through the Options menu's Brightness,
+        // like the desktop runtime, so screenshots match what a player sees).
+        gamma_pass.begin(
+            shock2vr::user_settings::get().pc.brightness,
+            [scr_width as i32, scr_height as i32],
+        );
         profile!(
             "engine.render",
             engine.render(&render_context, &scene_for_render)
         );
+        gamma_pass.end();
         if pending_step_reply.is_some() {
             frames_rendered_this_step += 1;
         }

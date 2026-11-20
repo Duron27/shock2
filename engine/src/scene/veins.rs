@@ -126,8 +126,9 @@ fn hash(x: i32, y: i32, seed: u32) -> f32 {
 thread_local! {
     /// Generated and uploaded once per thread on first use; needs a live GL
     /// context (the `shared_white_pixel` pattern).
-    static VEINS: std::cell::RefCell<Option<Rc<Texture>>> =
-        const { std::cell::RefCell::new(None) };
+    /// `ManuallyDrop`: never deleted at exit, when the GL context is gone.
+    static VEINS: std::mem::ManuallyDrop<std::cell::RefCell<Option<Rc<Texture>>>> =
+        const { std::mem::ManuallyDrop::new(std::cell::RefCell::new(None)) };
 }
 
 /// The shared vein texture: repeating, mipmapped so fine ridges do not

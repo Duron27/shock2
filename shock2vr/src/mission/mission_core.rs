@@ -8149,7 +8149,7 @@ impl MissionCore {
                     crate::flat_player_controller::viewmodel_to_world(
                         origin,
                         player_rot * self.flat_eye.unwrap_or(neutral_eye).rotation,
-                        crate::resolve_fov_deg(crate::DEFAULT_FOV_DEG),
+                        crate::flat_fov_deg(),
                     ),
                 ),
             );
@@ -17718,7 +17718,13 @@ impl MissionCore {
                 ret.push(layer);
             }
         }
-        if !self.use_mode {
+        // VR comfort aids (the reference grid and the movement vignette - a
+        // black ring that closes in while moving) only make sense in a headset.
+        let vr = self
+            .world
+            .borrow::<UniqueView<GlobalPresentationMode>>()
+            .is_ok_and(|mode| mode.0 == crate::PresentationMode::Vr);
+        if !self.use_mode && vr {
             let player = self.world.borrow::<UniqueView<PlayerInfo>>().unwrap();
             ret.extend(self.reference_grid.render(
                 player.pos,
@@ -18148,7 +18154,7 @@ impl MissionCore {
                     self.interaction.viewmodel_entity(),
                     self.interaction.flat_aim_bias(),
                 ),
-                crate::resolve_fov_deg(crate::DEFAULT_FOV_DEG),
+                crate::flat_fov_deg(),
             ));
 
             // Debug readouts (flat). VR presents the same canvas on a

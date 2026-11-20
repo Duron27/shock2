@@ -1,6 +1,11 @@
 //! Retail Options canvas, shared by the main menu and the paused mission.
+//!
+//! PC settings only: mouse, display and audio. (The VR comfort/turning
+//! preferences in `user_settings::VrSettings` keep their defaults.)
 use super::{HAlign, Rect, UiCanvas, VAlign, resolve_menu_label, resolve_menu_rects};
-use crate::user_settings::{self, TurnMode, UserSettings};
+use crate::user_settings::{
+    self, BRIGHTNESSES, FIELDS_OF_VIEW, MOUSE_SENSITIVITIES, PcSettings, VOLUMES,
+};
 use cgmath::{Vector2, vec2};
 use dark::importers::{STRINGS_IMPORTER, UI_LAYOUT_IMPORTER};
 use engine::assets::asset_cache::AssetCache;
@@ -86,19 +91,20 @@ pub struct OptionsPanel {
     error: bool,
 }
 
+const TAB_LABELS: [&str; 3] = ["Controls", "Display", "Audio"];
+
 impl OptionsPanel {
     pub fn hit(&self, layout: &OptionsLayout, point: Vector2<f32>) -> Option<OptionsEvent> {
         if layout.frame[0].contains(point) {
             return Some(OptionsEvent::Done);
         }
-        // Audio and Display retain the retail tab slots but remain disabled
-        // until they have real user-facing controls.
-        for (i, rect) in layout.tabs.iter().take(2).enumerate() {
+        // The fourth retail tab slot has no page and stays inert.
+        for (i, rect) in layout.tabs.iter().take(TAB_LABELS.len()).enumerate() {
             if rect.contains(point) {
                 return Some(OptionsEvent::Tab(i));
             }
         }
-        let count = if self.tab == 0 { ROWS.len() } else { 5 };
+        let count = row_labels(&user_settings::get().pc, self.tab).len();
         for (i, rect) in layout.rows.iter().take(count).enumerate() {
             if rect.contains(point) {
                 return Some(OptionsEvent::Row(i));
@@ -110,71 +116,27 @@ impl OptionsPanel {
     pub fn activate(&mut self, event: OptionsEvent) -> bool {
         match event {
             OptionsEvent::Done => return true,
-            OptionsEvent::Tab(tab) if tab < 2 => {
+            OptionsEvent::Tab(tab) if tab < TAB_LABELS.len() => {
                 self.tab = tab;
                 self.error = false;
             }
             OptionsEvent::Row(row) => {
-                self.error = user_settings::update(|settings| self.change(settings, row)).is_err();
+                let tab = self.tab;
+                self.error =
+                    user_settings::update(|settings| change(&mut settings.pc, tab, row)).is_err();
             }
             _ => {}
         }
         false
     }
 
-    fn change(&self, settings: &mut UserSettings, row: usize) {
-        let defaults = crate::user_settings::VrSettings::default();
-        let vr = &mut settings.vr;
-        match (self.tab, row) {
-            (0, 0) => vr.vignette = vr.vignette.next(),
-            (0, 1) => vr.vignette_movement = !vr.vignette_movement,
-            (0, 2) => vr.vignette_turning = !vr.vignette_turning,
-            (0, 3) => vr.reference_grid = vr.reference_grid.next(),
-            (0, 4) => vr.grid_opacity = cycle(vr.grid_opacity, &[0.15, 0.3, 0.5]),
-            (0, 5) => vr.grid_spacing = cycle(vr.grid_spacing, &[0.5, 1.0, 2.0]),
-            (0, 6) => vr.grid_size = cycle(vr.grid_size, &[8.0, 10.0, 12.0, 16.0]),
-            (0, 7) => vr.speed_boosts = vr.speed_boosts.next(),
-            (0, 8) => vr.roomscale = vr.roomscale.next(),
-            (0, 9) => {
-                vr.vignette = defaults.vignette;
-                vr.vignette_movement = defaults.vignette_movement;
-                vr.vignette_turning = defaults.vignette_turning;
-                vr.reference_grid = defaults.reference_grid;
-                vr.grid_opacity = defaults.grid_opacity;
-                vr.grid_spacing = defaults.grid_spacing;
-                vr.grid_size = defaults.grid_size;
-                vr.speed_boosts = defaults.speed_boosts;
-                vr.roomscale = defaults.roomscale;
-            }
-            (1, 0) => {
-                vr.turning = if vr.turning == TurnMode::Snap {
-                    TurnMode::Smooth
-                } else {
-                    TurnMode::Snap
-                }
-            }
-            (1, 1) => vr.snap_angle = cycle(vr.snap_angle, &[30.0, 45.0, 60.0]),
-            (1, 2) => vr.smooth_speed = cycle(vr.smooth_speed, &[45.0, 60.0, 90.0, 120.0, 180.0]),
-            (1, 3) => vr.psi_pointer = !vr.psi_pointer,
-            (1, 4) => {
-                vr.turning = defaults.turning;
-                vr.snap_angle = defaults.snap_angle;
-                vr.smooth_speed = defaults.smooth_speed;
-            }
-            _ => {}
-        }
-    }
-
     pub fn canvas(&self, assets: &mut AssetCache, pointer: Option<Vector2<f32>>) -> UiCanvas {
         let layout = OptionsLayout::load(assets);
-        let settings = user_settings::get().vr;
+        let settings = user_settings::get().pc;
         let mut canvas = UiCanvas::new(vec2(640.0, 480.0));
         canvas.image(Rect::new(0.0, 0.0, 640.0, 480.0), "OPTIONS.PCX");
         let hover = pointer.and_then(|p| self.hit(&layout, p));
-        for (i, label) in ["Comfort", "Controls", "Audio", "Display"]
-            .iter()
-            .enumerate()
-        {
+        for (i, label) in TAB_LABELS.iter().enumerate() {
             canvas
                 .text_native_fit(
                     layout.tabs[i],
@@ -183,48 +145,13 @@ impl OptionsPanel {
                     HAlign::Center,
                     VAlign::Middle,
                 )
-                .opacity(if i >= 2 {
-                    0.25
-                } else if i == self.tab || hover == Some(OptionsEvent::Tab(i)) {
+                .opacity(if i == self.tab || hover == Some(OptionsEvent::Tab(i)) {
                     1.0
                 } else {
                     0.55
                 });
         }
-        let on_off = |on| if on { "On" } else { "Off" };
-        let labels = if self.tab == 0 {
-            vec![
-                format!("Movement vignette: {}", settings.vignette.label()),
-                format!("While moving: {}", on_off(settings.vignette_movement)),
-                format!(
-                    "While smooth turning: {}",
-                    on_off(settings.vignette_turning)
-                ),
-                format!("Reference grid: {}", settings.reference_grid.label()),
-                format!("Grid opacity: {:.0}%", settings.grid_opacity * 100.0),
-                format!("Grid spacing: {} m", settings.grid_spacing),
-                format!("Grid size: {} m", settings.grid_size),
-                format!("Speed boosts: {}", settings.speed_boosts.label()),
-                format!("Roomscale: {}", settings.roomscale.label()),
-                "Reset comfort defaults".to_owned(),
-            ]
-        } else {
-            vec![
-                format!(
-                    "Turning: {}",
-                    if settings.turning == TurnMode::Snap {
-                        "Snap"
-                    } else {
-                        "Smooth"
-                    }
-                ),
-                format!("Snap angle: {} degrees", settings.snap_angle),
-                format!("Smooth speed: {} degrees/sec", settings.smooth_speed),
-                format!("Psi pointer: {}", on_off(settings.psi_pointer)),
-                "Reset turning defaults".to_owned(),
-            ]
-        };
-        for (i, label) in labels.iter().enumerate() {
+        for (i, label) in row_labels(&settings, self.tab).iter().enumerate() {
             canvas
                 .text_native_fit(
                     layout.rows[i],
@@ -271,90 +198,128 @@ impl OptionsPanel {
     }
 }
 
+fn on_off(on: bool) -> &'static str {
+    if on { "On" } else { "Off" }
+}
+
+fn percent(value: f32) -> String {
+    format!("{:.0}%", value * 100.0)
+}
+
+fn row_labels(pc: &PcSettings, tab: usize) -> Vec<String> {
+    match tab {
+        0 => vec![
+            format!("Mouse sensitivity: {}x", pc.mouse_sensitivity),
+            format!("Invert mouse: {}", on_off(pc.invert_mouse_y)),
+            "Reset control defaults".to_owned(),
+        ],
+        1 => vec![
+            format!("Field of view: {} degrees", pc.field_of_view),
+            format!("Brightness: {:.1}", pc.brightness),
+            format!("Fullscreen: {}", on_off(pc.fullscreen)),
+            format!("VSync: {}", on_off(pc.vsync)),
+            "Reset display defaults".to_owned(),
+        ],
+        _ => vec![
+            format!("Master volume: {}", percent(pc.master_volume)),
+            format!("Music volume: {}", percent(pc.music_volume)),
+            format!("Effects volume: {}", percent(pc.effects_volume)),
+            "Reset audio defaults".to_owned(),
+        ],
+    }
+}
+
+fn change(pc: &mut PcSettings, tab: usize, row: usize) {
+    let defaults = PcSettings::default();
+    match (tab, row) {
+        (0, 0) => pc.mouse_sensitivity = cycle(pc.mouse_sensitivity, &MOUSE_SENSITIVITIES),
+        (0, 1) => pc.invert_mouse_y = !pc.invert_mouse_y,
+        (0, 2) => {
+            pc.mouse_sensitivity = defaults.mouse_sensitivity;
+            pc.invert_mouse_y = defaults.invert_mouse_y;
+        }
+        (1, 0) => pc.field_of_view = cycle(pc.field_of_view, &FIELDS_OF_VIEW),
+        (1, 1) => pc.brightness = cycle(pc.brightness, &BRIGHTNESSES),
+        (1, 2) => pc.fullscreen = !pc.fullscreen,
+        (1, 3) => pc.vsync = !pc.vsync,
+        (1, 4) => {
+            pc.field_of_view = defaults.field_of_view;
+            pc.brightness = defaults.brightness;
+            pc.fullscreen = defaults.fullscreen;
+            pc.vsync = defaults.vsync;
+        }
+        (2, 0) => pc.master_volume = cycle(pc.master_volume, &VOLUMES),
+        (2, 1) => pc.music_volume = cycle(pc.music_volume, &VOLUMES),
+        (2, 2) => pc.effects_volume = cycle(pc.effects_volume, &VOLUMES),
+        (2, 3) => {
+            pc.master_volume = defaults.master_volume;
+            pc.music_volume = defaults.music_volume;
+            pc.effects_volume = defaults.effects_volume;
+        }
+        _ => {}
+    }
+}
+
+/// The step after `value`, wrapping; an off-list value restarts at the first.
 fn cycle(value: f32, values: &[f32]) -> f32 {
-    values[(values.iter().position(|v| *v == value).unwrap_or(0) + 1) % values.len()]
+    let current = values.iter().position(|v| (*v - value).abs() < 1e-4);
+    current.map_or(values[0], |i| values[(i + 1) % values.len()])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::user_settings::{RoomscaleMode, SpeedBoostMode};
-    #[test]
-    fn retail_hit_regions_disable_unimplemented_tabs() {
-        let panel = OptionsPanel::default();
-        let layout = OptionsLayout {
+
+    fn layout() -> OptionsLayout {
+        OptionsLayout {
             tabs: TABS.to_vec(),
             frame: FRAME.to_vec(),
             rows: ROWS.to_vec(),
-        };
-        assert_eq!(
-            panel.hit(&layout, vec2(320.0, 440.0)),
-            Some(OptionsEvent::Done)
-        );
-        assert_eq!(
-            panel.hit(&layout, vec2(230.0, 30.0)),
-            Some(OptionsEvent::Tab(1))
-        );
-        assert_eq!(panel.hit(&layout, vec2(400.0, 30.0)), None);
-        assert_eq!(
-            panel.hit(&layout, vec2(320.0, 80.0)),
-            Some(OptionsEvent::Row(0))
-        );
+        }
     }
 
     #[test]
-    fn comfort_cycles_speed_boosts_and_reset_restores_slow_world() {
+    fn three_pc_tabs_are_live_and_the_fourth_slot_is_inert() {
         let panel = OptionsPanel::default();
-        let mut settings = UserSettings::default();
-        assert_eq!(settings.vr.speed_boosts, SpeedBoostMode::SlowWorld);
-        panel.change(&mut settings, 7);
-        assert_eq!(settings.vr.speed_boosts, SpeedBoostMode::Classic);
-        panel.change(&mut settings, 9);
-        assert_eq!(settings.vr.speed_boosts, SpeedBoostMode::SlowWorld);
+        let layout = layout();
+        assert_eq!(panel.hit(&layout, vec2(320.0, 440.0)), Some(OptionsEvent::Done));
+        assert_eq!(panel.hit(&layout, vec2(400.0, 30.0)), Some(OptionsEvent::Tab(2)));
+        assert_eq!(panel.hit(&layout, vec2(560.0, 30.0)), None);
+        assert_eq!(panel.hit(&layout, vec2(320.0, 80.0)), Some(OptionsEvent::Row(0)));
     }
 
     #[test]
-    fn comfort_cycles_roomscale_and_reset_restores_auto() {
+    fn rows_past_a_tabs_last_setting_do_not_hit() {
         let panel = OptionsPanel::default();
-        let layout = OptionsLayout::default();
-        let (row, reset) = (layout.rows[8], layout.rows[9]);
-        assert_eq!(
-            panel.hit(&layout, vec2(row.x + 1.0, row.y + 1.0)),
-            Some(OptionsEvent::Row(8))
-        );
-        assert_eq!(
-            panel.hit(&layout, vec2(reset.x + 1.0, reset.y + 1.0)),
-            Some(OptionsEvent::Row(9))
-        );
-        // Clear of the save-error line drawn 38 px above the frame's bottom.
-        assert!(reset.y + reset.h <= FRAME[1].y + FRAME[1].h - 38.0);
-        let mut settings = UserSettings::default();
-        assert_eq!(settings.vr.roomscale, RoomscaleMode::Auto);
-        panel.change(&mut settings, 8);
-        assert_eq!(settings.vr.roomscale, RoomscaleMode::On);
-        panel.change(&mut settings, 8);
-        assert_eq!(settings.vr.roomscale, RoomscaleMode::Off);
-        panel.change(&mut settings, 9);
-        assert_eq!(settings.vr.roomscale, RoomscaleMode::Auto);
+        let layout = layout();
+        let beyond = layout.rows[3];
+        assert_eq!(panel.hit(&layout, vec2(beyond.x + 1.0, beyond.y + 1.0)), None);
     }
 
     #[test]
-    fn controls_toggle_the_psi_pointer_and_reset_stays_turning_only() {
-        let panel = OptionsPanel {
-            tab: 1,
-            error: false,
-        };
-        let layout = OptionsLayout::default();
-        let reset = layout.rows[4];
-        assert_eq!(
-            panel.hit(&layout, vec2(reset.x + 1.0, reset.y + 1.0)),
-            Some(OptionsEvent::Row(4))
-        );
-        let mut settings = UserSettings::default();
-        assert!(settings.vr.psi_pointer, "on by default");
-        panel.change(&mut settings, 3);
-        assert!(!settings.vr.psi_pointer);
-        panel.change(&mut settings, 4);
-        assert!(!settings.vr.psi_pointer);
+    fn controls_cycle_sensitivity_and_reset() {
+        let mut pc = PcSettings::default();
+        change(&mut pc, 0, 0);
+        assert_eq!(pc.mouse_sensitivity, 1.25);
+        change(&mut pc, 0, 1);
+        assert!(pc.invert_mouse_y);
+        change(&mut pc, 0, 2);
+        assert_eq!(pc, PcSettings::default());
+    }
+
+    #[test]
+    fn display_and_audio_rows_change_their_own_settings() {
+        let mut pc = PcSettings::default();
+        change(&mut pc, 1, 0);
+        assert_eq!(pc.field_of_view, 50.0);
+        change(&mut pc, 1, 1);
+        assert_eq!(pc.brightness, 1.6);
+        change(&mut pc, 1, 2);
+        assert!(pc.fullscreen);
+        change(&mut pc, 2, 0);
+        assert_eq!(pc.master_volume, 0.0, "100% wraps to mute");
+        change(&mut pc, 2, 3);
+        assert_eq!(pc.master_volume, 1.0);
+        assert!(pc.fullscreen, "audio reset leaves display alone");
     }
 }

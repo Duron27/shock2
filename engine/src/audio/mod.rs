@@ -13,6 +13,9 @@ use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, SpatialSink};
 /// without taking its own rodio dependency.
 pub use rodio::source::Source as AudioSource;
 
+pub mod levels;
+pub use levels::{Bus, bus_gain, set_volume_levels};
+use levels::Levels;
 use crate::audio_log;
 use tracing::trace;
 
@@ -683,7 +686,7 @@ where
                 .next_clip(self.next_music_cue.clone());
             if let Some(next_song) = maybe_next {
                 let sink = rodio::Sink::try_new(&self.handle).unwrap();
-                next_song.add_to_sink(&sink);
+                next_song.add_to_sink_on(&sink, Bus::Music);
                 sink.play();
                 self.next_music_cue = None;
                 self.background_music = Some(sink);
@@ -715,15 +718,15 @@ impl AudioClip {
 
     fn add_to_sink_looping(&self, sink: &Sink) {
         match &self.source {
-            SourceType::Bytes(source) => sink.append(source.clone().repeat_infinite()),
-            SourceType::Raw(source) => sink.append(source.clone().repeat_infinite()),
+            SourceType::Bytes(source) => sink.append(Levels::new(source.clone().repeat_infinite(), Bus::Effects)),
+            SourceType::Raw(source) => sink.append(Levels::new(source.clone().repeat_infinite(), Bus::Effects)),
         }
     }
 
     fn add_to_spatial_sink_looping(&self, sink: &SpatialSink) {
         match &self.source {
-            SourceType::Bytes(source) => sink.append(source.clone().repeat_infinite()),
-            SourceType::Raw(source) => sink.append(source.clone().repeat_infinite()),
+            SourceType::Bytes(source) => sink.append(Levels::new(source.clone().repeat_infinite(), Bus::Effects)),
+            SourceType::Raw(source) => sink.append(Levels::new(source.clone().repeat_infinite(), Bus::Effects)),
         }
     }
     /// Playback length of the clip, if the underlying source knows it.
@@ -733,14 +736,17 @@ impl AudioClip {
 
     pub fn add_to_spatial_sink(&self, sink: &SpatialSink) {
         match &self.source {
-            SourceType::Bytes(source) => sink.append(source.clone()),
-            SourceType::Raw(source) => sink.append(source.clone()),
+            SourceType::Bytes(source) => sink.append(Levels::new(source.clone(), Bus::Effects)),
+            SourceType::Raw(source) => sink.append(Levels::new(source.clone(), Bus::Effects)),
         }
     }
     pub fn add_to_sink(&self, sink: &Sink) {
+        self.add_to_sink_on(sink, Bus::Effects)
+    }
+    fn add_to_sink_on(&self, sink: &Sink, bus: Bus) {
         match &self.source {
-            SourceType::Bytes(source) => sink.append(source.clone()),
-            SourceType::Raw(source) => sink.append(source.clone()),
+            SourceType::Bytes(source) => sink.append(Levels::new(source.clone(), bus)),
+            SourceType::Raw(source) => sink.append(Levels::new(source.clone(), bus)),
         }
     }
 
@@ -753,17 +759,17 @@ impl AudioClip {
         // notice.
         match (&self.source, settings.looping) {
             (SourceType::Bytes(source), false) => {
-                sink.append(ChannelVolume::new(source.clone(), channel_volumes))
+                sink.append(ChannelVolume::new(Levels::new(source.clone(), Bus::Effects), channel_volumes))
             }
             (SourceType::Raw(source), false) => {
-                sink.append(ChannelVolume::new(source.clone(), channel_volumes))
+                sink.append(ChannelVolume::new(Levels::new(source.clone(), Bus::Effects), channel_volumes))
             }
             (SourceType::Bytes(source), true) => sink.append(ChannelVolume::new(
-                source.clone().repeat_infinite(),
+                Levels::new(source.clone().repeat_infinite(), Bus::Effects),
                 channel_volumes,
             )),
             (SourceType::Raw(source), true) => sink.append(ChannelVolume::new(
-                source.clone().repeat_infinite(),
+                Levels::new(source.clone().repeat_infinite(), Bus::Effects),
                 channel_volumes,
             )),
         }
@@ -916,7 +922,7 @@ pub fn play_streaming_audio<TAmbientKey: Hash + Eq + Copy, TCue: Clone>(
         sink.pause();
     }
     sink.set_volume(settings.gain);
-    sink.append(ChannelVolume::new(source, settings.channel_gains.to_vec()));
+    sink.append(ChannelVolume::new(Levels::new(source, Bus::Master), settings.channel_gains.to_vec()));
     context
         .handle_to_sink
         .insert(id, SinkAdapter::fixed(sink, true, false));

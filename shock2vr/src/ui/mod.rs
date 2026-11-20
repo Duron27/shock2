@@ -1208,9 +1208,10 @@ where
 }
 
 thread_local! {
-    static BENT_STRIPS: std::cell::RefCell<
+    // `ManuallyDrop`: never deleted at exit, after the GL context is gone.
+    static BENT_STRIPS: std::mem::ManuallyDrop<std::cell::RefCell<
         std::collections::HashMap<Vec<u32>, Rc<Box<dyn engine::scene::Geometry>>>,
-    > = Default::default();
+    >> = Default::default();
 }
 
 /// The unit quad placed by `local`, cut into columns and carried onto the

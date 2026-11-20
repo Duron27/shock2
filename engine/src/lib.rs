@@ -2,6 +2,7 @@ pub mod assets;
 pub mod audio;
 mod builtin_font;
 pub mod dds;
+pub mod gamma;
 mod engine;
 pub mod file_system;
 mod font;

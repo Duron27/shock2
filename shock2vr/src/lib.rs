@@ -200,6 +200,13 @@ pub const DEFAULT_FOV_DEG: f32 = 45.0;
 pub const NEAR_PLANE: f32 = 0.03;
 pub const FAR_PLANE: f32 = 1000.0;
 
+/// The flat vertical FOV this frame: the player's Options setting, through
+/// the dev-param override. The projection, the viewmodel mapping and the
+/// reticle all read it, so they never disagree.
+pub(crate) fn flat_fov_deg() -> f32 {
+    resolve_fov_deg(user_settings::get().pc.field_of_view)
+}
+
 /// Resolves `base` against `dev_params::FOV_OVERRIDE_DEG`: `0` (its default)
 /// means "no override - use `base`"; any positive value forces that FOV
 /// instead. Shared by `Game::desired_fov_deg` and the `App::MissingAssets`
@@ -1797,6 +1804,9 @@ impl Game {
         actions: &mut input::InputActionState,
     ) {
         let _profile = perf::scope(perf::Phase::GameUpdate);
+        // The Options menu's volume levels reach every playing sound live.
+        let pc = user_settings::get().pc;
+        engine::audio::set_volume_levels(pc.master_volume, pc.music_volume, pc.effects_volume);
         // Record the raw input first, ahead of every early return, so a
         // replay feeds `update` exactly what the runtime did.
         if actions.just_triggered(input::InputAction::ToggleInputRecording) {
@@ -3137,14 +3147,14 @@ impl Game {
     }
 
     /// Vertical FOV (degrees) the flat runtimes should build their projection
-    /// matrix with this frame: [`DEFAULT_FOV_DEG`], unless
+    /// matrix with this frame: the player's Options field of view, unless
     /// `dev_params::FOV_OVERRIDE_DEG` forces a value live for testing without
     /// a rebuild.
     ///
     /// VR is explicitly out of scope: OpenXR view FOVs must be used as-is, so
     /// `oculus_runtime` does not read this.
     pub fn desired_fov_deg(&self) -> f32 {
-        resolve_fov_deg(DEFAULT_FOV_DEG)
+        flat_fov_deg()
     }
 
     /// Height (world units) of the player collider's center above the surface
@@ -4002,7 +4012,7 @@ impl App {
     pub fn desired_fov_deg(&self) -> f32 {
         match self {
             App::Ready(game) => game.desired_fov_deg(),
-            App::MissingAssets(_) => resolve_fov_deg(DEFAULT_FOV_DEG),
+            App::MissingAssets(_) => flat_fov_deg(),
         }
     }
 

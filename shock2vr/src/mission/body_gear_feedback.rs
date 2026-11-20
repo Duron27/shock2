@@ -117,7 +117,8 @@ fn lit_segments(fraction: f32) -> usize {
 
 thread_local! {
     // Reuse one small annulus geometry; changing state changes only its color.
-    static RING: std::rc::Rc<Box<dyn scene::Geometry>> = {
+    // `ManuallyDrop`: never deleted at exit, after the GL context is gone.
+    static RING: std::mem::ManuallyDrop<std::rc::Rc<Box<dyn scene::Geometry>>> = std::mem::ManuallyDrop::new({
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         for i in 0..=48 {
@@ -128,7 +129,7 @@ thread_local! {
             if i < 48 { let a = i*2; indices.extend([a, a+2, a+1, a+1, a+2, a+3]); }
         }
         std::rc::Rc::new(Box::new(scene::indexed_mesh::create(vertices, indices)))
-    };
+    });
 }
 
 /// Shared by chest storage and the ammo pouch; readiness does not color idle
@@ -176,7 +177,7 @@ pub(super) fn item_badge(
     let mut ring = RING.with(|geometry| {
         SceneObject::create(
             std::cell::RefCell::new(scene::color_material::create(color.truncate())),
-            geometry.clone(),
+            std::rc::Rc::clone(geometry),
         )
     });
     ring.set_transparency(Some(1.0 - color.w));

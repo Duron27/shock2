@@ -832,15 +832,16 @@ pub fn body(
             * Matrix4::from_scale(scale)
             * Matrix4::from_translation(-center);
     thread_local! {
-        static BLANK: Rc<engine::texture::Texture> = Rc::new(engine::texture::init_from_memory(
+        // `ManuallyDrop`: never deleted at exit, after the GL context is gone.
+        static BLANK: std::mem::ManuallyDrop<Rc<engine::texture::Texture>> = std::mem::ManuallyDrop::new(Rc::new(engine::texture::init_from_memory(
             engine::texture_format::RawTextureData {
                 bytes: vec![26, 30, 33, 255], width: 1, height: 1,
                 format: engine::texture_format::PixelFormat::RGBA,
-            }));
+            })));
     }
     let material = BLANK.with(|texture| {
         Rc::new(RefCell::new(basic_material::create_with_fixed_ambient(
-            texture.clone() as Rc<dyn TextureTrait>,
+            Rc::clone(texture) as Rc<dyn TextureTrait>,
             0.8,
             0.0,
         )))

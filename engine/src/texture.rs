@@ -424,8 +424,9 @@ pub fn init2(buffer: &[u8], format: &dyn TextureFormat) -> Texture {
 thread_local! {
     /// Uploaded once per thread, on first use. Needs a live GL context, which
     /// rules out a `const`/`static` (the `shared_builtin_font` pattern).
-    static WHITE_PIXEL: std::cell::RefCell<Option<Rc<Texture>>> =
-        const { std::cell::RefCell::new(None) };
+    /// `ManuallyDrop`: never deleted at exit, after the GL context is gone.
+    static WHITE_PIXEL: std::mem::ManuallyDrop<std::cell::RefCell<Option<Rc<Texture>>>> =
+        const { std::mem::ManuallyDrop::new(std::cell::RefCell::new(None)) };
 }
 
 /// A 1x1 opaque white texture, uploaded on first use.

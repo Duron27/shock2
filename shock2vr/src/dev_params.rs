@@ -527,13 +527,13 @@ dev_params! {
     /// Outer cone half-angle in degrees; the hotspot radius uses half of it.
     SPOTLIGHT_CONE = Lighting::float("spotlight_cone", "Spotlight cone", 20.0, 5.0, 60.0, 1.0),
     SPOTLIGHT_RANGE = Lighting::float("spotlight_range", "Spotlight range", 10.0, 1.0, 20.0, 0.5),
-    /// Multiplies every object light's brightness. The default 1.0 is the
-    /// faithful value - brightness as authored, divided back down for our
-    /// smaller world units - and exists to be turned up when the authored
-    /// answer reads too dark on a modern display. Objects are legitimately
+    /// Multiplies every object light's brightness. 1.0 is brightness as
+    /// authored, divided back down for our smaller world units; the default
+    /// 1.7 matches a NewDark reference capture of earth.mis's intro tram,
+    /// whose floor otherwise read near-black. Objects are legitimately
     /// dimmer than the walls behind them (lightmapped surfaces never fall
     /// fully dark, objects do), so this is a taste knob, not a correction.
-    OBJECT_LIGHT_BRIGHTNESS = Lighting::float("object_light_brightness", "Obj light", 1.0, 0.0, 8.0, 0.1),
+    OBJECT_LIGHT_BRIGHTNESS = Lighting::float("object_light_brightness", "Obj light", 1.7, 0.0, 8.0, 0.1),
     /// Added to the mission's own ambient for objects only. The mission floor
     /// is often very low (medsci1 authors 0.078), which is faithful but leaves
     /// an object with no light on it nearly black; raise this to lift the
@@ -633,7 +633,7 @@ dev_params! {
     WORLD_TIME_SCALE = Root::float("world_time_scale", "World time scale", 1.0, 0.1, 1.0, 0.05),
     /// Smaller values shrink the world; gloves and held items retain their physical size.
     /// Applies while standing with enough room after resuming play; no level reload.
-    WORLD_SCALE = Camera::float("world_scale", "World scale", 0.85, 0.5, 1.5, 0.01),
+    WORLD_SCALE = Camera::float("world_scale", "World scale", 1.0, 0.5, 1.5, 0.01),
     /// `world_time_scale` at or below which a projectile created then is in
     /// slow time: fast shots travel with a bullet drawn and every projectile
     /// trails. Above it, projectiles behave as in normal play.
