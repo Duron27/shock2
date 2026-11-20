@@ -137,6 +137,7 @@ impl Engine for Renderer {
             let _shadows =
                 crate::scene::point_shadow::render_atlas(self, render_context, scene);
             let view = util::compute_view_matrix_from_render_context(render_context);
+            crate::scene::fog::set_frame(&view, scene.fog_density);
             self.draw_layers(
                 render_context,
                 &view,

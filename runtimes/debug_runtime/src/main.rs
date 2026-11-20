@@ -1231,6 +1231,7 @@ fn run_game_blocking(
             scene_for_render.point_shadows,
             scene_for_render.point_shadow_strength,
         ) = game.get_shadow_lights();
+        scene_for_render.fog_density = game.fog_density();
 
         // Actually render the scene (through the Options menu's Brightness,
         // like the desktop runtime, so screenshots match what a player sees).

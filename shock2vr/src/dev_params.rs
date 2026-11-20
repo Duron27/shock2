@@ -567,6 +567,10 @@ dev_params! {
     /// How much of a shadowing lamp's light the world loses under an
     /// object's shadow (objects themselves are always fully occluded).
     POINT_SHADOW_STRENGTH = Lighting::float("point_shadow_strength", "Shadow strength", 1.0, 0.0, 1.0, 0.05),
+    /// Distance darkness: lit surfaces keep exp(-density * distance) of
+    /// their light, so far corridors fall into black (0 off). Not in the
+    /// original; part of this port's horror look.
+    DISTANCE_DARKNESS = Lighting::float("distance_darkness", "Distance dark", 0.04, 0.0, 0.1, 0.005),
     /// Darkening toward the screen edges (0 off). Not in the original: part
     /// of this port's horror grade, applied in the final screen copy.
     SCREEN_VIGNETTE = Lighting::float("screen_vignette", "Vignette", 0.5, 0.0, 1.0, 0.05),

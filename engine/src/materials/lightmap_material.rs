@@ -175,12 +175,14 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             // mask/coverage composition and move that mask with the diffuse.
             fragColor = applyShine(base, vec3(0.0), specular, 1.0,
                 texCoord + diffuseUvOffset, worldPos, normal);
+            if (!unlit) fragColor.rgb *= fogFactor(worldPos);
         }
 "#;
 
 struct UnifiedUniforms {
     shine: ShineUniforms,
     point_shadow: crate::scene::point_shadow::Uniforms,
+    fog: crate::scene::fog::Uniforms,
     world_wave: crate::scene::world_wave::Uniforms,
     uv_offset_loc: gfx::Uniform,
     unlit_loc: gfx::Uniform,
@@ -335,6 +337,7 @@ impl LightmapMaterial {
         shader_program.bind();
         uniforms.world_wave.bind(render_context.world_wave);
         uniforms.point_shadow.bind(lights, render_context);
+        uniforms.fog.bind();
         let strength = render_context.terrain_wetness;
         let shine = self
             .shine
@@ -478,8 +481,9 @@ impl Material for LightmapMaterial {
                 &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
 
             let fragment_shader = &format!(
-                "{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}",
                 crate::scene::point_shadow::GLSL,
+                crate::scene::fog::GLSL,
                 crate::scene::environment::GLSL,
                 crate::scene::shine::GLSL,
                 include_str!("../scene/flashlight.glsl"),
@@ -492,6 +496,7 @@ impl Material for LightmapMaterial {
             let uniforms = UnifiedUniforms {
                 shine: ShineUniforms::new(&shader),
                 point_shadow: crate::scene::point_shadow::Uniforms::new(&shader),
+                fog: crate::scene::fog::Uniforms::new(&shader),
                 layer_color_alpha_loc: shader.uniform("layerColorAlpha"),
                 layer_enabled_loc: shader.uniform("layerEnabled"),
                 layer_alpha_test_loc: shader.uniform("layerAlphaTest"),

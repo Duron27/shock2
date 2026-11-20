@@ -600,6 +600,7 @@ pub fn main() {
             scene_for_render.point_shadows,
             scene_for_render.point_shadow_strength,
         ) = game.get_shadow_lights();
+        scene_for_render.fog_density = game.fog_density();
 
         {
             renderer.resize(fb_width as u32, fb_height as u32);

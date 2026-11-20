@@ -181,6 +181,7 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             vec4 shaded = applyShine(vec4(finalColor, texColor.a * (1.0 - transparency)), light, specular, 1.0 - transparency, texCoord, worldPos, normal);
 
             fragColor = applyMaterialPass(applyIncidence(shaded, texColor, worldPos, worldNormal), texColor, worldPos, worldNormal);
+            fragColor.rgb *= fogFactor(worldPos);
         }
 "#;
 
@@ -188,6 +189,7 @@ struct UnifiedUniforms {
     world_wave: crate::scene::world_wave::Uniforms,
     self_depth: super::self_depth::Uniforms,
     point_shadow: super::point_shadow::Uniforms,
+    fog: super::fog::Uniforms,
     incidence: IncidenceUniforms,
     render_pass: super::render_pass::Uniforms,
     shine: ShineUniforms,
@@ -276,6 +278,7 @@ where
         uniforms.world_wave.bind(render_context.world_wave);
         uniforms.self_depth.bind(render_context.self_depth);
         uniforms.point_shadow.bind(lights, render_context);
+        uniforms.fog.bind();
         uniforms
             .incidence
             .bind(self.incidence.as_ref(), render_context, view_matrix);
@@ -439,9 +442,10 @@ where
                 &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
 
             let fragment_shader = &format!(
-                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 include_str!("flashlight.glsl"),
                 super::point_shadow::GLSL,
+                super::fog::GLSL,
                 super::self_depth::GLSL,
                 super::incidence::GLSL,
                 super::environment::GLSL,
@@ -461,6 +465,7 @@ where
                 world_wave: crate::scene::world_wave::Uniforms::new(&shader),
                 self_depth: super::self_depth::Uniforms::new(&shader),
                 point_shadow: super::point_shadow::Uniforms::new(&shader),
+                fog: super::fog::Uniforms::new(&shader),
                 incidence: IncidenceUniforms::new(&shader),
                 render_pass: super::render_pass::Uniforms::new(&shader),
                 shine: ShineUniforms::new(&shader),

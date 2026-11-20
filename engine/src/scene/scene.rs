@@ -20,6 +20,9 @@ pub struct Scene {
 
     /// How much of an object-cast shadow's lamp the world loses, 0..1.
     pub point_shadow_strength: f32,
+
+    /// Distance darkness density (see [`fog`](super::fog)); 0 is off.
+    pub fog_density: f32,
 }
 
 impl Scene {
@@ -30,6 +33,7 @@ impl Scene {
             lights: LightArray::new(),
             point_shadows: Vec::new(),
             point_shadow_strength: 0.0,
+            fog_density: 0.0,
         }
     }
 
@@ -40,6 +44,7 @@ impl Scene {
             lights: LightArray::new(),
             point_shadows: Vec::new(),
             point_shadow_strength: 0.0,
+            fog_density: 0.0,
         }
     }
 

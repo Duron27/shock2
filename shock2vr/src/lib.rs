@@ -3108,6 +3108,15 @@ impl Game {
         self.active_game_scene.get_hand_lights(&self.options)
     }
 
+    /// Distance darkness density for `Scene::fog_density` (0 in menus and
+    /// while loading, where there is no world to fade).
+    pub fn fog_density(&self) -> f32 {
+        if self.pending_save_load.is_some() {
+            return 0.0;
+        }
+        dev_params::get(dev_params::DISTANCE_DARKNESS)
+    }
+
     /// The screen grade `[vignette, grain, contrast, saturation]` for
     /// `Renderer::set_grade`.
     pub fn screen_grade(&self) -> [f32; 4] {
@@ -3964,6 +3973,13 @@ impl App {
         match self {
             App::Ready(game) => game.get_shadow_lights(),
             App::MissingAssets(_) => (Vec::new(), 0.0),
+        }
+    }
+
+    pub fn fog_density(&self) -> f32 {
+        match self {
+            App::Ready(game) => game.fog_density(),
+            App::MissingAssets(_) => 0.0,
         }
     }
 
