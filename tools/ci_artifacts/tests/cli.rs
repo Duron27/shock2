@@ -37,7 +37,7 @@ elif a[:3] == ['run', 'download', '42']:
     assert name.startswith('shock2quest-runtime-') and name.endswith('-' + sha), name
     out = Path(a[a.index('-D') + 1]); out.mkdir(parents=True)
     with tarfile.open(out / 'runtime.tar.gz', 'w:gz') as tar:
-        for bin in ['debug_runtime', 'dark_query', 'dark_explorer']:
+        for bin in ['debug_runtime', 'dark_query']:
             script = ('#!/bin/sh\necho %s "$@"\n' % bin).encode()
             info = tarfile.TarInfo(bin); info.size = len(script); info.mode = 0o755
             tar.addfile(info, io.BytesIO(script))
@@ -116,8 +116,8 @@ fn prints_a_cached_path_and_reuses_a_build_only_past_ignored_changes() {
 #[test]
 fn run_execs_a_ci_binary_with_the_remaining_arguments() {
     let h = Harness::new();
-    let out = h.run(&["--run", "dark_explorer", "7", "ui", "--belt-card"]);
-    assert_eq!(stdout(out), "dark_explorer ui --belt-card\n");
+    let out = h.run(&["--run", "dark_query", "7", "entities", "earth.mis"]);
+    assert_eq!(stdout(out), "dark_query entities earth.mis\n");
     assert!(
         h.command(&["--run", "desktop_runtime", "7"])
             .output()

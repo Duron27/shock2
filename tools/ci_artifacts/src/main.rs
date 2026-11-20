@@ -13,7 +13,7 @@ struct Cli {
     target: String,
     /// Run this binary with the remaining arguments instead of printing
     /// debug_runtime's path
-    #[arg(long, value_parser = ["debug_runtime", "dark_query", "dark_explorer"])]
+    #[arg(long, value_parser = ["debug_runtime", "dark_query"])]
     run: Option<String>,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, requires = "run")]
     args: Vec<String>,

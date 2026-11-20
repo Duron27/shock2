@@ -161,40 +161,9 @@ the exception is no longer needed. Resource owners may need to live until
 drop even when never read; binary-format fields and other-platform code also
 need review before removal.
 
-### Song explorer
+### Scene lighting stations
 
-Open `cargo dx ui --select song/engsong.snc` (or select a `.snc` in the
-explorer's song family or Archives tab). **Play song** sends the authored start
-event; **Stop** cuts off the current WAV immediately. Event buttons queue the
-latest event for the next clip boundary. `theme ...` events persist across clip
-boundaries until another theme is selected; other events are one-shot. Restart
-clears the previous theme and selects the authored start event.
-
-The view lists section WAVs, event branches and normalized branch probabilities.
-Green marks the playing section; blue marks the branch the player actually took.
-Recent transitions show the requested event, matched/default option and selected
-weight. **Audition WAV** stops the song and plays that sample alone. Changing
-assets or tabs stops playback.
-
-For native-window capture, `--play-song --screenshot /tmp/song.png
---screenshot-after 1` starts the selected song and captures after one second.
-Playback uses the audio device clock; these captures are not fixed-timestep.
-The installed-asset regression can be run with
-`cargo test -p dark_explorer mounted_songs -- --ignored`.
-
-### Model viewer lighting
-
-In `cargo dx ui`, expand **Lighting** above a model preview to adjust ambient
-light, the strength of three fixed spotlights, and their colors. The lights
-stay fixed as you orbit; **Reset lighting** restores ambient-only viewing.
-The rig uses the game's object-lighting shader and inverse-distance falloff.
-Unlit material passes remain independent of those controls.
-
-For repeatable previews, use `--model-ambient 0.08 --model-lights cool` with
-`--select obj/eggcl.bin`. The light preset accepts `off`, `warm`, `cool`, `green`,
-or `all`; `--screenshot /absolute/path.png` captures the result.
-
-`debug_annelid` also has white, warm, cool and green station lights. Its lamps
+`debug_annelid` has white, warm, cool and green station lights. Its lamps
 and egg/grub highlights respond to **Developer → Lighting**, including object
 lighting, ambient/level intensity, brightness, ambient boost and wrap. This
 scene supplies synthetic object lights because it has no mission light table;
@@ -212,84 +181,6 @@ there is no texture-resolution limit or additional texture sample. World
 positions and beam math retain high precision on GLES to avoid stepped light
 motion and cone bands on Quest. Authored object lights keep their original
 cone and inverse-distance falloff.
-
-### Weapon parts and Nightdive animations in `dark_explorer`
-
-Run `cargo dx ui` and select `obj/atek_h.bin` (pistol), `obj/sg_h.bin`
-(shotgun), or `obj/ar15_h.bin` (assault rifle). **Parts and joints** and the
-Nightdive clip picker appear automatically; no articulation flag is required.
-Select `reload`, `shoot`, or `raise`, then play/pause or scrub the frame slider.
-Turn off **Whole-weapon motion** to study the mechanical parts in a fixed frame.
-This is an asset preview; clip sound, flash, and casing events do not spawn effects.
-
-Each sub-object has a visibility checkbox and **Solo** button. Sliders drive
-its authored scalar parameter (Nightdive's one-based `joint1`, `joint2`, etc.;
-this number can differ from the zero-based sub-object index). Moving a slider
-switches to manual posing. **Rest pose** resets all parameters, **Show all**
-restores geometry, and **Frame visible** fits the selected geometry to the camera.
-Hidden parents still transform visible children.
-
-Materials can be hidden or isolated too. To inspect just the pistol magazine,
-use **Solo** beside `ND-ammo1.psd`: the magazine shares `joint2` with a hand, but
-has its own material. For the AR15, use **Solo** beside sub-object
-`2: @s02_cli`, driven by `joint3`; its material is shared with the rifle body.
-These are preview selections, not exported meshes or physical inventory items.
-The optional **Articulation** checkbox overlays moving pivots and attachment
-markers; it does not enable the parts controls.
-
-The same initial states are available for reproducible screenshots:
-
-```bash
-cargo dx ui --select obj/atek_h.bin --isolate-material ND-ammo1.psd
-cargo dx ui --select obj/ar15_h.bin --isolate-joint 2
-cargo dx ui --select obj/atek_h.bin --joint 2=-2
-cargo dx ui --select obj/ar15_h.bin --weapon-clip reload --advance 0.5 --screenshot /tmp/ar15-reload.png
-```
-
-To adjust how the extracted pistol magazine sits in the glove, open **VR Setup
-→ Hand grips → Magazines**, or jump directly to it:
-
-```bash
-cargo dx ui --grip atek_h_magazine --grip-hand left
-cargo dx ui --grip atek_h_magazine --grip-hand right
-```
-
-`ar15_h_magazine` opens the rifle magazine. The preview uses the same extracted,
-centered mesh as the ammo pouch. First opening prepares automatic grip drafts;
-adjust position, rotation and finger curls for each hand, then **Save all edits**.
-The overrides are stored in `assets/vr-magazine-grips.json`. Restart gameplay to
-load them, and include that resource when deploying to Quest. **Save As** writes
-a separate library; copy it to that canonical path to use it in game.
-
-Magazine size follows the source weapon rather than an independent size slider.
-The editor previews the weapon scale for the opposite hand. An empty or missing
-magazine grip library keeps the existing automatic fit; normal ammo pickups and
-the gun's grip are unaffected. If you resize a weapon, review its magazine's
-finger curls again.
-
-All hand-grip editors allow **Thumb** values from **−1 to 1**: zero is the open
-pose, positive values curl inward, and negative values extend outward past open.
-The **Thumbs up** preset uses −0.5 with the other fingers closed. This works for
-both hands, primary/support grips, and separate Rest/Trigger pressed poses.
-The other fingers remain in 0–1. Save and restart gameplay to load the pose;
-the preview and runtime share the same skeletal blend. Auto-fit continues to
-search the measured 0–1 finger arcs, leaving thumb extension for manual tuning.
-
-To audit inventory model coverage or batch-fit missing pickup poses (run from
-the repository root with the remaster data installed):
-
-```sh
-cargo dq inventory-audit --all-missions > /tmp/inventory-audit.json
-cargo run -p debug_runtime --example fit_inventory_grips -- \
-  --models beaker1,beaker2,beakew1,beakew2 \
-  --refit beaker1,beaker2,beakew1,beakew2 --scale 0.55 \
-  --output /tmp/refitted-beakers.json
-```
-
-The fitter fills only missing poses unless a model is listed in `--refit`. It
-reads `assets/vr-grips.json`, uses the production glove rig and `GripSurface`
-auto-fit path, and writes a separate output file (it refuses to overwrite one).
-Inspect the output before replacing the source library.
 
 ### Gameplay music themes
 

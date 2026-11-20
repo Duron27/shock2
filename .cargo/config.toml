@@ -2,14 +2,12 @@
 check-unused = "clippy --workspace --exclude shock2quest --all-targets --no-deps -- -A clippy::all -D dead_code -D unused_imports -D unused_variables"
 dv = "run -p dark_viewer --"
 dq = "run -p dark_query --"
-dx = "run -p dark_explorer --"
 dr = "run -p desktop_runtime --"
 dbgr = "run -p debug_runtime --"
 dbgc = "run -p debug_command --"
 # "bench" itself is a built-in cargo command, so the alias is "bn"
 bn = "run -p bench --"
-# Remote variants run the binaries CI built for a PR or ref: `cargo dxr 1234 ui`
+# Remote variants run the binaries CI built for a PR or ref: `cargo dqr 1234 entities`
 ci = "run -q -p ci_artifacts --"
-dxr = "run -q -p ci_artifacts -- --run dark_explorer"
 dqr = "run -q -p ci_artifacts -- --run dark_query"
 dbgrr = "run -q -p ci_artifacts -- --run debug_runtime"

@@ -281,54 +281,6 @@ readout). The current key and controller bindings are listed in
 
 ## Tooling Notes
 
-### VR Pose Authoring (`dark_explorer`)
-
-Use **`dark_explorer` for persistent VR asset placement edits**, including hand
-poses and the personal access card's resting pose on the battle belt. Its
-**VR Setup** tab provides Hand grips and Belt card modes:
-
-```bash
-cargo dx ui --belt-card                 # card at rest, previewed against the belt
-cargo dx ui --grip scipass              # card held in a hand
-cargo dx ui --grip atek_h --grip-hand left
-```
-
-The Belt card editor saves position (centimetres in the UI) and rotation
-(degrees) to `assets/vr-belt-card.json`; gameplay loads it when the mission
-starts. Save, then restart the game; include the asset when deploying to
-Quest. `--belt-card-library <path>` opens another resource for editing or
-preview. Save As writes a separate file; copy it to the canonical asset path
-to use it in game. The preview and runtime share `shock2vr::vr_belt` transforms,
-so rendering and the resting grab target follow the same pose.
-
-Grip poses saved on the headset live in `<data root>/vr-grip-overrides.json`
-(same format as `assets/vr-grips.json`) and win over every shipped grip at
-load. Its `support` map holds support-hand poses captured in the workbench's
-Support mode (palm anchor, wrist rotation, fingers; region, motion and radii
-stay authored in `assets/vr-support-grips.json`). Bring them into the repo with
-`cargo dvr grips pull`, then `cargo dx merge-grips vr-grip-overrides.json`
-(each pose replaces the entry the game would have used), and
-`cargo dvr grips clear` so they stop shadowing
-later asset edits. To pose with a tracked hand while the other holds a
-controller, run `cargo dvr features set multimodal on` (Quest multimodal; off by
-default).
-
-Models with the same geometry share one grip: `assets/vr-grip-classes.json`
-lists each class as an array whose **first model is canonical**. Every grip
-lookup, headset save, Explorer edit and `merge-grips` uses the canonical
-model's entry, so shipped libraries keep entries for canonical models only
-(a test enforces it; headset poses saved under a member are re-keyed on
-load). To let another member's pose win, move it first and rename its entry
-(restore it from git if it was pruned); a model taken out of a class needs a
-pose of its own (Explorer prepares one). Add a model only when its mesh
-matches the canonical one within ~1 mm at the same scale. An invalid file (a
-model in two classes, a one-model class) is logged and ignored.
-
-Developer parameters such as belt height/distance are **session-only whole-belt
-fit controls**. They do not replace asset authoring when the request is to
-adjust the card *relative to the buckle*, or a hand *relative to an item*.
-Preserve that distinction when choosing or extending a calibration tool.
-
 ### Entity, Motion & Speech Queries (`dark_query`)
 
 `cargo dq` inspects gamesys/mission data without launching the game — use it to understand entity relationships and debug complex interactions (`cargo dq --help` for full usage):
@@ -755,7 +707,7 @@ For faster development, the project includes convenient cargo aliases (defined i
 - `cargo dbgr` - Debug runtime with HTTP control (shorthand for `cargo run -p debug_runtime --`)
 - `cargo dbgc` - Debug command client (shorthand for `cargo run -p debug_command --`)
 - `cargo bn` - Benchmark CLI (shorthand for `cargo run -p bench --`; `bench` collides with the built-in cargo command)
-- `cargo dxr` / `cargo dqr` / `cargo dbgrr` - `dx` / `dq` / `dbgr` from the binaries CI built for a PR or ref, with no local build (`cargo dxr 1234 ui`; needs `gh`). `cargo ci 1234` prints that `debug_runtime`'s path. Only the build is remote: `assets/` (grips, belt, holsters) and tests come from your checkout, so check out the PR when it changes them. Refs resolve on GitHub, so push first; CI keeps builds 7 days. A flag right after the target goes to the tool, so pass the binary's own flags after `--` (`cargo dbgrr 1234 -- --mission earth.mis`)
+- `cargo dqr` / `cargo dbgrr` - `dq` / `dbgr` from the binaries CI built for a PR or ref, with no local build (`cargo dqr 1234 entities earth.mis`; needs `gh`). `cargo ci 1234` prints that `debug_runtime`'s path. Only the build is remote: `assets/` (grips, belt, holsters) and tests come from your checkout, so check out the PR when it changes them. Refs resolve on GitHub, so push first; CI keeps builds 7 days. A flag right after the target goes to the tool, so pass the binary's own flags after `--` (`cargo dbgrr 1234 -- --mission earth.mis`)
 
 Example usage:
 ```bash
