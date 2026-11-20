@@ -174,7 +174,7 @@ mod tests {
             version: RECORDING_VERSION,
             scene: "medsci1.mis".into(),
             save: "rec.sav".into(),
-            presentation: PresentationMode::Vr,
+            presentation: PresentationMode::Flat,
             experimental: vec!["physical_held_items".into()],
             glove_forward_cm: 4.0,
         };
@@ -230,7 +230,7 @@ mod tests {
             version: 1,
             scene: "medsci1.mis".into(),
             save: "rec.sav".into(),
-            presentation: PresentationMode::Vr,
+            presentation: PresentationMode::Flat,
             experimental: vec![],
             glove_forward_cm: 0.0,
         };

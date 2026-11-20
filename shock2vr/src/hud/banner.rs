@@ -154,26 +154,9 @@ pub(crate) fn flat_center() -> Vector2<f32> {
     CENTER
 }
 
-/// The plate's own canvas size for `text`, used by the VR panel.
-pub(crate) fn panel_size(text: &str) -> Vector2<f32> {
-    let rect = plate(vec2(0.0, 0.0), lines(text).len().max(1));
-    vec2(rect.w, rect.h)
-}
-
-/// The banner as the VR head panel draws it: the same plate and lines on a
-/// canvas that is exactly the plate, so the panel *is* the plate (the
-/// `message_line` pattern).
-pub(crate) fn build_banner_canvas(text: &str, alpha: f32) -> UiCanvas {
-    let size = panel_size(text);
-    let mut canvas = UiCanvas::new(size);
-    emit(&mut canvas, size / 2.0, text, alpha);
-    canvas
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::UiElement;
 
     /// CHARGEN.STR `EarthText0`, verbatim: padded first line, and the break
     /// written as the two characters `\n`.
@@ -245,61 +228,6 @@ mod tests {
     #[test]
     fn the_shipped_earth_string_becomes_two_trimmed_lines() {
         assert_eq!(lines(EARTH), ["4 Years Earlier", "Ramsey Recruitment Ctr."]);
-    }
-
-    #[test]
-    fn a_banner_is_a_plate_plus_one_text_element_per_line() {
-        let canvas = build_banner_canvas(EARTH, 1.0);
-        assert_eq!(canvas.element_count(), 3);
-        assert!(matches!(canvas.elements()[0], UiElement::Fill { .. }));
-
-        let one_line = build_banner_canvas("Wave 1", 1.0);
-        assert_eq!(one_line.element_count(), 2);
-    }
-
-    /// The fade scales everything the card draws - the plate's own translucency
-    /// included, so a half-faded card is half of 60%, not 60% of anything.
-    #[test]
-    fn the_fade_scales_the_plate_and_its_text_together() {
-        let canvas = build_banner_canvas(EARTH, 0.5);
-        let alphas: Vec<f32> = canvas
-            .elements()
-            .iter()
-            .map(|element| match element {
-                UiElement::Fill { alpha, .. } | UiElement::Text { alpha, .. } => *alpha,
-                _ => panic!("unexpected element"),
-            })
-            .collect();
-        assert_eq!(alphas, vec![PLATE_OPACITY * 0.5, 0.5, 0.5]);
-    }
-
-    /// A one-line banner gets a shorter plate; the width never changes.
-    #[test]
-    fn the_plate_grows_by_a_line_height_per_line() {
-        let one = panel_size("Wave 1");
-        let two = panel_size(EARTH);
-        assert_eq!(one.x, two.x);
-        assert_eq!(two.y - one.y, LINE_HEIGHT);
-    }
-
-    /// Every line sits inside the plate, so no glyph spills onto bare 3D view.
-    #[test]
-    fn the_lines_sit_inside_the_plate() {
-        let canvas = build_banner_canvas(EARTH, 1.0);
-        let plate = canvas.elements()[0].rect();
-        for element in &canvas.elements()[1..] {
-            let rect = element.rect();
-            assert!(plate.x <= rect.x, "{rect:?} left of the plate");
-            assert!(rect.x + rect.w <= plate.x + plate.w, "{rect:?} right of it");
-            assert!(plate.y <= rect.y, "{rect:?} above the plate");
-            assert!(rect.y + rect.h <= plate.y + plate.h, "{rect:?} below it");
-        }
-    }
-
-    /// Empty or whitespace-only text draws nothing at all - not a bare plate.
-    #[test]
-    fn an_empty_banner_draws_nothing() {
-        assert_eq!(build_banner_canvas("   \n  ", 1.0).element_count(), 0);
     }
 
     /// The VR panel hangs off the head panel, which spans the same 640x480

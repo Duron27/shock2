@@ -30,7 +30,7 @@ use engine::{assets::asset_cache::AssetCache, audio::AudioContext, scene::SceneO
 use shipyard::{EntityId, UniqueViewMut, World};
 
 use crate::{
-    GameOptions, PresentationMode,
+    GameOptions,
     game_scene::GameScene,
     input_context::InputContext,
     mission::GlobalContext,
@@ -658,23 +658,13 @@ impl GameScene for DeveloperScene {
 
     fn render(
         &mut self,
-        asset_cache: &mut AssetCache,
-        options: &GameOptions,
+        _asset_cache: &mut AssetCache,
+        _options: &GameOptions,
     ) -> (Vec<SceneObject>, Vector3<f32>, Quaternion<f32>) {
+        // The screen is drawn in screen space in `render_per_eye` (which has
+        // the screen size); the 3D scene is empty.
         let identity = Quaternion::new(1.0, 0.0, 0.0, 0.0);
-        // In flat presentation the screen is drawn in screen space in
-        // `render_per_eye` (which has the screen size); the 3D scene is empty.
-        if options.presentation_mode != PresentationMode::Vr {
-            return (Vec::new(), vec3(0.0, 0.0, 0.0), identity);
-        }
-
-        // In VR there is no screen to draw on, so the same canvas is presented
-        // on a world-space panel in front of the player.
-        let canvas = self.build_canvas(self.menu.pointer_canvas(), options.build_label);
-        let objects = self
-            .menu
-            .render_world_space(asset_cache, canvas, options.presentation_mode);
-        (objects, vec3(0.0, 0.0, 0.0), identity)
+        (Vec::new(), vec3(0.0, 0.0, 0.0), identity)
     }
 
     fn render_per_eye(
@@ -685,12 +675,6 @@ impl GameScene for DeveloperScene {
         screen_size: Vector2<f32>,
         options: &GameOptions,
     ) -> Vec<SceneObject> {
-        // In VR the screen lives on a world-space panel drawn by `render`; a
-        // screen-space copy here would paste the whole canvas over both eyes
-        // and hide it.
-        if options.presentation_mode == PresentationMode::Vr {
-            return Vec::new();
-        }
         let pointer_canvas = self.menu.screen_pointer_canvas(screen_size);
         let canvas = self.build_canvas(pointer_canvas, options.build_label);
         self.menu

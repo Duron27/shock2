@@ -282,10 +282,19 @@ mod tests {
     fn three_pc_tabs_are_live_and_the_fourth_slot_is_inert() {
         let panel = OptionsPanel::default();
         let layout = layout();
-        assert_eq!(panel.hit(&layout, vec2(320.0, 440.0)), Some(OptionsEvent::Done));
-        assert_eq!(panel.hit(&layout, vec2(400.0, 30.0)), Some(OptionsEvent::Tab(2)));
+        assert_eq!(
+            panel.hit(&layout, vec2(320.0, 440.0)),
+            Some(OptionsEvent::Done)
+        );
+        assert_eq!(
+            panel.hit(&layout, vec2(400.0, 30.0)),
+            Some(OptionsEvent::Tab(2))
+        );
         assert_eq!(panel.hit(&layout, vec2(560.0, 30.0)), None);
-        assert_eq!(panel.hit(&layout, vec2(320.0, 80.0)), Some(OptionsEvent::Row(0)));
+        assert_eq!(
+            panel.hit(&layout, vec2(320.0, 80.0)),
+            Some(OptionsEvent::Row(0))
+        );
     }
 
     #[test]
@@ -293,7 +302,10 @@ mod tests {
         let panel = OptionsPanel::default();
         let layout = layout();
         let beyond = layout.rows[3];
-        assert_eq!(panel.hit(&layout, vec2(beyond.x + 1.0, beyond.y + 1.0)), None);
+        assert_eq!(
+            panel.hit(&layout, vec2(beyond.x + 1.0, beyond.y + 1.0)),
+            None
+        );
     }
 
     #[test]

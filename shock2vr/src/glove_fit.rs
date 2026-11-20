@@ -21,12 +21,11 @@ pub(crate) fn forward_translation(rotation: Quaternion<f32>, forward_cm: f32) ->
 /// Work on a copy: callers retain raw tracking and repeated updates never drift.
 pub(crate) fn calibrated_input(
     input: &crate::input_context::InputContext,
-    presentation: crate::PresentationMode,
     fit_scene: bool,
     forward_cm: f32,
 ) -> crate::input_context::InputContext {
     let mut calibrated = input.clone();
-    if presentation == crate::PresentationMode::Vr || fit_scene {
+    if fit_scene {
         for (index, hand) in [&mut calibrated.left_hand, &mut calibrated.right_hand]
             .into_iter()
             .enumerate()
@@ -80,10 +79,7 @@ mod tests {
 
     #[test]
     fn global_forward_preserves_tracking_and_calibrates_each_hand_once() {
-        use crate::{
-            PresentationMode,
-            input_context::{InputContext, PoseTracking},
-        };
+        use crate::input_context::{InputContext, PoseTracking};
         let mut raw = InputContext::default();
         raw.left_hand.position = vec3(-0.3, 0.7, -0.4);
         raw.right_hand.position = vec3(0.3, 0.7, -0.4);
@@ -93,11 +89,11 @@ mod tests {
             head: true,
             hands: [true, true],
         });
-        for presentation in [PresentationMode::Vr, PresentationMode::Flat] {
+        {
             for fit_scene in [false, true] {
-                let first = calibrated_input(&raw, presentation, fit_scene, -15.0);
-                let again = calibrated_input(&raw, presentation, fit_scene, -15.0);
-                let zero = calibrated_input(&raw, presentation, fit_scene, 0.0);
+                let first = calibrated_input(&raw, fit_scene, -15.0);
+                let again = calibrated_input(&raw, fit_scene, -15.0);
+                let zero = calibrated_input(&raw, fit_scene, 0.0);
                 assert_eq!(first.head.position, raw.head.position);
                 assert_eq!(first.head.rotation, raw.head.rotation);
                 for (original, (actual, repeated)) in
@@ -106,7 +102,7 @@ mod tests {
                         (&first.right_hand, &again.right_hand),
                     ])
                 {
-                    let expected_meters = if presentation == PresentationMode::Vr || fit_scene {
+                    let expected_meters = if fit_scene {
                         original.rotation.rotate_vector(vec3(0.0, 0.0, 0.15))
                     } else {
                         vec3(0.0, 0.0, 0.0)
@@ -125,7 +121,7 @@ mod tests {
             }
         }
         raw.pose_tracking.as_mut().unwrap().hands[0] = false;
-        let adjusted = calibrated_input(&raw, PresentationMode::Vr, false, -15.0);
+        let adjusted = calibrated_input(&raw, true, -15.0);
         assert_eq!(adjusted.left_hand.position, raw.left_hand.position);
         assert_eq!(raw.left_hand.position, vec3(-0.3, 0.7, -0.4));
     }

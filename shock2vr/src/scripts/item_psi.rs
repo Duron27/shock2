@@ -254,12 +254,12 @@ mod tests {
     use super::*;
     use crate::runtime_props::RuntimePropTransform;
     use crate::{
-        mission::mission_core::{GlobalPresentationMode, GlobalTemplateClassTags},
+        mission::mission_core::GlobalTemplateClassTags,
         psi::{GlobalPsiPowers, PlayerPsiKnownPowers, PsiPowerInfo},
         psi_amp_selection::AmpSelection,
         quest_info::QuestInfo,
     };
-    use cgmath::{Matrix4, Point3, Quaternion, vec3};
+    use cgmath::{Matrix4, Quaternion, vec3};
     use dark::properties::PropModelName;
     use dark::properties::{Links, PropPsiPower, PropPsiState, PropScripts, PropTemplateId};
     use std::collections::{HashMap, HashSet};
@@ -353,29 +353,6 @@ mod tests {
                     | Effect::AdjustStackCount { .. }
             )
         })
-    }
-
-    #[test]
-    fn vr_targets_the_opposite_hand_in_either_configuration() {
-        let (world, request, target) = fixture(ELECTRO_PSI);
-        world.add_unique(GlobalPresentationMode(crate::PresentationMode::Vr));
-        for swapped in [false, true] {
-            if swapped {
-                let mut p = world
-                    .borrow::<shipyard::UniqueViewMut<PlayerInfo>>()
-                    .unwrap();
-                p.left_hand_entity_id = Some(request.tool);
-                p.right_hand_entity_id = Some(target);
-            }
-            assert!(
-                matches!(begin(&world, request), Effect::ApplyItemUse { target: t, .. } if t == target)
-            );
-        }
-        world
-            .borrow::<shipyard::UniqueViewMut<PlayerInfo>>()
-            .unwrap()
-            .right_hand_entity_id = None;
-        assert!(matches!(begin(&world, request), Effect::ShowMessage { .. }));
     }
     #[test]
     fn flat_begins_a_picker_without_spending_and_changed_power_invalidates_it() {
@@ -484,25 +461,6 @@ mod tests {
         assert!(
             script_util::hand_dissolve_cue(&world, target, true).is_empty(),
             "flat"
-        );
-        world.add_unique(crate::mission::GlobalPresentationMode(
-            crate::PresentationMode::Vr,
-        ));
-        assert!(matches!(
-            script_util::hand_dissolve_cue(&world, target, true).as_slice(),
-            [
-                Effect::CreateEntityByTemplateName { template_name, position, .. },
-                Effect::CreateEntity { template_id: -52, options, .. },
-                Effect::HandHaptic { hand: crate::Handedness::Left, .. },
-            ] if template_name == "sparkley sphere"
-                && *position == Point3::new(1.0, 2.0, 3.0)
-                && options.shrink_away_seconds.is_some()
-                && options.model_override.as_deref() == Some("medpatch_h")
-        ));
-        assert_eq!(
-            script_util::hand_dissolve_cue(&world, target, false).len(),
-            2,
-            "a partial stack stays in the hand"
         );
     }
 

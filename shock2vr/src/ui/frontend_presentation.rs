@@ -14,16 +14,12 @@ use super::{ScaleMode, UiCanvas, VR_COMPONENT_Z_STEP, WorldPanel};
 /// Maps an already-resolved frontend canvas into exactly one presentation.
 #[derive(Clone, Copy, Debug)]
 pub struct FrontendCanvasPresenter {
-    presentation_mode: PresentationMode,
     scale_mode: ScaleMode,
 }
 
 impl FrontendCanvasPresenter {
-    pub fn new(presentation_mode: PresentationMode, scale_mode: ScaleMode) -> Self {
-        Self {
-            presentation_mode,
-            scale_mode,
-        }
+    pub fn new(_presentation_mode: PresentationMode, scale_mode: ScaleMode) -> Self {
+        Self { scale_mode }
     }
 
     /// Render a canvas on its anchored panel in VR, or emit nothing in flat
@@ -102,7 +98,7 @@ impl FrontendCanvasPresenter {
     }
 
     pub(crate) fn renders_world_space(self) -> bool {
-        self.presentation_mode == PresentationMode::Vr
+        false
     }
 
     pub(crate) fn renders_screen_space(self) -> bool {

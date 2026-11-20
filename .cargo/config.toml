@@ -8,7 +8,6 @@ dbgr = "run -p debug_runtime --"
 dbgc = "run -p debug_command --"
 # "bench" itself is a built-in cargo command, so the alias is "bn"
 bn = "run -p bench --"
-dvr = "run -p dark_vr_tool --"
 # Remote variants run the binaries CI built for a PR or ref: `cargo dxr 1234 ui`
 ci = "run -q -p ci_artifacts --"
 dxr = "run -q -p ci_artifacts -- --run dark_explorer"

@@ -351,8 +351,6 @@ pub mod render_source {
     pub const FRONTEND_POINTER: &str = "frontend_pointer";
     /// The pause menu's comfort dim, behind its panel.
     pub const PAUSE_DIM: &str = "pause_dim";
-    /// The VR cyber interface's comfort dim, behind the use-mode panel.
-    pub const USE_MODE_DIM: &str = "use_mode_dim";
     /// The VR cyber interface's aim beams and hit dot. Unlike
     /// [`FRONTEND_POINTER`] this draws no hands: the interface is a mode of
     /// play, so the player's real [`PLAYER_HANDS`] are still on screen and a

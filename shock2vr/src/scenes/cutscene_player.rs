@@ -256,7 +256,6 @@ impl CutscenePlayerScene {
     /// [`head_locked_panel`].
     fn screen_panel(&self, presentation: PresentationMode) -> WorldPanel {
         match presentation {
-            PresentationMode::Vr => self.panel_anchor.panel(),
             PresentationMode::Flat => head_locked_panel(self.head_position, self.head_rotation),
         }
     }

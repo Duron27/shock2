@@ -69,7 +69,14 @@ fn apply_display_settings(
                 );
             });
         } else {
-            window.set_monitor(glfw::WindowMode::Windowed, 100, 100, SCR_WIDTH, SCR_HEIGHT, None);
+            window.set_monitor(
+                glfw::WindowMode::Windowed,
+                100,
+                100,
+                SCR_WIDTH,
+                SCR_HEIGHT,
+                None,
+            );
         }
     }
     glfw.set_swap_interval(if pc.vsync {
@@ -138,8 +145,7 @@ impl HandContext {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Mission or debug scene to load. If omitted, boots the main menu in flat
-    /// mode, or earth.mis in --vr mode.
+    /// Mission or debug scene to load. If omitted, boots the main menu.
     #[arg(short, long)]
     mission: Option<String>,
 
@@ -171,12 +177,6 @@ struct Args {
     // count: u8,
     #[arg(short, long, default_value = None)]
     experimental: Option<Vec<String>>,
-
-    /// Run the emulated VR rig (mouse-driven hands, forearm HUD panels). The
-    /// default presentation is flatscreen (screen-space 2D HUD, clean
-    /// first-person view).
-    #[arg(long)]
-    vr: bool,
 }
 struct MouseUpdateResult {
     delta_x: f32,
@@ -260,33 +260,17 @@ enum MouseLookTarget {
     Cursor,
 }
 
-/// Route this frame's mouse motion.
-///
-/// Holding E or Q aims that hand, as always. Otherwise a scene asking for a
-/// pointer (`Game::wants_pointer`) normally takes the mouse: on flatscreen the
-/// cursor *is* the menu, so mouse-look stops.
-///
-/// Under `--vr` that bargain is wrong and was the bug: the frontend is a world
-/// panel aimed by the simulated hand rays, so freezing mouse-look pinned the
-/// ray wherever it happened to point (canvas x=64, left of every button) and
-/// hover/click never responded. Turning the *head* would not have helped
-/// either - the panel is anchored to the head, so head and ray move together
-/// and the hit point never changes. The mouse therefore aims the right hand
-/// directly, which is the only thing that moves the ray across the panel.
+/// Route this frame's mouse motion: a scene asking for a pointer
+/// (`Game::wants_pointer`) takes the mouse - the cursor *is* the menu, so
+/// mouse-look stops.
 fn mouse_look_target(
-    right_hand_key: bool,
-    left_hand_key: bool,
+    _right_hand_key: bool,
+    _left_hand_key: bool,
     scene_wants_pointer: bool,
-    presentation: shock2vr::PresentationMode,
+    _presentation: shock2vr::PresentationMode,
 ) -> MouseLookTarget {
-    if presentation == shock2vr::PresentationMode::Vr && right_hand_key {
-        MouseLookTarget::RightHand
-    } else if presentation == shock2vr::PresentationMode::Vr && left_hand_key {
-        MouseLookTarget::LeftHand
-    } else if !scene_wants_pointer {
+    if !scene_wants_pointer {
         MouseLookTarget::Head
-    } else if presentation == shock2vr::PresentationMode::Vr {
-        MouseLookTarget::RightHand
     } else {
         MouseLookTarget::Cursor
     }
@@ -391,13 +375,7 @@ pub fn main() {
     let experimental_features: HashSet<String> =
         args.experimental.unwrap_or(vec![]).into_iter().collect();
 
-    // Flatscreen is the default desktop presentation; --vr opts into the
-    // emulated VR rig.
-    let presentation_mode = if args.vr {
-        shock2vr::PresentationMode::Vr
-    } else {
-        shock2vr::PresentationMode::Flat
-    };
+    let presentation_mode = shock2vr::PresentationMode::Flat;
 
     // With no explicit mission, both presentations boot the main menu. VR used
     // to skip it because the rig had no pointer; it now drives the menu with a
@@ -519,7 +497,7 @@ pub fn main() {
         // the cursor (`input_context.pointer`), not fire/frob - the original
         // surrenders the mouse to the metagame the same way. A button still
         // held when the UI closes stays swallowed until released.
-        if !args.vr {
+        {
             let pressed = |b| window.get_mouse_button(b) == Action::Press;
             let any_mouse = pressed(MouseButton::Button1) || pressed(MouseButton::Button2);
             if wants_pointer {
@@ -833,10 +811,6 @@ fn process_events(
         right_thumbstick_value *= 2.0;
     }
 
-    // Keep WASD movement and arrow-key turning in both presentations.
-    if presentation == shock2vr::PresentationMode::Vr {
-        std::mem::swap(&mut left_thumbstick_value, &mut right_thumbstick_value);
-    }
     let mut input_context = InputContext::default();
     if presentation == shock2vr::PresentationMode::Flat && !wants_pointer && !is_alt_pressed {
         input_context.lean = f32_from_bool(window.get_key(Key::E) == Action::Press)
@@ -895,10 +869,7 @@ fn process_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shock2vr::ui::{PanelPlacement, ray_to_canvas};
-
-    /// The frontend canvas the VR panel presents (`main_menu`'s 640x480).
-    const CANVAS: cgmath::Vector2<f32> = cgmath::Vector2 { x: 640.0, y: 480.0 };
+    
 
     fn ctx(yaw: f32, pitch: f32) -> CameraContext {
         CameraContext {
@@ -906,24 +877,6 @@ mod tests {
             pitch,
             mouse_position: None,
         }
-    }
-
-    /// Where the desktop rig's right-hand ray lands on the VR frontend panel,
-    /// in canvas pixels - exactly what `main_menu::vr_pointer` computes.
-    fn right_hand_hit(
-        camera: &CameraContext,
-        hand: &CameraContext,
-    ) -> Option<cgmath::Vector2<f32>> {
-        let (position, rotation) = hand_pose(camera, hand, 1.0);
-        // The panel the frontend anchor places from this camera pose - the
-        // one the game actually builds, so this stays a real regression guard.
-        let panel = PanelPlacement::from_head(
-            shock2vr::input_context::Head::default().position,
-            camera_rotation(camera),
-        )
-        .panel();
-        let direction = rotation.rotate_vector(vec3(0.0, 0.0, -1.0));
-        ray_to_canvas(CANVAS, &panel, position, direction)
     }
 
     #[test]
@@ -952,79 +905,22 @@ mod tests {
         assert!((aim - render_direction).magnitude() < 1e-4);
     }
 
-    /// The geometry is sound: the resting ray does hit the panel, so a miss is
-    /// never why the menu is dead. The right hand sits right of the head, so
-    /// its resting ray lands in the right-hand button column (the historical
-    /// (64.0, 316.8) measurement was taken against the old mirrored
-    /// `ray_to_canvas`; the honest basis reports the same physical hit as
-    /// (576.0, 316.8)). Reaching the *other* buttons still needs the hand aim
-    /// that mouse-look drives, which is what the suppression fix restores.
-    #[test]
-    fn resting_hand_ray_hits_the_panel_in_the_button_column() {
-        let hit = right_hand_hit(&ctx(0.0, 0.0), &ctx(REST_HAND_YAW, 0.0))
-            .expect("resting hand ray should intersect the frontend panel");
-
-        // Measured: (576.0, 316.8) - the buttons start at x=400.
-        assert!(hit.x > CANVAS.x * 0.625 && hit.x < CANVAS.x, "hit: {hit:?}");
-        assert!(hit.y > 0.0 && hit.y < CANVAS.y, "hit: {hit:?}");
-    }
-
-    /// The rig can only aim by yawing the hand, which is mouse-look's job. If
-    /// the runtime surrenders mouse motion to a 2D cursor (as it must in flat
-    /// mode) the hand is frozen at the pose above and no button is ever
-    /// reachable - the desktop `--vr` menu bug. Yawing the hand reaches the
-    /// full canvas width, including the button column.
-    #[test]
-    fn yawing_the_hand_sweeps_the_ray_across_the_whole_canvas() {
-        let camera = ctx(0.0, 0.0);
-        let mut min_x = f32::MAX;
-        let mut max_x = f32::MIN;
-        for step in 0..=180 {
-            let yaw = REST_HAND_YAW - 90.0 + step as f32;
-            if let Some(hit) = right_hand_hit(&camera, &ctx(yaw, 0.0)) {
-                min_x = min_x.min(hit.x);
-                max_x = max_x.max(hit.x);
-            }
-        }
-
-        assert!(min_x < CANVAS.x * 0.1, "min_x: {min_x}");
-        // The menu's buttons live in the right-hand column (x >= 400 on the
-        // 640-wide canvas), so the ray must be able to get there.
-        assert!(max_x > 580.0, "max_x: {max_x}");
-    }
-
     /// The fix: surrendering mouse-look to a 2D cursor is a flatscreen bargain.
     /// Doing it under `--vr` froze the head and hands, so the menu ray stuck at
     /// the resting pose and hover/click never responded. Under `--vr` a
     /// pointer-wanting scene routes the mouse to the right hand (the only thing
     /// that moves the ray across the head-anchored panel); VR E/Q always win.
     #[test]
-    fn pointer_scenes_route_the_mouse_to_the_right_hand_in_vr() {
-        use shock2vr::PresentationMode::{Flat, Vr};
+    fn pointer_scenes_take_the_mouse_as_a_cursor() {
+        use shock2vr::PresentationMode::Flat;
 
         assert_eq!(
             mouse_look_target(false, false, true, Flat),
             MouseLookTarget::Cursor
         );
         assert_eq!(
-            mouse_look_target(false, false, true, Vr),
-            MouseLookTarget::RightHand
-        );
-        assert_eq!(
             mouse_look_target(false, false, false, Flat),
             MouseLookTarget::Head
-        );
-        assert_eq!(
-            mouse_look_target(false, false, false, Vr),
-            MouseLookTarget::Head
-        );
-        assert_eq!(
-            mouse_look_target(true, false, true, Vr),
-            MouseLookTarget::RightHand
-        );
-        assert_eq!(
-            mouse_look_target(false, true, true, Vr),
-            MouseLookTarget::LeftHand
         );
     }
 

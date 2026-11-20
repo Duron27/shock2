@@ -47,7 +47,6 @@ fn spawn_rotation(presentation: PresentationMode) -> Quaternion<f32> {
     // must face the hybrid at -X after composing the pawn and head rotations.
     Quaternion::from_angle_y(Deg(match presentation {
         PresentationMode::Flat => 0.0,
-        PresentationMode::Vr => 90.0,
     }))
 }
 
@@ -216,13 +215,10 @@ mod tests {
 
     #[test]
     fn neutral_desktop_and_headset_views_face_the_hybrid() {
-        for (presentation, head) in [
-            (
-                PresentationMode::Flat,
-                crate::input::remote::head_rotation_from_yaw_pitch(0.0, 0.0),
-            ),
-            (PresentationMode::Vr, Quaternion::from_angle_y(Deg(0.0))),
-        ] {
+        for (presentation, head) in [(
+            PresentationMode::Flat,
+            crate::input::remote::head_rotation_from_yaw_pitch(0.0, 0.0),
+        )] {
             let forward = (spawn_rotation(presentation) * head).rotate_vector(vec3(0.0, 0.0, -1.0));
             assert!((forward - vec3(-1.0, 0.0, 0.0)).magnitude() < 0.00001);
         }

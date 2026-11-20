@@ -283,10 +283,6 @@ impl VirtualHand {
         self.rotation
     }
 
-    pub(crate) fn squeeze_value(&self) -> f32 {
-        self.squeeze_value
-    }
-
     pub(crate) fn get_trigger_value(&self) -> f32 {
         self.trigger_value
     }
@@ -694,9 +690,7 @@ impl VirtualHand {
             .unwrap_or_default();
 
         let invisibility = crate::psi_invisibility::transparency(world);
-        let charge_transform = crate::melee_charge_visual::transform(world, self.get_held_entity());
         for object in &mut scene_objects {
-            object.set_transform(charge_transform * object.get_transform());
             crate::psi_invisibility::apply(object, invisibility);
         }
 
@@ -717,11 +711,6 @@ impl VirtualHand {
 
     pub(crate) fn affordance(&self) -> HandAffordance {
         self.feedback.observed
-    }
-
-    /// The held item and the target a release this frame would offer it to.
-    pub(crate) fn release_offer(&self) -> Option<(EntityId, EntityId)> {
-        self.get_held_entity().zip(self.release_target)
     }
 
     pub(crate) fn maintenance_preview(&self, world: &World) -> Option<String> {
@@ -1293,49 +1282,6 @@ mod tests {
             0,
             "tracking recovery must not synthesize a press"
         );
-    }
-
-    #[test]
-    fn release_offer_predicts_the_release_and_clears_once_released() {
-        let mut world = World::new();
-        let tool = world.add_entity((dark::properties::PropScripts {
-            scripts: vec!["Wrench".into()],
-            inherits: true,
-        },));
-        let gun = world.add_entity((dark::properties::PropGunState {
-            ammo: 1,
-            condition: 40.0,
-            setting: 0,
-            modification: 0,
-            silence_value: 0.0,
-        },));
-        let physics = PhysicsWorld::new();
-        let update = |prev: &VirtualHand, squeeze_value| {
-            let input = Hand {
-                squeeze_value,
-                ..Hand::default()
-            };
-            VirtualHand::update(
-                prev,
-                &physics,
-                &world,
-                Vector3::zero(),
-                Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                &input,
-                Some(gun),
-                input.position,
-                1.0 / 60.0,
-            )
-        };
-        let hand = VirtualHand::new(Handedness::Right).grab_entity(&world, tool);
-        let (held, _) = update(&hand, 1.0);
-        assert_eq!(held.release_offer(), Some((tool, gun)));
-
-        let (released, effects) = update(&held, 0.0);
-        assert!(effects.iter().any(|effect| matches!(effect,
-            VirtualHandEffect::OutMessage { message: Message { to, payload: MessagePayload::ProvideForConsumption { entity } } }
-                if *to == gun && *entity == tool)));
-        assert_eq!(released.release_offer(), None);
     }
 
     fn player_gun() -> PropPlayerGun {

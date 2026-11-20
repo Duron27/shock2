@@ -1,6 +1,6 @@
 //! Release-to-stow behind either shoulder. Coordinates are in tracked pawn space.
 //! Uses the head's slowly followed yaw, never its pitch/roll, for body direction.
-use cgmath::{InnerSpace, Matrix4, Quaternion, Rotation, Vector3, vec3};
+use cgmath::{InnerSpace, Quaternion, Rotation, Vector3, vec3};
 use shipyard::{EntityId, Get, IntoIter, IntoWithId, View, World};
 
 use crate::{input_context::InputContext, vr_support::GripPose};
@@ -226,35 +226,6 @@ impl ShoulderBackpack {
     }
     pub fn keep_grip(&self, slot: usize) -> bool {
         self.retained.keep_grip(slot)
-    }
-
-    pub fn render(
-        &self,
-        position: Vector3<f32>,
-        rotation: Quaternion<f32>,
-    ) -> Vec<engine::scene::SceneObject> {
-        use engine::scene::{SceneObject, color_material, lines_mesh};
-        let Some(centers) = self.centers else {
-            return Vec::new();
-        };
-        let root = Matrix4::from_translation(position) * Matrix4::from(rotation);
-        let mut vertices = Vec::new();
-        for center in centers {
-            dark::hit_box::append_capsule_lines(&mut vertices, &root, center, center, radius());
-        }
-        let color = if self.retained.0.iter().any(Option::is_some) {
-            vec3(1.0, 0.3, 0.1)
-        } else if self.near.iter().any(|near| *near) {
-            vec3(0.1, 1.0, 0.2)
-        } else {
-            vec3(0.1, 0.8, 1.0)
-        };
-        let mut objects = vec![SceneObject::new(
-            color_material::create(color),
-            Box::new(lines_mesh::create(vertices)),
-        )];
-        crate::util::tag_render_source(&mut objects, crate::util::render_source::PLAYER_HANDS);
-        objects
     }
 
     pub fn diagnostics(

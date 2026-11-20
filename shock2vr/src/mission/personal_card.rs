@@ -2,9 +2,8 @@
 //! balances and permissions remain in QuestInfo. Reuses the body inventory frame.
 use super::body_inventory::BodyPose;
 use crate::{input_context::InputContext, vr_support::GripPose};
-use cgmath::{InnerSpace, Matrix4, Quaternion, Rotation, Rotation3, Vector3, vec3};
+use cgmath::{InnerSpace, Matrix4, Quaternion, Vector3, vec3};
 use shipyard::{EntityId, Get, View, World};
-use std::{cell::OnceCell, rc::Rc};
 
 const DOWNLOAD_SECONDS: f32 = 1.15;
 
@@ -41,7 +40,6 @@ pub(super) struct PersonalCard {
     rest_pose: crate::vr_belt::BeltCardPose,
     mfd_rest_pose: crate::vr_belt::BeltCardPose,
     pose_loaded: bool,
-    bit_textures: OnceCell<[Rc<dyn engine::texture::TextureTrait>; 2]>,
     pub blocked: [bool; 2],
     pressed: [bool; 2],
     tracked: [bool; 2],
@@ -64,7 +62,6 @@ impl Default for PersonalCard {
             rest_pose: Default::default(),
             mfd_rest_pose: crate::vr_belt::BeltCardPose::mfd_default(),
             pose_loaded: false,
-            bit_textures: OnceCell::new(),
             blocked: [false; 2],
             pressed: [true; 2],
             tracked: [false; 2],
@@ -217,254 +214,11 @@ impl PersonalCard {
             ));
         }
     }
-
-    /// A brief miss tolerates hand jitter. A different reader still requires
-    /// withdrawing: brushing across two readers cannot issue two scans.
-    pub fn scan(&mut self, target: Option<EntityId>, dt: f32) -> Option<EntityId> {
-        if self.hand.is_none() || self.hand.is_some_and(|i| !self.tracked[i]) {
-            return None;
-        }
-        if target.is_none() {
-            self.withdrawn += dt.max(0.0);
-            if self.withdrawn >= 0.25 {
-                self.reader = None;
-            }
-            return None;
-        }
-        self.withdrawn = 0.0;
-        if self.reader.is_some() {
-            return None;
-        }
-        self.reader = target;
-        self.last_scan = target;
-        self.scans += 1;
-        target
-    }
-
-    pub fn stowed_device_panel(
-        &self,
-        pawn: Vector3<f32>,
-        rotation: Quaternion<f32>,
-    ) -> Option<crate::ui::WorldPanel> {
-        if self.hand.is_some() {
-            return None;
-        }
-        self.center.map(|center| {
-            super::mfd_device::stowed_panel(
-                pawn + rotation.rotate_vector(center),
-                rotation
-                    * Quaternion::from_angle_y(cgmath::Rad(-self.belt_yaw))
-                    * self.mfd_rest_pose.orientation(),
-                crate::dev_params::get(crate::dev_params::VR_MFD_BELT_YAW),
-            )
-        })
-    }
-
-    pub fn transform(&self, pawn: Vector3<f32>, rotation: Quaternion<f32>) -> Option<Matrix4<f32>> {
-        if self.hand.is_some() {
-            self.held_pose.map(|(position, orientation)| {
-                let grip = self.grip.as_ref();
-                Matrix4::from_translation(position)
-                    * Matrix4::from(orientation)
-                    * grip
-                        .map(|grip| {
-                            Matrix4::from_translation(grip.offset) * Matrix4::from(grip.rotation)
-                        })
-                        .unwrap_or_else(|| Matrix4::from_translation(vec3(0.0, 0.0, -0.1)))
-            })
-        } else {
-            self.center.map(|center| {
-                Matrix4::from_translation(pawn + rotation.rotate_vector(center))
-                    * Matrix4::from(rotation)
-                    * Matrix4::from_angle_y(cgmath::Rad(-self.belt_yaw))
-                    * self.rest_pose.rotation()
-            })
-        }
-    }
-
-    pub fn render(
-        &self,
-        assets: &mut engine::assets::asset_cache::AssetCache,
-        pawn: Vector3<f32>,
-        rotation: Quaternion<f32>,
-    ) -> Vec<engine::scene::SceneObject> {
-        let Some(transform) = self.transform(pawn, rotation) else {
-            return vec![];
-        };
-        let Some(model) = assets
-            .get_opt::<_, dark::model::Model, _>(&dark::importers::MODELS_IMPORTER, "scipass.bin")
-        else {
-            return vec![];
-        };
-        let Some(bounds) = model.bounding_box() else {
-            return vec![];
-        };
-        let scale = crate::vr_belt::card_model_scale(bounds.min.to_vec(), bounds.max.to_vec());
-        let centered_model =
-            crate::vr_belt::card_model_transform(bounds.min.to_vec(), bounds.max.to_vec());
-        let model_transform = if self.hand.is_some() {
-            if let Some(grip) = &self.grip {
-                let anchor = vec3(grip.anchor[0], grip.anchor[1], grip.anchor[2]);
-                Matrix4::from_translation(anchor * (grip.item_scale - scale))
-                    * Matrix4::from_scale(scale)
-            } else {
-                centered_model
-            }
-        } else {
-            centered_model
-        };
-        let mut scene: Vec<_> = model
-            .clone_scene_objects()
-            .into_iter()
-            .map(|mut object| {
-                object.set_transform(transform * model_transform);
-                object
-            })
-            .collect();
-        // Camera-facing binary fragments spiral along the transfer direction.
-        // Two trailing samples make motion readable without solid geometry;
-        // texture glow and fade keep the stream airy at headset distances.
-        if crate::dev_params::get_bool(crate::dev_params::VR_DOWNLOAD_PARTICLES)
-            && !self.downloads.is_empty()
-        {
-            let textures = self
-                .bit_textures
-                .get_or_init(|| [download_bit_texture(false), download_bit_texture(true)]);
-            let destination = transform.w.truncate();
-            for (origin, age) in &self.downloads {
-                let direction = destination - *origin;
-                let axis = if direction.magnitude2() > 0.00001 {
-                    direction.normalize()
-                } else {
-                    Vector3::unit_y()
-                };
-                let reference = if axis.dot(Vector3::unit_y()).abs() < 0.9 {
-                    Vector3::unit_y()
-                } else {
-                    Vector3::unit_x()
-                };
-                let u = axis.cross(reference).normalize();
-                let v = axis.cross(u);
-                for i in 0..24 {
-                    for tail in 0..3 {
-                        let t = (*age - i as f32 * 0.016 - tail as f32 * 0.018) / 0.72;
-                        if !(0.0..1.0).contains(&t) {
-                            continue;
-                        }
-                        let phase = i as f32 * 2.399_963 + t * std::f32::consts::TAU * 1.7;
-                        let envelope = (std::f32::consts::PI * t).sin();
-                        let radius = (0.055 + (i % 4) as f32 * 0.012)
-                            / crate::world_scale::meters_per_world_unit()
-                            * envelope;
-                        let point = *origin
-                            + direction * (t * t * (3.0 - 2.0 * t))
-                            + (u * phase.cos() + v * phase.sin()) * radius;
-                        let opacity = (t * 12.0).min(1.0)
-                            * ((1.0 - t) * 9.0).min(1.0)
-                            * [0.95, 0.22, 0.08][tail];
-                        let color = if i % 3 == 0 {
-                            vec3(0.55, 1.0, 0.85)
-                        } else {
-                            vec3(0.12, 0.80, 1.0)
-                        };
-                        let material = engine::scene::BillboardMaterial::create(
-                            textures[i % 2].clone(),
-                            color,
-                            0.65,
-                            1.0 - opacity,
-                            (0.035 + (i % 3) as f32 * 0.004)
-                                / crate::world_scale::meters_per_world_unit(),
-                        );
-                        let mut bit = engine::scene::SceneObject::new(
-                            material,
-                            Box::new(engine::scene::quad::create()),
-                        );
-                        bit.set_transform(Matrix4::from_translation(point));
-                        scene.push(bit);
-                    }
-                }
-            }
-        }
-        crate::util::tag_render_source(&mut scene, crate::util::render_source::PLAYER_HANDS);
-        scene
-    }
-}
-use cgmath::EuclideanSpace;
-
-/// A tiny glowing bitmap glyph, cached once per mission. RGBA sprites use the
-/// existing per-eye billboard material, so fragments face each eye correctly.
-fn download_bit_texture(one: bool) -> Rc<dyn engine::texture::TextureTrait> {
-    const ZERO: [&str; 7] = [
-        "01110", "10001", "10001", "10001", "10001", "10001", "01110",
-    ];
-    const ONE: [&str; 7] = [
-        "00100", "01100", "00100", "00100", "00100", "00100", "01110",
-    ];
-    let glyph = if one { ONE } else { ZERO };
-    let mut bytes = Vec::with_capacity(64 * 64 * 4);
-    for y in 0..64 {
-        for x in 0..64 {
-            let mut distance = f32::INFINITY;
-            for (row, line) in glyph.iter().enumerate() {
-                for (col, cell) in line.bytes().enumerate() {
-                    if cell != b'1' {
-                        continue;
-                    }
-                    let dx = ((x as f32 - (20.0 + col as f32 * 6.0)).abs() - 2.4).max(0.0);
-                    let dy = ((y as f32 - (50.0 - row as f32 * 6.0)).abs() - 2.4).max(0.0);
-                    distance = distance.min(dx.hypot(dy));
-                }
-            }
-            let core = (1.0 - distance / 1.2).clamp(0.0, 1.0);
-            let glow = 0.26 * (-distance * distance / 15.0).exp();
-            bytes.extend_from_slice(&[255, 255, 255, ((core + glow).min(1.0) * 255.0) as u8]);
-        }
-    }
-    Rc::new(engine::texture::init_from_memory2(
-        engine::texture_format::RawTextureData {
-            bytes,
-            width: 64,
-            height: 64,
-            format: engine::texture_format::PixelFormat::RGBA,
-        },
-        &engine::texture::TextureOptions {
-            wrap: false,
-            ..Default::default()
-        },
-    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cgmath::Rotation3;
-
-    #[test]
-    fn charging_station_accepts_frob_and_remains_scannable() {
-        use dark::properties::{FrobFlag, PropFrobInfo, PropScripts};
-        let mut world = World::new();
-        let station = world.add_entity((
-            PropScripts {
-                scripts: vec!["EnergyStation".into()],
-                inherits: false,
-            },
-            PropFrobInfo {
-                world_action: FrobFlag::SCRIPT,
-                inventory_action: FrobFlag::empty(),
-                tool_action: FrobFlag::empty(),
-            },
-        ));
-        assert!(
-            is_reader(&world, station),
-            "card scans still reach the charger"
-        );
-        assert!(super::super::mfd_device::opens_panel(&world, station));
-        assert!(!requires_scan(&world, station));
-        assert_eq!(
-            crate::hand_feedback::HandTarget::resolve(&world, station, true).affordance,
-            crate::hand_feedback::HandAffordance::Frobbable,
-        );
-    }
 
     fn fixture() -> (PersonalCard, InputContext, BodyPose) {
         let mut input = InputContext::default();
@@ -476,106 +230,6 @@ mod tests {
             yaw: 0.0,
         };
         (PersonalCard::default(), input, body)
-    }
-    #[test]
-    fn landscape_card_follows_body_heading_without_claiming_pouch_center() {
-        use cgmath::Transform;
-        let (mut card, mut input, mut body) = fixture();
-        body.yaw = 1.1;
-        card.update(&input, Some(body), [true; 2], true);
-        let transform = card
-            .transform(vec3(0.0, 0.0, 0.0), Quaternion::new(1.0, 0.0, 0.0, 0.0))
-            .unwrap();
-        let long_edge = transform.transform_vector(Vector3::unit_z());
-        assert!(
-            long_edge.y.abs() < 0.0001,
-            "long card edge must lie horizontally"
-        );
-        let body_right = vec3(body.yaw.cos(), 0.0, body.yaw.sin());
-        assert!(long_edge.dot(body_right).abs() > 0.999);
-        input.left_hand.position = super::super::ammo_pouch::center_for(body);
-        card.update(&input, Some(body), [true; 2], true);
-        input.left_hand.squeeze_value = 1.0;
-        card.update(&input, Some(body), [true; 2], true);
-        assert_eq!(
-            card.hand, None,
-            "a grip at the ammo pouch must not take the buckle card"
-        );
-    }
-
-    #[test]
-    fn authored_resting_pose_moves_visible_card_and_grab_target_together() {
-        let (mut card, mut input, mut body) = fixture();
-        body.yaw = 0.7;
-        card.rest_pose.position_m = [-0.16, 0.04, -0.36];
-        card.rest_pose.rotation_degrees = [85.0, 100.0, 10.0];
-        card.update(&input, Some(body), [true; 2], true);
-        let pawn = vec3(2.0, 0.5, -1.0);
-        let rotation = Quaternion::from_angle_y(cgmath::Deg(30.0));
-        let root = Matrix4::from_translation(
-            pawn + rotation.rotate_vector(body.front(
-                crate::dev_params::get(crate::dev_params::VR_BELT_DROP),
-                crate::dev_params::get(crate::dev_params::VR_BELT_DISTANCE) - 0.30,
-            )),
-        ) * Matrix4::from(rotation)
-            * Matrix4::from_angle_y(cgmath::Rad(-body.yaw));
-        let expected = root * card.rest_pose.transform();
-        let actual = card.transform(pawn, rotation).unwrap();
-        for (a, b) in [actual.x, actual.y, actual.z, actual.w]
-            .into_iter()
-            .zip([expected.x, expected.y, expected.z, expected.w])
-        {
-            assert!(
-                (a - b).magnitude() < 0.00001,
-                "editor and runtime mounting frames must agree"
-            );
-        }
-        input.left_hand.position = card.center.unwrap();
-        card.update(&input, Some(body), [true; 2], true);
-        input.left_hand.squeeze_value = 1.0;
-        card.update(&input, Some(body), [true; 2], true);
-        assert_eq!(
-            card.hand,
-            Some(0),
-            "edited resting center remains grabbable"
-        );
-    }
-
-    #[test]
-    fn authored_tricorder_pose_matches_editor_and_grab_target() {
-        let (mut card, mut input, mut body) = fixture();
-        card.device_mode = true;
-        body.yaw = 0.7;
-        card.mfd_rest_pose.position_m = [-0.14, 0.03, -0.26];
-        card.mfd_rest_pose.rotation_degrees = [10.0, 25.0, -5.0];
-        card.update(&input, Some(body), [true; 2], true);
-        let pawn = vec3(2.0, 0.5, -1.0);
-        let rotation = Quaternion::from_angle_y(cgmath::Deg(30.0));
-        let root = Matrix4::from_translation(
-            pawn + rotation.rotate_vector(body.front(
-                crate::dev_params::get(crate::dev_params::VR_BELT_DROP),
-                crate::dev_params::get(crate::dev_params::VR_BELT_DISTANCE) - 0.30,
-            )),
-        ) * Matrix4::from(rotation)
-            * Matrix4::from_angle_y(cgmath::Rad(-body.yaw));
-        let expected = root * card.mfd_rest_pose.transform();
-        let panel = card.stowed_device_panel(pawn, rotation).unwrap();
-        let actual = Matrix4::from_translation(panel.center) * Matrix4::from(panel.rotation);
-        for (a, b) in [actual.x, actual.y, actual.z, actual.w]
-            .into_iter()
-            .zip([expected.x, expected.y, expected.z, expected.w])
-        {
-            assert!(
-                (a - b).magnitude() < 0.00001,
-                "editor and runtime MFD frames must agree"
-            );
-        }
-        input.left_hand.position = card.center.unwrap();
-        card.update(&input, Some(body), [true; 2], true);
-        input.left_hand.squeeze_value = 1.0;
-        card.update(&input, Some(body), [true; 2], true);
-        assert_eq!(card.hand, Some(0), "authored MFD center remains grabbable");
-        assert!(card.stowed_device_panel(pawn, rotation).is_none());
     }
 
     #[test]
@@ -611,26 +265,6 @@ mod tests {
         assert_eq!(card.hand, Some(0));
         assert!(!card.update(&input, Some(body), [true; 2], false));
         assert_eq!(card.hand, None);
-    }
-
-    #[test]
-    fn reader_requires_withdrawal_and_tracking_loss_cannot_rearm() {
-        let (mut card, input, body) = fixture();
-        card.update(&input, Some(body), [true; 2], true);
-        card.hand = Some(0);
-        let mut world = World::new();
-        let a = world.add_entity(());
-        let b = world.add_entity(());
-        assert_eq!(card.scan(Some(a), 0.01), Some(a));
-        assert_eq!(card.scan(Some(a), 1.0), None);
-        assert_eq!(card.scan(Some(b), 1.0), None);
-        card.tracked[0] = false;
-        card.scan(None, 10.0);
-        card.tracked[0] = true;
-        assert_eq!(card.scan(Some(a), 0.01), None);
-        card.scan(None, 0.3);
-        assert_eq!(card.scan(Some(b), 0.01), Some(b));
-        assert_eq!(card.scans, 2);
     }
     #[test]
     fn recovery_does_not_draw_from_a_stale_squeeze() {

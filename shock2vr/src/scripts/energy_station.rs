@@ -247,8 +247,7 @@ mod tests {
 
     use crate::{physics::PhysicsWorld, time::Time, vr_config::Handedness};
 
-    use super::{Effect, EnergyStation, MessagePayload, PlayerInfo, Script, item_recharge_cue};
-    use crate::runtime_props::RuntimePropTransform;
+    use super::{Effect, EnergyStation, MessagePayload, Script};
 
     fn make_world() -> (World, EntityId, EntityId) {
         let mut world = World::new();
@@ -259,47 +258,6 @@ mod tests {
         },));
         let item = world.add_entity(());
         (world, station, item)
-    }
-
-    #[test]
-    fn item_recharge_cue_sparkles_and_pulses_only_an_item_in_a_vr_hand() {
-        let cue = |mode, held: bool| {
-            let mut world = World::new();
-            let item = world.add_entity((RuntimePropTransform(cgmath::Matrix4::from_translation(
-                vec3(1.0, 2.0, 3.0),
-            )),));
-            let player = world.add_entity(());
-            world.add_unique(PlayerInfo {
-                pos: vec3(0.0, 0.0, 0.0),
-                rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
-                entity_id: player,
-                left_hand_entity_id: None,
-                right_hand_entity_id: held.then_some(item),
-                inventory_entity_id: player,
-            });
-            world.add_unique(crate::mission::GlobalPresentationMode(mode));
-            item_recharge_cue(&world, item)
-        };
-        let vr = cue(crate::PresentationMode::Vr, true);
-        assert!(matches!(
-            vr.as_slice(),
-            [
-                Effect::PlayEnvironmentalSound { position, .. },
-                Effect::CreateEntityByTemplateName { template_name, options, .. },
-                Effect::HandHaptic { hand: Handedness::Right, .. },
-            ] if *position == vec3(1.0, 2.0, 3.0)
-                && template_name == "RechargeFX"
-                && options.transient_fx
-        ));
-        for (mode, held) in [
-            (crate::PresentationMode::Vr, false),
-            (crate::PresentationMode::Flat, true),
-        ] {
-            assert!(matches!(
-                cue(mode, held).as_slice(),
-                [Effect::PlayEnvironmentalSound { position, .. }] if *position == vec3(0.0, 0.0, 0.0)
-            ));
-        }
     }
 
     fn hover(item: EntityId) -> MessagePayload {

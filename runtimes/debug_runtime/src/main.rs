@@ -162,13 +162,6 @@ struct Args {
     #[arg(long)]
     experimental: Option<String>,
 
-    /// Opt into the VR presentation (forearm panels, two-handed interaction).
-    /// The debug runtime defaults to flatscreen (screen-space 2D HUD,
-    /// first-person viewmodel) to match `desktop_runtime` and because the
-    /// flat path is what most headless weapon/aim testing exercises.
-    #[arg(long)]
-    vr: bool,
-
     /// Show the game window. By default the runtime creates a hidden window so
     /// it never steals focus or pops to the foreground - rendering and
     /// `/v1/screenshot` still work via the offscreen framebuffer. Pass this to
@@ -659,13 +652,7 @@ fn run_game_blocking(
     );
     info!("Mission parsed: {} with spawn location", mission);
 
-    // Flatscreen is the default debug presentation (matching desktop_runtime);
-    // --vr opts into the VR forearm/hands path.
-    let presentation_mode = if args.vr {
-        shock2vr::PresentationMode::Vr
-    } else {
-        shock2vr::PresentationMode::Flat
-    };
+    let presentation_mode = shock2vr::PresentationMode::Flat;
     info!("Presentation mode: {:?}", presentation_mode);
 
     let options = GameOptions {
@@ -741,7 +728,7 @@ fn run_game_blocking(
     // /v1/control/input setup. The yaw-90 rotation aims each hand's -Z
     // (raycast/fingers) at pawn-forward, like desktop_runtime's default hand
     // yaw. HTTP patches override these as usual.
-    if args.vr {
+    if false {
         let aim_forward = Quaternion::from_angle_y(cgmath::Deg(90.0));
         current_input.right_hand.position = vec3(-0.55, 1.4, -0.2);
         current_input.right_hand.rotation = aim_forward;
@@ -756,10 +743,10 @@ fn run_game_blocking(
             &args.update_benchmark,
             &mission,
             &sorted_experimental,
-            args.vr,
+            false,
         );
     }
-    let mut hand_targets = hand_targets::HandTargets::new(args.vr);
+    let mut hand_targets = hand_targets::HandTargets::new(false);
 
     // Deferred replies so HTTP commands observe a complete, post-render frame:
     // - `Step` replies only after all requested frames have actually run, so
@@ -965,7 +952,7 @@ fn run_game_blocking(
                         &last_scene,
                         last_scene_frame,
                         args.defer_transitions,
-                        args.vr,
+                        false,
                     );
                 }
             }
@@ -1024,7 +1011,7 @@ fn run_game_blocking(
                 // The recording holds what the game saw, already lowered for
                 // a crouch; keep the standing pose so paused updates match.
                 current_input = frame.input.clone();
-                current_input.shift_rig(crouch_drop(&game, &frame.input, args.vr));
+                current_input.shift_rig(crouch_drop(&game, &frame.input, false));
                 action_state = frame.actions();
                 Time {
                     elapsed: Duration::from_secs_f32(frame.dt),
@@ -1043,7 +1030,7 @@ fn run_game_blocking(
                 None => {
                     hand_targets.apply(&game, &mut current_input);
                     let rig = tracking_input(&game, &current_input, &tracking);
-                    crouched_rig(&game, &rig, args.vr)
+                    crouched_rig(&game, &rig, false)
                 }
             };
             profile!(
@@ -1082,13 +1069,7 @@ fn run_game_blocking(
             // volume) starts here; land it now for the same reason a warp does.
             if !args.defer_transitions {
                 let rig = tracking_input(&game, &current_input, &tracking);
-                complete_pending_transition(
-                    &mut game,
-                    &game_time,
-                    &rig,
-                    &mut action_state,
-                    args.vr,
-                );
+                complete_pending_transition(&mut game, &game_time, &rig, &mut action_state, false);
             }
 
             if step_requested {
@@ -1161,19 +1142,13 @@ fn run_game_blocking(
             // Still call update with zero time to maintain state consistency
             hand_targets.apply(&game, &mut current_input);
             let rig = tracking_input(&game, &current_input, &tracking);
-            let update_input = crouched_rig(&game, &rig, args.vr);
+            let update_input = crouched_rig(&game, &rig, false);
             profile!(
                 "game.update",
                 game.update(&zero_time, &update_input, &mut action_state)
             );
             if !args.defer_transitions {
-                complete_pending_transition(
-                    &mut game,
-                    &zero_time,
-                    &rig,
-                    &mut action_state,
-                    args.vr,
-                );
+                complete_pending_transition(&mut game, &zero_time, &rig, &mut action_state, false);
             }
         }
 

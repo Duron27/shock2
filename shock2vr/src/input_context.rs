@@ -57,18 +57,13 @@ pub struct PoseTracking {
 
 impl InputContext {
     /// Resolve movement and turn sticks without changing physical hand identity.
-    /// Flat keyboard/debug channels keep their existing layout; VR uses left to move.
+    /// Right stick moves, left stick x turns (the keyboard/debug layout).
     pub fn locomotion_sticks(
         &self,
-        presentation: crate::PresentationMode,
+        _presentation: crate::PresentationMode,
         allow_flight: bool,
     ) -> (Vector2<f32>, Vector2<f32>) {
-        let (movement, mut turn) = match presentation {
-            crate::PresentationMode::Vr => (self.left_hand.thumbstick, self.right_hand.thumbstick),
-            crate::PresentationMode::Flat => {
-                (self.right_hand.thumbstick, self.left_hand.thumbstick)
-            }
-        };
+        let (movement, mut turn) = (self.right_hand.thumbstick, self.left_hand.thumbstick);
         if !allow_flight {
             turn.y = 0.0;
         }
@@ -222,23 +217,6 @@ mod tests {
             Vector3::new(1.5, 2.0, 2.0)
         );
         assert!(input.right_hand.joints.is_none());
-    }
-
-    #[test]
-    fn vr_moves_left_turns_right_and_requires_opt_in_to_fly() {
-        let mut input = InputContext::default();
-        input.left_hand.thumbstick = Vector2::new(0.25, 1.0);
-        input.right_hand.thumbstick = Vector2::new(-0.5, -0.75);
-        assert_eq!(
-            input.locomotion_sticks(crate::PresentationMode::Vr, false),
-            (Vector2::new(0.25, 1.0), Vector2::new(-0.5, 0.0)),
-        );
-        assert_eq!(
-            input.locomotion_sticks(crate::PresentationMode::Vr, true),
-            (input.left_hand.thumbstick, input.right_hand.thumbstick),
-        );
-        // Resolving locomotion must not remap sticks used by a held item's UI.
-        assert_eq!(input.right_hand.thumbstick, Vector2::new(-0.5, -0.75));
     }
 
     #[test]

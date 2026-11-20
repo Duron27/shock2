@@ -138,25 +138,16 @@ mod tests {
     }
 
     #[test]
-    fn blade_stays_in_the_ball_with_fixed_reach_in_both_hands_and_presentations() {
-        for presentation in [PresentationMode::Flat, PresentationMode::Vr] {
+    fn blade_stays_in_the_ball_with_fixed_reach_in_both_hands() {
+        {
+            let presentation = PresentationMode::Flat;
             for hand in [Handedness::Left, Handedness::Right] {
                 for roll in [-90.0, 0.0, 90.0] {
                     let mut world = World::new();
                     let controller = Matrix4::from_translation(vec3(3.0, 2.0, -1.0))
                         * Matrix4::from_angle_z(Deg(roll))
                         * Matrix4::from_angle_y(Deg(35.0));
-                    let pose = if presentation == PresentationMode::Vr {
-                        controller
-                            * Matrix4::from(
-                                crate::vr_config::get_vr_hand_model_adjustments_from_model(
-                                    "amp_h", hand,
-                                )
-                                .rotation,
-                            )
-                    } else {
-                        controller
-                    };
+                    let pose = controller;
                     let amp = world.add_entity(RuntimePropTransform(pose));
                     world.add_unique(GlobalPresentationMode(presentation));
                     world.add_unique(PlayerInfo {
@@ -167,11 +158,7 @@ mod tests {
                         left_hand_entity_id: (hand == Handedness::Left).then_some(amp),
                         right_hand_entity_id: (hand == Handedness::Right).then_some(amp),
                     });
-                    let model = if presentation == PresentationMode::Vr {
-                        pose * crate::vr_config::psi_amp_fit_scale() * hand.gun_mirror()
-                    } else {
-                        pose
-                    };
+                    let model = pose;
                     let center = model.transform_point(crate::psi_amp_readout::AMP_SPHERE_CENTER);
                     let (base, tip) = segment(&world, amp).unwrap();
                     assert!(

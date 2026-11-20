@@ -1057,47 +1057,4 @@ impl Holsters {
             "items":self.occupants(world).map(|e| e.map(|id| id.inner() as i32)),
             "retained":self.retained.0.map(|e| e.is_some())})
     }
-
-    pub fn render(
-        &self,
-        world: &World,
-        position: Vector3<f32>,
-        rotation: Quaternion<f32>,
-    ) -> Vec<engine::scene::SceneObject> {
-        let toggle = if self.chest {
-            crate::dev_params::VR_BODY_INVENTORY_ZONES
-        } else {
-            crate::dev_params::VR_HOLSTER_ZONES
-        };
-        if !crate::dev_params::get_bool(toggle) {
-            return vec![];
-        }
-        let Some(centers) = self.world_centers(position, rotation) else {
-            return vec![];
-        };
-        let slots = self.occupants(world);
-        let count = SLOT_COUNT;
-        let mut objects = Vec::new();
-        for slot in 0..2 {
-            if slot >= count && slots[slot].is_none() {
-                continue;
-            }
-            let reached = self.near.contains(&Some(slot));
-            let refused = (0..2).any(|h| self.near[h] == Some(slot) && self.retained.keep_grip(h));
-            let color = if refused {
-                vec3(1.0, 0.2, 0.1)
-            } else if reached {
-                vec3(0.1, 1.0, 0.35)
-            } else {
-                vec3(0.1, 0.55, 0.7)
-            };
-            objects.push(dark::hit_box::draw_debug_wire_sphere(
-                centers[slot],
-                self.radius(),
-                color,
-            ));
-        }
-        crate::util::tag_render_source(&mut objects, crate::util::render_source::PLAYER_HANDS);
-        objects
-    }
 }

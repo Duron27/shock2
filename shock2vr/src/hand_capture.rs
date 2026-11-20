@@ -549,7 +549,7 @@ pub(crate) fn joints_log_recording(log: &str, path: &std::path::Path) -> std::io
             version: 2,
             scene: String::new(),
             save: String::new(),
-            presentation: crate::PresentationMode::Vr,
+            presentation: crate::PresentationMode::Flat,
             experimental: Vec::new(),
             glove_forward_cm: 0.0,
         },

@@ -244,8 +244,16 @@ impl PcSettings {
                 *value = default;
             }
         };
-        snap(&mut self.mouse_sensitivity, &MOUSE_SENSITIVITIES, defaults.mouse_sensitivity);
-        snap(&mut self.field_of_view, &FIELDS_OF_VIEW, defaults.field_of_view);
+        snap(
+            &mut self.mouse_sensitivity,
+            &MOUSE_SENSITIVITIES,
+            defaults.mouse_sensitivity,
+        );
+        snap(
+            &mut self.field_of_view,
+            &FIELDS_OF_VIEW,
+            defaults.field_of_view,
+        );
         snap(&mut self.brightness, &BRIGHTNESSES, defaults.brightness);
         snap(&mut self.master_volume, &VOLUMES, defaults.master_volume);
         snap(&mut self.music_volume, &VOLUMES, defaults.music_volume);

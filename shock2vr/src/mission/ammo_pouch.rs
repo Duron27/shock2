@@ -154,28 +154,6 @@ impl AmmoPouch {
             })))
         })
     }
-
-    pub fn render_zone(
-        &self,
-        position: Vector3<f32>,
-        rotation: Quaternion<f32>,
-    ) -> Vec<engine::scene::SceneObject> {
-        let Some(center) = self.world_center(position, rotation) else {
-            return vec![];
-        };
-        let color = super::body_gear_feedback::badge_color(
-            self.near.iter().any(|near| *near),
-            self.incompatible.iter().any(|bad| *bad),
-            self.refusal_flash > 0.0,
-        );
-        let mut objects = vec![dark::hit_box::draw_debug_wire_sphere(
-            center,
-            radius(),
-            color.truncate(),
-        )];
-        crate::util::tag_render_source(&mut objects, crate::util::render_source::PLAYER_HANDS);
-        objects
-    }
 }
 
 #[cfg(test)]

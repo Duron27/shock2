@@ -2,7 +2,7 @@
 //! native panels; glyph layout and widget geometry remain owned by the shared UI.
 use crate::ui::canvas_viewport::{CanvasViewport, target_to_canvas};
 use crate::ui::{HAlign, Rect, UiCanvas, VAlign, WorldPanel};
-use cgmath::{Deg, InnerSpace, Quaternion, Rotation, Rotation3, Vector2, Vector3, vec2, vec3};
+use cgmath::{InnerSpace, Quaternion, Rotation, Vector2, Vector3, vec2, vec3};
 
 mod grip;
 
@@ -55,20 +55,6 @@ fn authored_panel(
         + rotation
             .rotate_vector(grip.offset + grip.rotation.rotate_vector(anchor * grip.item_scale));
     (base, contact)
-}
-
-/// Upright at the belt: +Z screen faces the player, -Z lens faces outward.
-/// Follow body yaw plus the buckle angle; a glance down never tips the mount.
-pub(super) fn stowed_panel(
-    center: Vector3<f32>,
-    body_rotation: Quaternion<f32>,
-    mount_yaw: f32,
-) -> WorldPanel {
-    WorldPanel {
-        center,
-        rotation: body_rotation * Quaternion::from_angle_y(Deg(mount_yaw)),
-        size: face_size(),
-    }
 }
 
 fn scaled_grip_point(
@@ -388,29 +374,6 @@ mod tests {
     }
 
     #[test]
-    fn belt_mount_stays_upright_with_the_lens_facing_outward() {
-        use cgmath::{Deg, Rotation3};
-        let center = vec3(0.2, 1.0, -0.4);
-        for yaw in [-150.0, 0.0, 90.0] {
-            let rotation = Quaternion::from_angle_y(Deg(yaw));
-            let panel = stowed_panel(center, rotation, 13.0);
-            assert_eq!(panel.center, center);
-            assert!((panel.rotation * Vector3::unit_y() - Vector3::unit_y()).magnitude() < 0.00001);
-            assert!(
-                (panel.rotation * -Vector3::unit_z()
-                    - rotation
-                        * vec3(
-                            -13.0_f32.to_radians().sin(),
-                            0.0,
-                            -13.0_f32.to_radians().cos()
-                        ))
-                .magnitude()
-                    < 0.00001
-            );
-        }
-    }
-
-    #[test]
     fn saved_scale_matches_editor_body_screen_and_lens_in_both_hands() {
         use cgmath::{Deg, Rotation3};
         let library: crate::vr_grip::GripLibrary =
@@ -541,50 +504,6 @@ mod tests {
     }
 
     #[test]
-    fn scanning_a_live_creature_cannot_open_its_loot() {
-        let mut world = shipyard::World::new();
-        let creature = world.add_entity((
-            dark::properties::PropScripts {
-                scripts: vec!["CreatureContainer".into()],
-                inherits: false,
-            },
-            dark::properties::PropHitPoints { hit_points: 10 },
-            dark::properties::Links::empty(),
-        ));
-        assert!(!opens_panel(&world, creature));
-        world.add_component(creature, dark::properties::PropHitPoints { hit_points: 0 });
-        assert!(opens_panel(&world, creature));
-    }
-
-    /// A scanned info terminal is frobbed: it unlocks and shows its help topic.
-    #[test]
-    fn scanning_an_info_terminal_opens_its_help() {
-        let mut world = shipyard::World::new();
-        let terminal = world.add_entity(dark::properties::PropScripts {
-            scripts: vec!["InfoComputer".into()],
-            inherits: false,
-        });
-        assert!(opens_panel(&world, terminal));
-    }
-
-    #[test]
-    fn gamepig_board_fills_the_tricorder_screen_and_is_not_frobbed() {
-        use crate::gui::Gui;
-        let mut world = shipyard::World::new();
-        let gamepig = world.add_entity(dark::properties::PropScripts {
-            scripts: vec!["MiniGameBoy".into()],
-            inherits: false,
-        });
-        assert!(is_gamepig(&world, gamepig));
-        assert!(!opens_panel(&world, gamepig), "a frob would pick it up");
-        // The tricorder screen is the body plus the plug: no letterboxing.
-        let canvas = crate::scripts::gui::GamePigGui
-            .get_config()
-            .screen_size_in_pixels;
-        assert_eq!((canvas.x, canvas.y), (SCREEN.w, SCREEN.h));
-    }
-
-    #[test]
     fn only_a_held_gamepig_keeps_its_own_screen() {
         let mut world = shipyard::World::new();
         let gamepig = world.add_entity(dark::properties::PropScripts {
@@ -709,24 +628,6 @@ pub(super) fn panel_route(
     })
 }
 
-/// Only existing reader/panel scripts receive Frob; all other objects are queried.
-pub fn opens_panel(world: &shipyard::World, entity: shipyard::EntityId) -> bool {
-    super::personal_card::is_reader(world, entity)
-        || (crate::scripts::script_util::entity_has_script(world, entity, "CreatureContainer")
-            && crate::scripts::gui::creature_is_lootable(world, entity))
-        || [
-            "ContainerScript",
-            "KeyPad",
-            "KeyPadUnhackable",
-            "HackableCrate",
-            "ResearchableScript",
-            "Chemical",
-            "InfoComputer",
-        ]
-        .iter()
-        .any(|script| crate::scripts::script_util::entity_has_script(world, entity, script))
-}
-
 /// One trigger pull commits one scan. Drawing/recovery starts disarmed.
 pub struct Scanner {
     pressed: bool,
@@ -741,29 +642,6 @@ impl Default for Scanner {
     }
 }
 impl Scanner {
-    /// A stable target commits once; looking away or at another object rearms it.
-    pub fn focus(
-        &mut self,
-        target: Option<shipyard::EntityId>,
-        dt: f32,
-    ) -> Option<shipyard::EntityId> {
-        let Some(target) = target else {
-            self.focus = None;
-            return None;
-        };
-        if self.focus.is_none_or(|(previous, _, _)| previous != target) {
-            self.focus = Some((target, 0.0, false));
-        }
-        let (_, elapsed, committed) = self.focus.as_mut().unwrap();
-        *elapsed += dt.max(0.0);
-        if !*committed && *elapsed >= 0.4 {
-            *committed = true;
-            Some(target)
-        } else {
-            None
-        }
-    }
-
     pub fn trigger(&mut self, enabled: bool, pressed: bool) -> bool {
         if !enabled {
             self.focus = None;
@@ -991,23 +869,6 @@ pub fn body_frame(panel: WorldPanel) -> cgmath::Matrix4<f32> {
 #[cfg(test)]
 mod scan_tests {
     use super::Scanner;
-    #[test]
-    fn focus_requires_dwell_and_rearms_only_after_target_changes() {
-        let mut world = shipyard::World::new();
-        let a = world.add_entity(());
-        let b = world.add_entity(());
-        let mut scan = Scanner::default();
-        assert_eq!(scan.focus(Some(a), 0.1), None);
-        assert_eq!(scan.focus(Some(a), 0.2), None);
-        assert_eq!(scan.focus(Some(b), 0.1), None);
-        assert_eq!(scan.focus(Some(b), 0.3), Some(b));
-        assert_eq!(scan.focus(Some(b), 3.0), None);
-        assert_eq!(scan.focus(None, 0.1), None);
-        assert_eq!(scan.focus(Some(b), 0.2), None);
-        assert_eq!(scan.focus(Some(b), 0.2), Some(b));
-        scan.trigger(false, false);
-        assert_eq!(scan.focus(Some(b), 0.1), None);
-    }
 
     #[test]
     fn drawing_and_tracking_recovery_require_a_fresh_trigger_edge() {

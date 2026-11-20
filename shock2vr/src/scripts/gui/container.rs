@@ -662,14 +662,6 @@ mod tests {
         loot_world_with_action(FrobFlag::MOVE)
     }
 
-    /// Present this world in VR. A world with no `GlobalPresentationMode`
-    /// reads as flat, which is what every other test here wants.
-    fn present_in_vr(world: &mut World) {
-        world.add_unique(crate::mission::GlobalPresentationMode(
-            crate::PresentationMode::Vr,
-        ));
-    }
-
     /// A pooled stack shows its size on the icon; a single item does not.
     /// The badge sits in the item's own footprint, so it tracks the icon
     /// rather than being placed independently per presentation.
@@ -967,20 +959,11 @@ mod tests {
     fn item_grids_sit_on_the_authored_backdrop_cells() {
         let (world, container, item, _inventory) = loot_world();
 
-        let (mut vr_world, vr_container, vr_item, _) = loot_world();
-        present_in_vr(&mut vr_world);
-
         for (gui, scene, expected_origin) in [
             // Flat keeps the retail `contain.pcx` grid inset.
             (
                 ContainerGui::loot_container(),
                 (&world, container, item),
-                vec2(15.0, 153.0),
-            ),
-            // VR uses the same MFD grid.
-            (
-                ContainerGui::loot_container(),
-                (&vr_world, vr_container, vr_item),
                 vec2(15.0, 153.0),
             ),
             (
@@ -1007,74 +990,6 @@ mod tests {
             assert_eq!(position, expected_origin, "grid origin");
             assert_eq!(size, vec2(35.0, 34.0), "one cell of the shared pitch");
         }
-    }
-
-    /// Both VR hosts present the same retail canvas as flatscreen.
-    #[test]
-    fn a_loot_panel_uses_the_same_retail_art_in_flat_and_vr() {
-        let (flat_world, flat_container, ..) = loot_world();
-        let (mut vr_world, vr_container, ..) = loot_world();
-        present_in_vr(&mut vr_world);
-
-        let backdrop = |world: &World, container| {
-            ContainerGui::loot_container()
-                .get_components(&None, container, world, &ContainerGuiState {})
-                .into_iter()
-                .find_map(|component| match component {
-                    GuiComponent::Image {
-                        texture, position, ..
-                    } if position == vec2(0.0, 0.0)
-                        || texture == crate::ui::HOLOGRAM_TILE_TEXTURE =>
-                    {
-                        Some(texture)
-                    }
-                    _ => None,
-                })
-                .expect("the panel draws a backdrop")
-        };
-
-        assert_eq!(backdrop(&flat_world, flat_container), "contain.pcx");
-        assert_eq!(backdrop(&vr_world, vr_container), "contain.pcx");
-    }
-
-    /// Both presentations preserve the complete authored MFD canvas.
-    #[test]
-    fn a_loot_panels_canvas_matches_the_style_it_draws() {
-        let (flat_world, container, ..) = loot_world();
-        let (mut vr_world, vr_container, ..) = loot_world();
-        present_in_vr(&mut vr_world);
-        let gui = ContainerGui::loot_container();
-
-        let flat = gui.get_config_for(container, &flat_world, &ContainerGuiState {});
-        let vr = gui.get_config_for(vr_container, &vr_world, &ContainerGuiState {});
-
-        assert_eq!(flat.screen_size_in_pixels, vec2(188.0, 296.0));
-        assert_eq!(vr.screen_size_in_pixels, flat.screen_size_in_pixels);
-        assert_eq!(
-            flat.world_offset, vr.world_offset,
-            "only the drawing differs - placement is shared"
-        );
-    }
-
-    #[test]
-    fn handheld_loot_uses_retail_art_and_hit_geometry_in_vr() {
-        let (mut world, container, ..) = loot_world();
-        present_in_vr(&mut world);
-        world.add_unique(crate::mission::mfd_device::ScreenActive(true));
-        let gui = ContainerGui::loot_container();
-        let spec = gui.spec(&world);
-        assert_eq!(spec.backdrop, "contain.pcx");
-        assert_eq!(spec.grid_origin, LOOT_ART_GRID_ORIGIN);
-        assert_eq!(
-            gui.get_config_for(container, &world, &ContainerGuiState {})
-                .screen_size_in_pixels,
-            vec2(188.0, 296.0)
-        );
-        world
-            .borrow::<shipyard::UniqueViewMut<crate::mission::mfd_device::ScreenActive>>()
-            .unwrap()
-            .0 = false;
-        assert_eq!(gui.spec(&world).backdrop, "contain.pcx");
     }
 
     #[test]

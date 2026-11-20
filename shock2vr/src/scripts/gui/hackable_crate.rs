@@ -476,26 +476,6 @@ mod tests {
         );
     }
 
-    /// Hacked crates use the same MFD loot canvas in VR.
-    #[test]
-    fn a_hacked_crate_draws_the_retail_mfd_in_vr() {
-        let (mut world, security_crate, _clip) = crate_world();
-        world.add_component(security_crate, PropObjState(ObjectState::Hacked));
-        world.add_unique(crate::mission::GlobalPresentationMode(
-            crate::PresentationMode::Vr,
-        ));
-
-        let components = HackableCrateGui::new().get_components(
-            &None,
-            security_crate,
-            &world,
-            &HackableCrateState::default(),
-        );
-
-        assert!(!has_texture(&components, crate::ui::HOLOGRAM_TILE_TEXTURE));
-        assert!(has_texture(&components, "contain.pcx"));
-    }
-
     /// A live board with two nodes already lit, so lighting `target` decides
     /// the round. `success_chance` drives the per-node roll (the no-HRM-params
     /// fallback clamps it to 0..=85, so 0 always fails and 85 nearly always

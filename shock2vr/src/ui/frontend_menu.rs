@@ -23,7 +23,7 @@ use crate::{
 
 use super::{
     FrontendCanvasPresenter, FrontendPanelAnchor, FrontendPointerPass, PointerVisuals, Rect,
-    ScaleMode, UiCanvas, WorldPanel, pointer_to_canvas, vr_frontend_pointer_pass,
+    ScaleMode, UiCanvas, WorldPanel, pointer_to_canvas,
 };
 
 use super::frontend_sfx::FrontendSfx;
@@ -245,21 +245,16 @@ impl<A: Copy + PartialEq> FrontendMenu<A> {
             elapsed,
         );
 
-        let (point, pressed) = if presentation_mode == PresentationMode::Vr {
-            self.vr_pointer = vr_frontend_pointer_pass(input_context, self.canvas_size, &panel);
-            self.pointer = None;
-            (self.vr_pointer.point(), self.vr_pointer.pressed)
-        } else {
-            self.pointer = input_context.pointer;
-            self.vr_pointer = FrontendPointerPass::default();
-            flat_pointer_state(
-                input_context.pointer,
-                self.last_pressed,
-                self.last_screen_size,
-                self.canvas_size,
-                self.scale_mode,
-            )
-        };
+        let _ = (presentation_mode, &panel);
+        self.pointer = input_context.pointer;
+        self.vr_pointer = FrontendPointerPass::default();
+        let (point, pressed) = flat_pointer_state(
+            input_context.pointer,
+            self.last_pressed,
+            self.last_screen_size,
+            self.canvas_size,
+            self.scale_mode,
+        );
         self.pointer_canvas = point;
 
         self.resolve_pointer(point, pressed, click_hit, hover_hit)
@@ -420,31 +415,6 @@ mod tests {
         assert!(flat.renders_screen_space());
         assert_eq!(flat.scale_mode(), ScaleMode::PreserveAspect);
         assert_eq!(flat.component_z_step(), VR_COMPONENT_Z_STEP);
-
-        let vr = FrontendCanvasPresenter::new(PresentationMode::Vr, ScaleMode::PreserveAspect);
-        assert!(vr.renders_world_space());
-        assert!(!vr.renders_screen_space());
-        assert_eq!(vr.scale_mode(), ScaleMode::PreserveAspect);
-        assert_eq!(vr.component_z_step(), VR_COMPONENT_Z_STEP);
-    }
-
-    #[test]
-    fn original_frontend_scenes_do_not_own_presentation_mode_branches() {
-        let consumers = [
-            ("main menu", include_str!("../scenes/main_menu.rs")),
-            ("load game", include_str!("../scenes/load_game.rs")),
-            ("game over", include_str!("../scenes/game_over.rs")),
-            ("loading", include_str!("../scenes/loading.rs")),
-            ("no assets", include_str!("../scenes/no_assets.rs")),
-        ];
-
-        for (name, source) in consumers {
-            assert!(
-                !source.contains("options.presentation_mode != PresentationMode::Vr")
-                    && !source.contains("options.presentation_mode == PresentationMode::Vr"),
-                "{name} must delegate flat/VR presentation selection to FrontendCanvasPresenter"
-            );
-        }
     }
 
     #[test]

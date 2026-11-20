@@ -1,5 +1,5 @@
 use dark::properties::{PropFrobSound, PropUseMsg};
-use shipyard::{EntityId, Get, UniqueView, View, World};
+use shipyard::{EntityId, Get, View, World};
 
 use engine::audio::AudioHandle;
 
@@ -34,21 +34,7 @@ pub fn world_frob_feedback(world: &World, entity_id: EntityId) -> Vec<Effect> {
         .borrow::<View<PropUseMsg>>()
         .ok()
         .and_then(|v| v.get(entity_id).ok().map(|raw| raw.0.clone()));
-    // Earth's training log says "Press the "U" key..."; VR plays logs from a
-    // hand's upper button, so there the line would be a wrong instruction.
-    let vr = world
-        .borrow::<UniqueView<crate::mission::GlobalPresentationMode>>()
-        .is_ok_and(|mode| mode.0 == crate::PresentationMode::Vr);
-    let use_message = raw_use_message
-        .filter(|raw| {
-            !(vr && raw
-                .split(':')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .eq_ignore_ascii_case("traininglog"))
-        })
-        .and_then(|raw| resolve_use_message(world, &raw));
+    let use_message = raw_use_message.and_then(|raw| resolve_use_message(world, &raw));
     if (frob_sound.is_none() && use_message.is_none())
         || super::script_util::player_carried_items(world).contains(&entity_id)
     {
@@ -117,14 +103,10 @@ mod tests {
         }
     }
 
-    /// Earth's training log tells a desktop player to press "U"; VR has no
-    /// such key, so the line is shown flat only.
+    /// Earth's training log tells the player to press "U".
     #[test]
-    fn the_training_logs_keyboard_hint_is_flat_only() {
-        for (mode, shown) in [
-            (crate::PresentationMode::Flat, true),
-            (crate::PresentationMode::Vr, false),
-        ] {
+    fn the_training_logs_keyboard_hint_is_shown() {
+        for (mode, shown) in [(crate::PresentationMode::Flat, true)] {
             let mut world = World::new();
             world.add_unique(StringTable::from_table(
                 "usemsg.str",

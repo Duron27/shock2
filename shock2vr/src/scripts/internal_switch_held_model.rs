@@ -145,9 +145,6 @@ mod tests {
     #[test]
     fn psi_amp_wields_its_authored_hand_and_restores_the_world_model_on_drop() {
         let mut world = World::new();
-        world.add_unique(crate::mission::mission_core::GlobalPresentationMode(
-            crate::PresentationMode::Vr,
-        ));
         let amp = world.add_entity((
             PropPlayerGun {
                 flags: 0,

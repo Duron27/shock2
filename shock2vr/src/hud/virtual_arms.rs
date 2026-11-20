@@ -212,8 +212,6 @@ pub(crate) fn implant_socket_frame(
     )) * Matrix4::from_angle_y(Deg(side * 90.0))
 }
 
-pub(crate) const IMPLANT_SLOT_WIDTH: f32 = BIO_WIDTH * 34.0 / 128.0 * 1.75;
-
 /// Wrist-frame +Z points out of the glove's back; +Y points toward its fingers.
 /// Bio faces dorsally, scaled alike in x and z so it can bend around the
 /// wrist. Ammo caps the cuff opening and faces back along the forearm,

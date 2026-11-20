@@ -24,7 +24,6 @@ pub mod input_context;
 pub mod install;
 pub mod inventory;
 pub mod ladder_holds;
-mod melee_charge_visual;
 mod melee_lighting;
 mod melee_swing;
 pub mod message_trace;
@@ -649,17 +648,14 @@ pub fn save_file_path(name: &str) -> std::path::PathBuf {
     save_load::save_directory().join(format!("{name}.sav"))
 }
 
-/// How the game is presented and controlled.
-///
-/// `Vr` is the existing head/hands interaction model (forearm HUD panels,
-/// `VirtualHand` grab-and-hold). `Flat` is the classic flatscreen presentation:
-/// a screen-space 2D HUD, 2D menus, and first-person interaction. The flag is
-/// threaded only to the presentation/interaction edges - the simulation is
-/// shared.
+/// How the game is presented: the classic flatscreen presentation (a
+/// screen-space 2D HUD, 2D menus, first-person interaction). The VR
+/// presentation has been removed; this enum is on its way out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum PresentationMode {
+    /// Recordings written before VR was removed say `Vr`; they replay flat.
     #[default]
-    Vr,
+    #[serde(alias = "Vr")]
     Flat,
 }
 
@@ -701,7 +697,7 @@ impl Default for GameOptions {
             save_writer: save_load::SaveWriter::default(),
             difficulty: dark::gamesys::Difficulty::Normal,
             mission: "earth.mis".to_owned(),
-            presentation_mode: PresentationMode::Vr,
+            presentation_mode: PresentationMode::Flat,
             spawn_location: SpawnLocation::MapDefault,
             save_file: None,
             debug_draw: false,
@@ -1821,7 +1817,6 @@ impl Game {
         }
         let calibrated_input = glove_fit::calibrated_input(
             input_context,
-            self.options.presentation_mode,
             matches!(
                 self.active_game_scene.scene_name(),
                 "debug_gloves" | "debug_psi_fit"
@@ -2020,7 +2015,7 @@ impl Game {
             actions,
             input_context,
             time.elapsed,
-            allowed && self.options.presentation_mode == PresentationMode::Vr,
+            false,
         );
         let input_context = &handheld_context;
         action_effects.extend(self.weapon_buttons.update(
@@ -3252,19 +3247,6 @@ impl Game {
             .active_game_scene
             .render(&mut self.asset_cache, &self.options);
 
-        if self.options.presentation_mode == PresentationMode::Vr
-            && self.free_camera.is_detached()
-            && dev_params::get_bool(dev_params::VR_DEBUG_BODY)
-            && !self.pause_menu.is_open()
-            && !self.player_visuals_hidden()
-            && !self.active_game_scene.pose_workbench_open()
-        {
-            scene.extend(
-                self.active_game_scene
-                    .render_debug_body(&mut self.asset_cache),
-            );
-        }
-
         // While the menu is up it draws its own pointer hands, so the scene's
         // must not draw a second pair inside them (issue #1018). Dropped here,
         // by render-path label, rather than through a per-scene opt-in: every
@@ -4084,7 +4066,6 @@ impl MissingAssets {
         use crate::game_scene::GameScene;
         let calibrated_input = glove_fit::calibrated_input(
             input_context,
-            self.options.presentation_mode,
             false,
             dev_params::get(dev_params::GLOVE_FORWARD_CM),
         );
