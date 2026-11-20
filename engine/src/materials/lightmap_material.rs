@@ -132,13 +132,17 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 
             vec4 lightmapColor = texture(texture1, wrappedTexCoord) * lightmapIntensity;
             vec4 diffuseColor = texture(texture2, texCoord + diffuseUvOffset);
+            // Before any discard: the bump takes screen-space derivatives.
+            vec3 geometric = normalize(worldNormal);
+            vec3 bumped = unlit ? geometric
+                : bumpNormal(texture2, texCoord + diffuseUvOffset, worldPos, geometric, 0.04);
             if (layerAlphaTest && diffuseColor.a * layerColorAlpha.a < 0.1) discard;
 
             // Dark's mission ambient is a minimum final intensity: preserve
             // brighter authored pixels while keeping unlit surfaces legible.
             vec3 finalColor = max(diffuseColor.rgb * lightmapColor.rgb, ambientColor);
 
-            vec3 normal = normalize(worldNormal);
+            vec3 normal = geometric;
             // An object between a shadow lamp and this surface takes back the
             // share of the baked light that lamp would have put here. World
             // casters are not in this set: the lightmap holds their shadows.
@@ -165,6 +169,29 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                 finalColor = max(finalColor, ambientColor);
             }
 
+            // The lightmap was baked for the flat face; relight the relief
+            // against the nearby lamps (and faintly from the eye, so an unlit
+            // corridor still shows its texture) by how much the bumped normal
+            // turns toward or away from them.
+            if (!unlit && bumpStrength > 0.0) {
+                highp vec3 toEyeDir = normalize(fogEyeDensity.xyz - worldPos);
+                vec3 lightDir = toEyeDir * 0.35;
+                for (int k = 0; k < POINT_SHADOW_MAX; k++) {
+                    highp vec4 lamp = pointShadowLights[k];
+                    if (lamp.w <= 0.0) continue;
+                    highp vec3 toLamp = lamp.xyz - worldPos;
+                    highp float distance = length(toLamp);
+                    if (distance >= lamp.w) continue;
+                    lightDir += toLamp / max(distance, 0.00001) * (1.0 - distance / lamp.w);
+                }
+                float weight = length(lightDir);
+                if (weight > 1e-3) {
+                    vec3 l = lightDir / weight;
+                    float relief = 1.0 + 1.6 * (dot(bumped, l) - dot(normal, l));
+                    finalColor *= clamp(relief, 0.5, 1.5);
+                }
+            }
+
             // Reflections. Decks are polished metal and tile: floors most of
             // all, walls a little. The capture is a lit photograph of the
             // deck, so it is scaled by the light this spot actually gets -
@@ -172,14 +199,14 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             // highlights, which is what reads as a reflective floor.
             if (!unlit && worldGloss > 0.0) {
                 highp vec3 toEye = normalize(fogEyeDensity.xyz - worldPos);
-                float up = smoothstep(0.5, 0.9, normal.y);
+                float up = smoothstep(0.5, 0.9, geometric.y);
                 float gloss = worldGloss * mix(0.08, 1.0, up);
-                float facing = clamp(dot(normal, toEye), 0.0, 1.0);
+                float facing = clamp(dot(bumped, toEye), 0.0, 1.0);
                 float fresnel = mix(0.12, 1.0, pow(1.0 - facing, 5.0));
                 float lit = clamp(dot(lightmapColor.rgb, vec3(0.299, 0.587, 0.114)) * 3.0, 0.0, 1.0);
                 vec3 reflected = vec3(0.0);
                 if (worldEnvironment) {
-                    vec3 mirrored = reflect(-toEye, normal);
+                    vec3 mirrored = reflect(-toEye, bumped);
                     reflected += textureLod(shineEnvironment, environmentDirection(mirrored), 1.2).rgb
                         * fresnel * lit;
                 }
@@ -190,8 +217,8 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                     highp float distance = length(toLamp);
                     if (distance >= lamp.w) continue;
                     vec3 l = toLamp / max(distance, 0.00001);
-                    float ndl = max(dot(normal, l), 0.0);
-                    float spec = pow(max(dot(normal, normalize(l + toEye)), 0.0), 72.0) * ndl;
+                    float ndl = max(dot(bumped, l), 0.0);
+                    float spec = pow(max(dot(bumped, normalize(l + toEye)), 0.0), 72.0) * ndl;
                     float falloff = 1.0 - distance / lamp.w;
                     reflected += pointShadowColor[k].rgb * pointShadowColor[k].w
                         * spec * falloff * (0.6 + 2.0 * fresnel);
@@ -203,7 +230,7 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
             for (int i = 0; i < 6; i++) {
-                finalColor += calculateSpotlight(i, worldPos, normal, diffuseColor.rgb, specular, power);
+                finalColor += calculateSpotlight(i, worldPos, bumped, diffuseColor.rgb, specular, power);
             }
 
             vec4 base = vec4((unlit ? diffuseColor.rgb : finalColor) * layerColorAlpha.rgb,
@@ -221,6 +248,7 @@ struct UnifiedUniforms {
     shine: ShineUniforms,
     point_shadow: crate::scene::point_shadow::Uniforms,
     fog: crate::scene::fog::Uniforms,
+    bump: crate::scene::bump::Uniforms,
     world_wave: crate::scene::world_wave::Uniforms,
     uv_offset_loc: gfx::Uniform,
     unlit_loc: gfx::Uniform,
@@ -377,11 +405,15 @@ impl LightmapMaterial {
         uniforms.world_wave.bind(render_context.world_wave);
         uniforms.point_shadow.bind(lights, render_context);
         uniforms.fog.bind();
+        uniforms.bump.bind();
         let environment = lights.environment.as_ref();
         if let Some(environment) = environment {
             environment.bind_to(crate::scene::shine::ENVIRONMENT_UNIT);
         }
-        gfx::set_i32(uniforms.world_environment_loc, i32::from(environment.is_some()));
+        gfx::set_i32(
+            uniforms.world_environment_loc,
+            i32::from(environment.is_some()),
+        );
         let strength = render_context.terrain_wetness;
         let shine = self
             .shine
@@ -525,9 +557,10 @@ impl Material for LightmapMaterial {
                 &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
 
             let fragment_shader = &format!(
-                "{}\n{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 crate::scene::point_shadow::GLSL,
                 crate::scene::fog::GLSL,
+                crate::scene::bump::GLSL,
                 crate::scene::environment::GLSL,
                 crate::scene::shine::GLSL,
                 include_str!("../scene/flashlight.glsl"),
@@ -541,6 +574,7 @@ impl Material for LightmapMaterial {
                 shine: ShineUniforms::new(&shader),
                 point_shadow: crate::scene::point_shadow::Uniforms::new(&shader),
                 fog: crate::scene::fog::Uniforms::new(&shader),
+                bump: crate::scene::bump::Uniforms::new(&shader),
                 layer_color_alpha_loc: shader.uniform("layerColorAlpha"),
                 layer_enabled_loc: shader.uniform("layerEnabled"),
                 layer_alpha_test_loc: shader.uniform("layerAlphaTest"),

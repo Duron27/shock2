@@ -26,6 +26,9 @@ pub struct Scene {
 
     /// Polished-deck reflection strength on the world; 0 is off.
     pub world_gloss: f32,
+
+    /// Brightness-derived bump detail (see [`bump`](super::bump)); 0 is off.
+    pub bump_strength: f32,
 }
 
 impl Scene {
@@ -38,6 +41,7 @@ impl Scene {
             point_shadow_strength: 0.0,
             fog_density: 0.0,
             world_gloss: 0.0,
+            bump_strength: 0.0,
         }
     }
 
@@ -50,6 +54,7 @@ impl Scene {
             point_shadow_strength: 0.0,
             fog_density: 0.0,
             world_gloss: 0.0,
+            bump_strength: 0.0,
         }
     }
 

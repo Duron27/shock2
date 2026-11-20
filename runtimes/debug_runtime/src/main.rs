@@ -1258,6 +1258,7 @@ fn run_game_blocking(
         ) = game.get_shadow_lights();
         scene_for_render.fog_density = game.fog_density();
         scene_for_render.world_gloss = game.world_gloss();
+        scene_for_render.bump_strength = game.bump_strength();
         // Reflection strength 0: only the world shader mirrors it from here;
         // objects carry their own capture and strength.
         scene_for_render.lights_mut().environment = game.environment();

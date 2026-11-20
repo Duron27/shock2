@@ -173,7 +173,8 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                 * (0.6 + 0.4 * dot(texColor.rgb, vec3(0.299, 0.587, 0.114)));
 
             // Light reaching the surface before albedo, shared with the shine.
-            vec3 normal = normalize(worldNormal);
+            // Models are small: shallow relief.
+            vec3 normal = bumpNormal(texture1, texCoord, worldPos, normalize(worldNormal), 0.012);
             vec3 light = ambientLight * ambientIntensity;
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
@@ -218,6 +219,7 @@ struct UnifiedUniforms {
     self_depth: super::self_depth::Uniforms,
     point_shadow: super::point_shadow::Uniforms,
     fog: super::fog::Uniforms,
+    bump: super::bump::Uniforms,
     held_reflection: gfx::Uniform,
     held_environment: gfx::Uniform,
     incidence: IncidenceUniforms,
@@ -309,6 +311,7 @@ where
         uniforms.self_depth.bind(render_context.self_depth);
         uniforms.point_shadow.bind(lights, render_context);
         uniforms.fog.bind();
+        uniforms.bump.bind();
         let held_environment = lights
             .environment
             .as_ref()
@@ -316,7 +319,10 @@ where
         if let Some(environment) = held_environment {
             environment.bind_to(super::shine::ENVIRONMENT_UNIT);
         }
-        gfx::set_i32(uniforms.held_environment, i32::from(held_environment.is_some()));
+        gfx::set_i32(
+            uniforms.held_environment,
+            i32::from(held_environment.is_some()),
+        );
         gfx::set_f32(uniforms.held_reflection, lights.held_reflection);
         uniforms
             .incidence
@@ -481,10 +487,11 @@ where
                 &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
 
             let fragment_shader = &format!(
-                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                 include_str!("flashlight.glsl"),
                 super::point_shadow::GLSL,
                 super::fog::GLSL,
+                super::bump::GLSL,
                 super::self_depth::GLSL,
                 super::incidence::GLSL,
                 super::environment::GLSL,
@@ -505,6 +512,7 @@ where
                 self_depth: super::self_depth::Uniforms::new(&shader),
                 point_shadow: super::point_shadow::Uniforms::new(&shader),
                 fog: super::fog::Uniforms::new(&shader),
+                bump: super::bump::Uniforms::new(&shader),
                 held_reflection: shader.uniform("heldReflection"),
                 held_environment: shader.uniform("heldEnvironment"),
                 incidence: IncidenceUniforms::new(&shader),

@@ -579,6 +579,9 @@ dev_params! {
     /// lamps (0 off). The capture exists on 25AE installs only; lamp
     /// highlights need lamp shadows on.
     WORLD_GLOSS = Lighting::float("world_gloss", "World gloss", 0.6, 0.0, 2.0, 0.05),
+    /// Bump detail from each texture's brightness: grout, seams and rivets
+    /// catch lamps, gloss and the flashlight (0 off). Not in the original.
+    BUMP_STRENGTH = Lighting::float("bump_strength", "Bump detail", 0.7, 0.0, 4.0, 0.1),
     /// Glow around bright sources - lamps, screens, flashes (0 off).
     SCREEN_BLOOM = Lighting::float("screen_bloom", "Glare bloom", 0.8, 0.0, 2.0, 0.05),
     /// Horizontal lens streak through near-white points (0 off). Off by

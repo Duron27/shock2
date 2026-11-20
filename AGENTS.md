@@ -818,6 +818,14 @@ multipliers) turns it off for a faithful comparison:
 - `world_gloss` - floors reflect the mission's 25AE environment capture and
   catch highlights from the shadow lamps (lightmap_material); classic
   installs have no capture, so only the lamp highlights apply.
+- `held_reflection` - held weapons mirror the same capture, weighted by how
+  silver each texel is (25AE only).
+- `bump_strength` - bump detail derived from each texture's brightness
+  (`engine/src/scene/bump.rs`): grout, seams and rivets catch lamps, gloss
+  and the flashlight. Neither install ships bump/normal maps.
+
+World and model textures are mipmapped with 8x anisotropy by default
+(`TextureOptions::default`); atlases and per-frame video stay single-level.
 - Muzzle flashes and explosions add short point lights
   (`shock2vr/src/muzzle_lighting.rs`).
 

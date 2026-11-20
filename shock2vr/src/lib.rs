@@ -25,9 +25,9 @@ pub mod install;
 pub mod inventory;
 mod ladder_holds;
 mod melee_lighting;
-mod muzzle_lighting;
 mod melee_swing;
 pub mod message_trace;
+mod muzzle_lighting;
 pub mod object_lighting;
 pub mod particle_effects;
 mod particle_group;
@@ -3113,6 +3113,11 @@ impl Game {
         dev_params::get(dev_params::WORLD_GLOSS)
     }
 
+    /// Bump detail strength for `Scene::bump_strength`.
+    pub fn bump_strength(&self) -> f32 {
+        dev_params::get(dev_params::BUMP_STRENGTH)
+    }
+
     /// The mission's environment capture, which world reflections mirror;
     /// `None` on a classic install or outside a mission.
     pub fn environment(&self) -> Option<std::rc::Rc<engine::texture::CubeTexture>> {
@@ -4002,6 +4007,13 @@ impl App {
     pub fn world_gloss(&self) -> f32 {
         match self {
             App::Ready(game) => game.world_gloss(),
+            App::MissingAssets(_) => 0.0,
+        }
+    }
+
+    pub fn bump_strength(&self) -> f32 {
+        match self {
+            App::Ready(game) => game.bump_strength(),
             App::MissingAssets(_) => 0.0,
         }
     }
