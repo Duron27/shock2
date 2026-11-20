@@ -47,6 +47,9 @@ pub struct VkRenderer {
     slot: usize,
     size: (u32, u32),
     vsync: bool,
+    /// Requested MSAA samples per pixel; the swapchain uses the highest the
+    /// device supports up to this (1 = off).
+    msaa: u32,
     rebuild: bool,
     rebuilds: u32,
     capture: bool,
@@ -56,6 +59,11 @@ pub struct VkRenderer {
     gamma_target: Option<gamma::GammaTarget>,
     pub ctx: VkContext,
 }
+
+/// 4x MSAA: smooths the geometry edges the 1999 art is full of (grates,
+/// railings, pipes) at a cost desktop GPUs absorb. `SHOCK2_MSAA` overrides it
+/// (1 disables) for comparing captures.
+const DEFAULT_MSAA: u32 = 4;
 
 /// A presented frame read back: tightly packed RGBA8, top row first.
 pub struct Capture {
@@ -77,6 +85,11 @@ impl VkRenderer {
             slot: 0,
             size,
             vsync,
+            msaa: std::env::var("SHOCK2_MSAA")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .unwrap_or(DEFAULT_MSAA)
+                .max(1),
             rebuild: true,
             rebuilds: 0,
             capture: false,
@@ -135,6 +148,23 @@ impl VkRenderer {
         }
     }
 
+    /// Request `samples` MSAA samples per pixel (1 = off); takes effect
+    /// with the next frame.
+    pub fn set_msaa(&mut self, samples: u32) {
+        let samples = samples.max(1);
+        if samples != self.msaa {
+            self.msaa = samples;
+            self.rebuild = true;
+        }
+    }
+
+    /// Samples per pixel the current swapchain renders with.
+    pub fn msaa_samples(&self) -> u32 {
+        self.swapchain
+            .as_ref()
+            .map_or(1, |swapchain| swapchain.samples.as_raw())
+    }
+
     pub fn set_vsync(&mut self, vsync: bool) {
         if vsync != self.vsync {
             self.vsync = vsync;
@@ -159,7 +189,8 @@ impl VkRenderer {
         if self.size.0 == 0 || self.size.1 == 0 {
             return;
         }
-        match VkSwapchain::new(&self.ctx, self.size, self.vsync) {
+        let samples = swapchain::supported_samples(&self.ctx, self.msaa);
+        match VkSwapchain::new(&self.ctx, self.size, self.vsync, samples) {
             Ok(swapchain) => {
                 self.render_finished = swapchain
                     .images
@@ -171,6 +202,9 @@ impl VkRenderer {
                             .expect("vkCreateSemaphore")
                     })
                     .collect();
+                if self.rebuilds == 0 {
+                    tracing::info!("MSAA: {}x", swapchain.samples.as_raw());
+                }
                 self.swapchain = Some(swapchain);
                 self.rebuild = false;
                 self.rebuilds += 1;
@@ -285,6 +319,7 @@ impl VkRenderer {
             resume_pass,
             framebuffer,
             (swapchain.format, swapchain.depth_format),
+            swapchain.samples,
             swapchain.extent,
             self.slot,
         );

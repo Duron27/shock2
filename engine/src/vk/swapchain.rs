@@ -16,7 +16,9 @@ const DEPTH_FORMATS: [vk::Format; 3] = [
     vk::Format::D16_UNORM,
 ];
 
-pub struct DepthBuffer {
+/// An image the frame draws into that isn't the swapchain's own: the depth
+/// buffer, and with MSAA the multisampled colour the pass resolves from.
+pub struct AttachmentImage {
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
     pub view: vk::ImageView,
@@ -29,7 +31,12 @@ pub struct VkSwapchain {
     pub extent: vk::Extent2D,
     pub images: Vec<vk::Image>,
     pub views: Vec<vk::ImageView>,
-    pub depth: DepthBuffer,
+    pub depth: AttachmentImage,
+    /// Samples per pixel of the scene attachments (1 = no MSAA).
+    pub samples: vk::SampleCountFlags,
+    /// With MSAA, the multisampled colour the pass draws into and resolves
+    /// to the presented image at its end.
+    pub msaa_color: Option<AttachmentImage>,
     pub render_pass: vk::RenderPass,
     /// `render_pass` loading instead of clearing (see `create_render_pass`).
     pub resume_pass: vk::RenderPass,
@@ -39,7 +46,12 @@ pub struct VkSwapchain {
 }
 
 impl VkSwapchain {
-    pub fn new(ctx: &VkContext, size: (u32, u32), vsync: bool) -> Result<VkSwapchain, vk::Result> {
+    pub fn new(
+        ctx: &VkContext,
+        size: (u32, u32),
+        vsync: bool,
+        samples: vk::SampleCountFlags,
+    ) -> Result<VkSwapchain, vk::Result> {
         let pd = ctx.physical_device;
         let caps = unsafe {
             ctx.surface_loader
@@ -130,15 +142,46 @@ impl VkSwapchain {
                     .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
             })
             .expect("no depth format");
-        let depth = create_depth(ctx, depth_format, extent)?;
-        let render_pass =
-            create_render_pass(ctx, surface_format.format, depth_format, false, false)?;
-        let resume_pass =
-            create_render_pass(ctx, surface_format.format, depth_format, false, true)?;
+        let depth = create_attachment(
+            ctx,
+            depth_format,
+            extent,
+            samples,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            depth_aspect(depth_format),
+        )?;
+        let msaa_color = if samples == vk::SampleCountFlags::TYPE_1 {
+            None
+        } else {
+            Some(create_attachment(
+                ctx,
+                surface_format.format,
+                extent,
+                samples,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+                vk::ImageAspectFlags::COLOR,
+            )?)
+        };
+        let render_pass = create_render_pass(
+            ctx,
+            surface_format.format,
+            depth_format,
+            samples,
+            false,
+            false,
+        )?;
+        let resume_pass = create_render_pass(
+            ctx,
+            surface_format.format,
+            depth_format,
+            samples,
+            false,
+            true,
+        )?;
         let framebuffers = views
             .iter()
             .map(|&view| {
-                let attachments = [view, depth.view];
+                let attachments = scene_attachments(view, &depth, msaa_color.as_ref());
                 unsafe {
                     ctx.device.create_framebuffer(
                         &vk::FramebufferCreateInfo::builder()
@@ -161,6 +204,8 @@ impl VkSwapchain {
             images,
             views,
             depth,
+            samples,
+            msaa_color,
             render_pass,
             resume_pass,
             framebuffers,
@@ -179,6 +224,9 @@ impl VkSwapchain {
             ctx.device.destroy_image_view(self.depth.view, None);
             ctx.device.destroy_image(self.depth.image, None);
             ctx.device.free_memory(self.depth.memory, None);
+            if let Some(color) = self.msaa_color.take() {
+                color.destroy(ctx);
+            }
             for &view in &self.views {
                 ctx.device.destroy_image_view(view, None);
             }
@@ -214,11 +262,65 @@ pub(crate) fn subresource(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceR
     }
 }
 
-fn create_depth(
+impl AttachmentImage {
+    fn destroy(self, ctx: &VkContext) {
+        unsafe {
+            ctx.device.destroy_image_view(self.view, None);
+            ctx.device.destroy_image(self.image, None);
+            ctx.device.free_memory(self.memory, None);
+        }
+    }
+}
+
+/// A framebuffer's attachments in `create_render_pass`'s order: the colour
+/// drawn into, depth, then (with MSAA) the single-sample image it resolves to.
+pub(crate) fn scene_attachments(
+    target: vk::ImageView,
+    depth: &AttachmentImage,
+    msaa_color: Option<&AttachmentImage>,
+) -> Vec<vk::ImageView> {
+    match msaa_color {
+        Some(color) => vec![color.view, depth.view, target],
+        None => vec![target, depth.view],
+    }
+}
+
+fn depth_aspect(format: vk::Format) -> vk::ImageAspectFlags {
+    if format == vk::Format::D24_UNORM_S8_UINT {
+        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+    } else {
+        vk::ImageAspectFlags::DEPTH
+    }
+}
+
+/// The highest sample count up to `wanted` that colour and depth attachments
+/// both support.
+pub(crate) fn supported_samples(ctx: &VkContext, wanted: u32) -> vk::SampleCountFlags {
+    let limits = unsafe {
+        ctx.instance
+            .get_physical_device_properties(ctx.physical_device)
+    }
+    .limits;
+    let supported =
+        limits.framebuffer_color_sample_counts & limits.framebuffer_depth_sample_counts;
+    [
+        vk::SampleCountFlags::TYPE_8,
+        vk::SampleCountFlags::TYPE_4,
+        vk::SampleCountFlags::TYPE_2,
+    ]
+    .into_iter()
+    .find(|&s| s.as_raw() <= wanted && supported.contains(s))
+    .unwrap_or(vk::SampleCountFlags::TYPE_1)
+}
+
+fn create_attachment(
     ctx: &VkContext,
     format: vk::Format,
     extent: vk::Extent2D,
-) -> Result<DepthBuffer, vk::Result> {
+    samples: vk::SampleCountFlags,
+    usage: vk::ImageUsageFlags,
+    aspect: vk::ImageAspectFlags,
+) -> Result<AttachmentImage, vk::Result> {
     let image = unsafe {
         ctx.device.create_image(
             &vk::ImageCreateInfo::builder()
@@ -231,9 +333,9 @@ fn create_depth(
                 })
                 .mip_levels(1)
                 .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(samples)
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             None,
@@ -245,7 +347,7 @@ fn create_depth(
             requirements.memory_type_bits,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )
-        .expect("no device-local memory for the depth buffer");
+        .expect("no device-local memory for a frame attachment");
     let memory = unsafe {
         ctx.device.allocate_memory(
             &vk::MemoryAllocateInfo::builder()
@@ -255,10 +357,6 @@ fn create_depth(
         )
     }?;
     unsafe { ctx.device.bind_image_memory(image, memory, 0) }?;
-    let mut aspect = vk::ImageAspectFlags::DEPTH;
-    if format == vk::Format::D24_UNORM_S8_UINT {
-        aspect |= vk::ImageAspectFlags::STENCIL;
-    }
     let view = unsafe {
         ctx.device.create_image_view(
             &vk::ImageViewCreateInfo::builder()
@@ -269,7 +367,7 @@ fn create_depth(
             None,
         )
     }?;
-    Ok(DepthBuffer {
+    Ok(AttachmentImage {
         image,
         memory,
         view,
@@ -283,22 +381,36 @@ fn create_depth(
 /// With `resume` the pass loads what an earlier pass over the same
 /// framebuffer left (a frame paused for a self-depth capture) instead of
 /// clearing it.
+///
+/// With `samples` above 1 the colour and depth are multisampled and a third,
+/// single-sample attachment receives the resolve at the end of the pass; it
+/// then plays the part the colour attachment does without MSAA (presented or
+/// sampled). A paused frame resolves early, harmlessly: the resumed pass
+/// loads the multisampled colour and resolves again when it ends.
 pub(crate) fn create_render_pass(
     ctx: &VkContext,
     color: vk::Format,
     depth: vk::Format,
+    samples: vk::SampleCountFlags,
     sampled: bool,
     resume: bool,
 ) -> Result<vk::RenderPass, vk::Result> {
+    let msaa = samples != vk::SampleCountFlags::TYPE_1;
     let color_final = if sampled {
         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
     } else {
         vk::ImageLayout::PRESENT_SRC_KHR
     };
+    // With MSAA the drawn-into colour is never presented or sampled.
+    let drawn_final = if msaa {
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+    } else {
+        color_final
+    };
     let (load, color_initial, depth_initial) = if resume {
         (
             vk::AttachmentLoadOp::LOAD,
-            color_final,
+            drawn_final,
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         )
     } else {
@@ -308,20 +420,21 @@ pub(crate) fn create_render_pass(
             vk::ImageLayout::UNDEFINED,
         )
     };
-    let attachments = [
+    let mut attachments = vec![
         vk::AttachmentDescription::builder()
             .format(color)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(samples)
             .load_op(load)
+            // Kept with MSAA too: a paused frame resumes on it.
             .store_op(vk::AttachmentStoreOp::STORE)
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(color_initial)
-            .final_layout(color_final)
+            .final_layout(drawn_final)
             .build(),
         vk::AttachmentDescription::builder()
             .format(depth)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(samples)
             .load_op(load)
             // Kept: a paused frame resumes on it.
             .store_op(vk::AttachmentStoreOp::STORE)
@@ -331,6 +444,21 @@ pub(crate) fn create_render_pass(
             .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             .build(),
     ];
+    if msaa {
+        // Every texel is overwritten by the resolve.
+        attachments.push(
+            vk::AttachmentDescription::builder()
+                .format(color)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(color_final)
+                .build(),
+        );
+    }
     let color_ref = [vk::AttachmentReference {
         attachment: 0,
         layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -339,23 +467,30 @@ pub(crate) fn create_render_pass(
         attachment: 1,
         layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     };
-    let subpass = [vk::SubpassDescription::builder()
+    let resolve_ref = [vk::AttachmentReference {
+        attachment: 2,
+        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+    }];
+    let mut subpass = vk::SubpassDescription::builder()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_ref)
-        .depth_stencil_attachment(&depth_ref)
-        .build()];
+        .depth_stencil_attachment(&depth_ref);
+    if msaa {
+        subpass = subpass.resolve_attachments(&resolve_ref);
+    }
+    let subpass = [subpass.build()];
     // The previous frame's use of the colour and depth attachments must finish
     // before this frame clears them; an offscreen colour was last read by the
     // copy's fragment shader.
+    //
+    // The dependencies are the same whether or not the pass is `sampled`:
+    // they are part of render-pass compatibility, and pipelines cached
+    // against one pass draw in the other.
     let stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
         | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
         | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
-    let read_stage = if sampled {
-        vk::PipelineStageFlags::FRAGMENT_SHADER
-    } else {
-        vk::PipelineStageFlags::empty()
-    };
-    let mut dependencies = vec![
+    let read_stage = vk::PipelineStageFlags::FRAGMENT_SHADER;
+    let dependencies = [
         vk::SubpassDependency::builder()
             .src_subpass(vk::SUBPASS_EXTERNAL)
             .dst_subpass(0)
@@ -372,20 +507,16 @@ pub(crate) fn create_render_pass(
                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             )
             .build(),
+        // An offscreen frame's copy samples what this pass wrote.
+        vk::SubpassDependency::builder()
+            .src_subpass(0)
+            .dst_subpass(vk::SUBPASS_EXTERNAL)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .build(),
     ];
-    if sampled {
-        // The copy samples what this pass wrote.
-        dependencies.push(
-            vk::SubpassDependency::builder()
-                .src_subpass(0)
-                .dst_subpass(vk::SUBPASS_EXTERNAL)
-                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-                .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
-                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .build(),
-        );
-    }
     unsafe {
         ctx.device.create_render_pass(
             &vk::RenderPassCreateInfo::builder()

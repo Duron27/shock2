@@ -275,6 +275,8 @@ struct PipelineKey {
     depth_bias: bool,
     color_mask: [bool; 4],
     formats: (i32, i32),
+    /// Rasterization samples; the frame's MSAA, or 1 in a depth capture.
+    samples: u32,
 }
 
 /// GL's fixed-function state.
@@ -326,13 +328,20 @@ struct Recording {
     commands: vk::CommandBuffer,
     render_pass: vk::RenderPass,
     formats: (i32, i32),
+    samples: vk::SampleCountFlags,
     extent: vk::Extent2D,
     /// The frame's framebuffer and the pass that resumes drawing into it
     /// after a depth capture paused it.
     framebuffer: vk::Framebuffer,
     resume_pass: vk::RenderPass,
     /// While capturing: the frame's pass, formats, extent and GL state.
-    paused: Option<(vk::RenderPass, (i32, i32), vk::Extent2D, GlState)>,
+    paused: Option<(
+        vk::RenderPass,
+        (i32, i32),
+        vk::SampleCountFlags,
+        vk::Extent2D,
+        GlState,
+    )>,
     slot: usize,
     pipeline: vk::Pipeline,
     viewport: Option<[i32; 4]>,
@@ -621,6 +630,7 @@ pub fn begin_frame(
     resume_pass: vk::RenderPass,
     framebuffer: vk::Framebuffer,
     formats: (vk::Format, vk::Format),
+    samples: vk::SampleCountFlags,
     extent: vk::Extent2D,
     slot: usize,
 ) {
@@ -655,6 +665,7 @@ pub fn begin_frame(
             commands,
             render_pass,
             formats: (formats.0.as_raw(), formats.1.as_raw()),
+            samples,
             extent,
             framebuffer,
             resume_pass,
@@ -1241,7 +1252,7 @@ impl State {
             .depth_bias_enable(key.depth_bias)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(vk::SampleCountFlags::from_raw(key.samples));
         let depth = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(key.depth_test)
             .depth_write_enable(key.depth_write)
@@ -1412,6 +1423,7 @@ impl State {
             rec.formats,
             rec.extent,
         );
+        let samples = rec.samples.as_raw();
         let gl = self.gl;
         let key = PipelineKey {
             program: program_id,
@@ -1425,6 +1437,7 @@ impl State {
             depth_bias: gl.polygon_offset,
             color_mask: gl.color_mask,
             formats,
+            samples,
         };
         let pipeline = self.pipeline(key, render_pass);
 
@@ -2069,9 +2082,10 @@ impl State {
         }
         let gl = self.gl;
         let rec = self.recording.as_mut().unwrap();
-        rec.paused = Some((rec.render_pass, rec.formats, rec.extent, gl));
+        rec.paused = Some((rec.render_pass, rec.formats, rec.samples, rec.extent, gl));
         rec.render_pass = pass;
         rec.formats = (vk::Format::UNDEFINED.as_raw(), CAPTURE_DEPTH.as_raw());
+        rec.samples = vk::SampleCountFlags::TYPE_1;
         rec.extent = size;
         rec.pipeline = vk::Pipeline::null();
         rec.viewport = None;
@@ -2089,9 +2103,10 @@ impl State {
 
     fn end_depth_capture(&mut self) -> Option<u32> {
         let rec = self.recording.as_mut()?;
-        let (pass, formats, extent, gl) = rec.paused.take()?;
+        let (pass, formats, samples, extent, gl) = rec.paused.take()?;
         rec.render_pass = pass;
         rec.formats = formats;
+        rec.samples = samples;
         rec.extent = extent;
         rec.pipeline = vk::Pipeline::null();
         rec.viewport = None;

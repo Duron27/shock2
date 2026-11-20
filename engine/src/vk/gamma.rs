@@ -6,7 +6,8 @@
 //! straight to the swapchain.
 //!
 //! The offscreen image has the swapchain's format and shares its depth
-//! buffer, so its render pass is compatible with the swapchain's and every
+//! buffer (and with MSAA its multisampled colour, resolving into the
+//! offscreen image), so its render pass is compatible with the swapchain's and every
 //! pipeline gfx cached draws into either. The copy reads the texel under
 //! each fragment (`texelFetch` at `gl_FragCoord`), so it is an exact 1:1
 //! copy whatever y-flip the scene was drawn with.
@@ -114,6 +115,7 @@ impl GammaTarget {
                 ctx,
                 swapchain.format,
                 swapchain.depth_format,
+                swapchain.samples,
                 true,
                 false,
             )
@@ -122,11 +124,16 @@ impl GammaTarget {
                 ctx,
                 swapchain.format,
                 swapchain.depth_format,
+                swapchain.samples,
                 true,
                 true,
             )
             .map_err(vk_err("vkCreateRenderPass"))?;
-            let attachments = [view, swapchain.depth.view];
+            let attachments = swapchain::scene_attachments(
+                view,
+                &swapchain.depth,
+                swapchain.msaa_color.as_ref(),
+            );
             let framebuffer = d
                 .create_framebuffer(
                     &vk::FramebufferCreateInfo::builder()
@@ -212,7 +219,7 @@ impl GammaTarget {
                     None,
                 )
                 .map_err(vk_err("vkCreatePipelineLayout"))?;
-            let pipeline = build_pipeline(d, layout, swapchain.render_pass)?;
+            let pipeline = build_pipeline(d, layout, swapchain.render_pass, swapchain.samples)?;
             Ok(GammaTarget {
                 image,
                 memory,
@@ -304,6 +311,7 @@ unsafe fn build_pipeline(
     d: &ash::Device,
     layout: vk::PipelineLayout,
     render_pass: vk::RenderPass,
+    samples: vk::SampleCountFlags,
 ) -> Result<vk::Pipeline, String> {
     let vertex = shader::compile(VERTEX, shader::Stage::Vertex)?;
     let fragment = shader::compile(FRAGMENT, shader::Stage::Fragment)?;
@@ -338,7 +346,7 @@ unsafe fn build_pipeline(
             .cull_mode(vk::CullModeFlags::NONE)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(samples);
         let depth = vk::PipelineDepthStencilStateCreateInfo::default();
         let blend_attachment = [vk::PipelineColorBlendAttachmentState::builder()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
