@@ -6699,7 +6699,8 @@ impl MissionCore {
                                 // fires once and the group dies with its last
                                 // particle (impact spangs). Other types keep
                                 // launching (steam vents etc.).
-                                .with_one_shot(pg.animation_type == 0);
+                                .with_one_shot(pg.animation_type == 0)
+                                .with_swirl(crate::particle_group::swirl_rate(pg));
                             // Render type 5 (scaled bitmap) draws the authored
                             // sprite (res/bitmap/<name>.PCX) instead of the
                             // default glow disk; a missing bitmap falls back
@@ -6732,7 +6733,10 @@ impl MissionCore {
                             }
                             system.into()
                         });
-                    particle_system.update(time.elapsed, transform.0);
+                    particle_system.update(
+                        time.elapsed,
+                        crate::particle_group::emitter_transform(transform.0),
+                    );
                     // Only fire-and-forget effect entities (impact spangs) are
                     // destroyed when their burst expires; a level-authored
                     // one-shot group just goes dormant (the object persists,
