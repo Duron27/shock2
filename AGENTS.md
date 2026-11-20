@@ -787,8 +787,9 @@ the result with `GET /v1/scene`, whose `lighting` block reports each object's
 resolved light count and the light it receives (authored lights before hand
 lights are merged). Switched `P$AnimLight` sources use the same live intensity
 map as the wall lightmaps, including restored save state; an off source does
-not occupy a light slot. This does not add temporal flicker/pulse modes beyond
-the existing controller. VR gloves sample at each rendered hand pose; VR held
+not occupy a light slot. Alternate, Flicker, Random and SemiRandom lamps
+animate on Dark's timer; the smooth ramp modes do not (no shipped mission
+uses them). VR gloves sample at each rendered hand pose; VR held
 models and flat first-person weapons use the same selection path. A held
 visual outside the world rep falls back to the player's cell. Lit gloves drop
 full-texture emission while keeping their emissive status-light mask.
