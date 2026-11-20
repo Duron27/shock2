@@ -16,11 +16,11 @@ process.exit(7);
   await assert.rejects(GameServer.launch({
     mission: "debug_minimal", runtimeBinary,
     repoRoot: findRepoRoot(import.meta.dirname),
-    experimental: ["physical_held_items"], debugFlags: ["--vr"], launchTimeoutMs: 2_000,
+    experimental: ["physical_held_items"], debugFlags: ["--visible"], launchTimeoutMs: 2_000,
   }), (error: Error) => {
     assert.match(error.message, /DIRECT_LAUNCH=\["--mission","debug_minimal"/);
     assert.match(error.message, /"--instance-id"/);
-    assert.match(error.message, /"--experimental","physical_held_items","--vr"/);
+    assert.match(error.message, /"--experimental","physical_held_items","--visible"/);
     return true;
   });
 });
