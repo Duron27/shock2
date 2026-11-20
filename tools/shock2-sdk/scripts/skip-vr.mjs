@@ -9,6 +9,8 @@ function skipVr(fn) {
   // Leave callback-style tests (t, done) alone.
   if (typeof fn !== "function" || fn.length >= 2) return fn;
   return async function (t) {
+    // Subtests (t.test) launch runtimes too; skip their --vr launches alike.
+    if (typeof t?.test === "function") t.test = wrap(t.test.bind(t));
     try {
       return await fn.call(this, t);
     } catch (error) {
