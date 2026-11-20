@@ -17,6 +17,7 @@ ndk-sys = "0.4.0"
 
 [dependencies]
 c_string = "0.7.2"
+ash = "0.37.3"
 cgmath = "0.18.0"
 collision = { version = "0.20.1", git = "https://github.com/rustgd/collision-rs" }
 fbxcel-dom = "0.0.10"
@@ -30,3 +31,6 @@ rodio = { git = "https://github.com/RustAudio/rodio", version = "0.17.1", featur
 texture2ddecoder = "0.1.2"
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+
+[dev-dependencies]
+glfw = { version = "0.56.0", features = ["vulkan"] }
