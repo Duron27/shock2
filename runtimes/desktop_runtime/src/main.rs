@@ -606,14 +606,7 @@ pub fn main() {
             renderer.resize(fb_width as u32, fb_height as u32);
             renderer.set_vsync(shock2vr::user_settings::get().pc.vsync);
             renderer.set_gamma(shock2vr::user_settings::get().pc.brightness);
-            let [vignette, grain, contrast, saturation] = game.screen_grade();
-            renderer.set_grade(
-                vignette,
-                grain,
-                contrast,
-                saturation,
-                glfw.get_time() as f32,
-            );
+            renderer.set_grade(game.screen_grade(), glfw.get_time() as f32);
             if let Some(frame) = renderer.begin_frame([0.0, 0.0, 0.0, 1.0]) {
                 profile!(
                     "engine.render",

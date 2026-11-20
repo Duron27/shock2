@@ -3117,14 +3117,23 @@ impl Game {
         dev_params::get(dev_params::DISTANCE_DARKNESS)
     }
 
-    /// The screen grade `[vignette, grain, contrast, saturation]` for
-    /// `Renderer::set_grade`.
-    pub fn screen_grade(&self) -> [f32; 4] {
+    /// The screen grade `[vignette, grain, contrast, saturation, danger]`
+    /// for `Renderer::set_grade`. Danger rises from 0 at 40% health to 1 at
+    /// 10%, and is 0 while dead (the death sequence owns the screen then).
+    pub fn screen_grade(&self) -> [f32; 5] {
+        let danger = if self.pending_save_load.is_some() {
+            0.0
+        } else {
+            player_health_fraction(self.active_game_scene.world())
+                .filter(|f| *f > 0.0)
+                .map_or(0.0, |f| ((0.4 - f) / 0.3).clamp(0.0, 1.0))
+        };
         [
             dev_params::get(dev_params::SCREEN_VIGNETTE),
             dev_params::get(dev_params::SCREEN_GRAIN),
             dev_params::get(dev_params::SCREEN_CONTRAST),
             dev_params::get(dev_params::SCREEN_SATURATION),
+            danger,
         ]
     }
 
@@ -3983,10 +3992,10 @@ impl App {
         }
     }
 
-    pub fn screen_grade(&self) -> [f32; 4] {
+    pub fn screen_grade(&self) -> [f32; 5] {
         match self {
             App::Ready(game) => game.screen_grade(),
-            App::MissingAssets(_) => [0.0, 0.0, 1.0, 1.0],
+            App::MissingAssets(_) => [0.0, 0.0, 1.0, 1.0, 0.0],
         }
     }
 
@@ -4180,3 +4189,26 @@ pub mod lip_sync;
 mod model_frame_animation;
 pub mod monster_idle;
 pub mod plant_animation;
+
+/// The player's hit points as a fraction of their maximum, when the scene has
+/// a player (missions; not menus or cutscenes).
+fn player_health_fraction(world: &shipyard::World) -> Option<f32> {
+    use shipyard::{Get, UniqueView, View};
+    let player = world
+        .borrow::<UniqueView<mission::PlayerInfo>>()
+        .ok()?
+        .entity_id;
+    let hp = world
+        .borrow::<View<dark::properties::PropHitPoints>>()
+        .ok()?
+        .get(player)
+        .ok()?
+        .hit_points;
+    let max = world
+        .borrow::<View<dark::properties::PropMaxHitPoints>>()
+        .ok()?
+        .get(player)
+        .ok()?
+        .hit_points;
+    (max > 0).then(|| hp as f32 / max as f32)
+}

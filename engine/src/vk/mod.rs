@@ -146,12 +146,10 @@ impl VkRenderer {
     /// caller's clock, so a fixed-step runtime screenshots deterministically.
     pub fn set_grade(
         &mut self,
-        vignette: f32,
-        grain: f32,
-        contrast: f32,
-        saturation: f32,
+        [vignette, grain, contrast, saturation, danger]: [f32; 5],
         time: f32,
     ) {
+        self.grade.danger = danger.clamp(0.0, 1.0);
         self.grade.time = time;
         self.grade.vignette = vignette;
         self.grade.grain = grain;

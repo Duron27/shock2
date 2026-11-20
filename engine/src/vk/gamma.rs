@@ -34,6 +34,7 @@ layout(push_constant) uniform GammaPush {
     float time;
     float contrast;
     float saturation;
+    float danger;
 } grade;
 layout(location = 0) out vec4 fragColor;
 
@@ -52,7 +53,10 @@ void main() {
     c = pow(max(c, vec3(0.0)), vec3(grade.invGamma));
 
     float luma = dot(c, vec3(0.299, 0.587, 0.114));
-    c = max(mix(vec3(luma), c, grade.saturation), vec3(0.0));
+    // Low health drains the colour and closes in the edges with a
+    // heartbeat: a strong beat then a softer one, about 70 bpm.
+    float saturation = grade.saturation * (1.0 - 0.4 * grade.danger);
+    c = max(mix(vec3(luma), c, saturation), vec3(0.0));
     // Contrast pivots low: midtones keep their level while shadows sink,
     // which is where a dark corridor reads as dark.
     const float pivot = 0.3;
@@ -61,7 +65,12 @@ void main() {
     vec2 size = vec2(textureSize(frame, 0));
     vec2 centred = (gl_FragCoord.xy / size - 0.5) * vec2(size.x / size.y, 1.0);
     float edge = smoothstep(0.35, 1.05, length(centred));
-    c *= 1.0 - grade.vignette * edge;
+    float beatPhase = fract(grade.time * 1.15);
+    float beat = exp(-pow((beatPhase - 0.05) * 18.0, 2.0))
+        + 0.6 * exp(-pow((beatPhase - 0.27) * 18.0, 2.0));
+    float vignette = min(grade.vignette + grade.danger * (0.3 + 0.25 * beat), 0.95);
+    c *= 1.0 - vignette * edge;
+    c = mix(c, c * vec3(1.35, 0.35, 0.3), grade.danger * edge * (0.5 + 0.5 * beat));
 
     // Grain shows most in the dark, as film and sensor noise do.
     float n = hash(uvec3(uvec2(pixel), uint(grade.time * 60.0))) - 0.5;
@@ -84,8 +93,10 @@ pub struct Grade {
     pub contrast: f32,
     /// 1 is unchanged, 0 is greyscale.
     pub saturation: f32,
-    /// Seconds, animating the grain.
+    /// Seconds, animating the grain and the low-health heartbeat.
     pub time: f32,
+    /// Low-health state, 0..1: drains colour and pulses the edges red.
+    pub danger: f32,
 }
 
 impl Grade {
@@ -96,6 +107,7 @@ impl Grade {
         contrast: 1.0,
         saturation: 1.0,
         time: 0.0,
+        danger: 0.0,
     };
 
     pub fn is_neutral(&self) -> bool {
@@ -104,6 +116,7 @@ impl Grade {
             && self.grain.abs() < 1.0e-4
             && (self.contrast - 1.0).abs() < 1.0e-3
             && (self.saturation - 1.0).abs() < 1.0e-3
+            && self.danger <= 0.0
     }
 }
 
@@ -279,7 +292,7 @@ impl GammaTarget {
             let push = [vk::PushConstantRange {
                 stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 offset: 0,
-                size: 28,
+                size: 32,
             }];
             let layout = d
                 .create_pipeline_layout(
@@ -324,6 +337,7 @@ impl GammaTarget {
             grade.time,
             grade.contrast,
             grade.saturation,
+            grade.danger,
         ];
         let bytes: Vec<u8> = push.iter().flat_map(|f| f.to_ne_bytes()).collect();
         unsafe {

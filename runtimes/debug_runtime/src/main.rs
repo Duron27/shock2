@@ -1238,15 +1238,8 @@ fn run_game_blocking(
         let brightness = shock2vr::user_settings::get().pc.brightness;
         // The frame clears to dark blue when it opens.
         renderer.set_gamma(brightness);
-        let [vignette, grain, contrast, saturation] = game.screen_grade();
         // Grain animates on the stepped frame clock, so screenshots repeat.
-        renderer.set_grade(
-            vignette,
-            grain,
-            contrast,
-            saturation,
-            frame_counter as f32 / 60.0,
-        );
+        renderer.set_grade(game.screen_grade(), frame_counter as f32 / 60.0);
         let vk_frame = renderer.begin_frame([0.1, 0.2, 0.3, 1.0]);
         if vk_frame.is_some() {
             profile!(
