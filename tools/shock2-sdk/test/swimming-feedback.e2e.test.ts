@@ -7,8 +7,18 @@ for (const vr of [false, true]) test(`swimming: oxygen, drowning, recovery and r
 }, async () => {
   await using game = await GameServer.launch({ mission: "debug_rec_pool", debugFlags: vr ? ["--vr"] : [] });
   await game.player.setStats({ endurance: 1 });
-  await game.player.teleport({ x: 16, y: -6.8, z: -231.1 });
+  const underwater = { x: 16, y: -6.8, z: -231.1 };
+  await game.player.teleport(underwater);
   await game.step({ frames: 60 });
+  // The pool's authored current carries an idle swimmer to the rim and out of
+  // the water within ~15 s; hold the swimmer under so the long breath waits
+  // measure drowning rather than the current.
+  const stayDown = async (frames: number) => {
+    for (let left = frames; left > 0; left -= 120) {
+      await game.player.teleport(underwater);
+      await game.step({ frames: Math.min(120, left) });
+    }
+  };
   const water = async () => (await game.ui.state()).water!;
   assert.equal((await water()).submerged, true);
   assert.equal((await water()).maximum_seconds, 70);
@@ -16,17 +26,17 @@ for (const vr of [false, true]) test(`swimming: oxygen, drowning, recovery and r
     "head underwater should start the retail underwater ambience");
   assert.ok((await game.audio.recent({ sample: "dive" })).sounds.length > 0);
   const hp = (await game.info()).player.hit_points;
-  await game.step({ frames: 40 * 60 });
+  await stayDown(40 * 60);
   assert.equal((await game.info()).player.hit_points, hp, "no early drowning");
   assert.equal((await game.audio.loops()).loops.filter(s => s.sample.toLowerCase().includes("underwa2")).length, 1,
     "ambience must loop, rather than ending after one sample");
   assert.ok((await water()).remaining_seconds < 30);
   assert.equal((await game.audio.recent({ sample: "linebeep" })).sounds.length, 1);
-  await game.step({ frames: 30 * 60 });
+  await stayDown(30 * 60);
   assert.equal((await game.info()).player.hit_points, hp! - 3, "first retail drowning tick");
   assert.ok((await game.audio.recent({ sample: "dmgenlo" })).sounds.length > 0,
     "drowning must use the normal player hurt sound");
-  await game.step({ frames: 3 * 60 });
+  await stayDown(3 * 60);
   assert.equal((await game.info()).player.hit_points, hp! - 6, "3 damage every 3 seconds");
   // Dry deck: actual head immersion drives both the audio transition and recovery.
   await game.player.teleport({ x: 11, y: -3.8, z: -231.1 });
