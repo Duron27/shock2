@@ -115,12 +115,15 @@ pub enum FlatUiDragAction {
     OpenHackBoard(EntityId),
 }
 
-/// Double-click window (frames at 60Hz) and radius (canvas px) for the
-/// wield gesture: a second press on the just-lifted item's slot within this
-/// window/radius wields it instead of placing (the original equips from the
-/// inventory; with a single flat pointer button a double-click is the
-/// faithful mapping).
-const DOUBLE_CLICK_WINDOW_FRAMES: u32 = 20;
+/// Double-click window (seconds of simulation time) and radius (canvas px)
+/// for the wield gesture: a second press on the just-lifted item's slot
+/// within this window/radius wields it instead of placing (the original
+/// equips from the inventory; with a single flat pointer button a
+/// double-click is the faithful mapping). Half a second is the usual desktop
+/// double-click time. It is time, not frames: the desktop runtime updates
+/// once per rendered frame, so a frame count shrank the window to a sliver
+/// on a high-refresh monitor and weapons could not be equipped by mouse.
+const DOUBLE_CLICK_WINDOW_SECS: f32 = 0.5;
 const DOUBLE_CLICK_RADIUS: f32 = 24.0;
 
 /// What a press that lands on neither the strip nor the MFD panel means.
@@ -188,7 +191,7 @@ pub struct CanvasPointer {
 struct LiftMark {
     entity: EntityId,
     canvas_pos: Vector2<f32>,
-    frames_left: u32,
+    secs_left: f32,
 }
 
 /// The item currently riding the cursor (the original's `drag_obj`): the
@@ -1022,16 +1025,16 @@ impl FlatUiHost {
         }
     }
 
-    /// Advance frame-counted gestures by one simulation frame.
+    /// Age timed gestures by one simulation step of `elapsed`.
     ///
     /// The debug runtime also calls [`update`](Self::update) with zero elapsed
     /// time when it applies an HTTP command. Those administrative updates must
     /// not consume the documented double-click window.
-    pub fn advance_simulation_frame(&mut self) {
+    pub fn advance_simulation_frame(&mut self, elapsed: std::time::Duration) {
         if let Some(mark) = self.last_lift.as_mut() {
-            match mark.frames_left.checked_sub(1) {
-                Some(remaining) => mark.frames_left = remaining,
-                None => self.last_lift = None,
+            mark.secs_left -= elapsed.as_secs_f32();
+            if mark.secs_left <= 0.0 {
+                self.last_lift = None;
             }
         }
     }
@@ -1592,7 +1595,7 @@ impl FlatUiHost {
                         self.last_lift = Some(LiftMark {
                             entity: target,
                             canvas_pos,
-                            frames_left: DOUBLE_CLICK_WINDOW_FRAMES,
+                            secs_left: DOUBLE_CLICK_WINDOW_SECS,
                         });
                     }
                     _ => self.cursor_item = None,
@@ -1667,6 +1670,13 @@ impl FlatUiHost {
                     Vec::new(),
                 );
             }
+            // RMB on an item uses it in place: wields a weapon, uses anything
+            // else - one click, no drag.
+            if secondary_edge && !pressed_edge {
+                if let Some(item) = self.strip_item_at(canvas_pos) {
+                    return (Vec::new(), vec![FlatUiDragAction::Wield(item)]);
+                }
+            }
             if pressed_edge {
                 if let Some(item) = self.strip_item_at(canvas_pos) {
                     // An always-collected item is never carried on the cursor:
@@ -1689,7 +1699,7 @@ impl FlatUiHost {
                     self.last_lift = Some(LiftMark {
                         entity: item,
                         canvas_pos,
-                        frames_left: DOUBLE_CLICK_WINDOW_FRAMES,
+                        secs_left: DOUBLE_CLICK_WINDOW_SECS,
                     });
                     return (Vec::new(), Vec::new());
                 }
@@ -1745,7 +1755,7 @@ impl FlatUiHost {
     fn is_double_click(&self, held: EntityId, canvas_pos: Vector2<f32>) -> bool {
         self.last_lift.as_ref().is_some_and(|mark| {
             mark.entity == held
-                && mark.frames_left > 0
+                && mark.secs_left > 0.0
                 && (mark.canvas_pos - canvas_pos).magnitude() <= DOUBLE_CLICK_RADIUS
         })
     }
@@ -4525,7 +4535,7 @@ mod tests {
         // before the second click: the two press edges are 18 sim frames apart.
         for pressed in [true, false, false] {
             for _ in 0..6 {
-                host.advance_simulation_frame();
+                host.advance_simulation_frame(std::time::Duration::from_secs_f32(1.0 / 60.0));
                 host.update(&world, pointer(pressed));
             }
             // Setting an input channel while paused invokes a zero-time update.
@@ -4537,6 +4547,60 @@ mod tests {
 
         let (_, second) = host.update(&world, pointer(true));
         assert_eq!(second, vec![FlatUiDragAction::Wield(wrench)]);
+    }
+
+    #[test]
+    fn right_click_on_an_inventory_item_wields_it() {
+        let (world, mut host, wrench, _inv) = drag_world();
+        let at = |pressed, secondary| {
+            Some(Pointer2D {
+                position: norm(23.5, 34.0),
+                pressed,
+                secondary,
+            })
+        };
+        host.update(&world, at(false, false));
+        let (_, actions) = host.update(&world, at(false, true));
+        assert_eq!(actions, vec![FlatUiDragAction::Wield(wrench)]);
+    }
+
+    /// The desktop runtime updates once per rendered frame. At 144 Hz a
+    /// relaxed double-click (0.3 s) spans ~43 updates; it must still wield.
+    #[test]
+    fn double_click_window_is_time_not_frames() {
+        let (world, mut host, wrench, _inv) = drag_world();
+        let position = norm(23.5, 34.0);
+        let pointer = |pressed| {
+            Some(Pointer2D {
+                position,
+                pressed,
+                secondary: false,
+            })
+        };
+        let frame = std::time::Duration::from_secs_f32(1.0 / 144.0);
+        host.update(&world, pointer(false));
+        let (_, first) = host.update(&world, pointer(true));
+        assert!(first.is_empty());
+        for i in 0..43 {
+            host.advance_simulation_frame(frame);
+            host.update(&world, pointer(i < 10));
+        }
+        let (_, second) = host.update(&world, pointer(true));
+        assert_eq!(second, vec![FlatUiDragAction::Wield(wrench)]);
+
+        // A slow second click (well past half a second) places instead.
+        let (world, mut host, _wrench, _inv) = drag_world();
+        host.update(&world, pointer(false));
+        host.update(&world, pointer(true));
+        for i in 0..120 {
+            host.advance_simulation_frame(frame);
+            host.update(&world, pointer(i < 10));
+        }
+        let (_, slow) = host.update(&world, pointer(true));
+        assert!(
+            !slow.contains(&FlatUiDragAction::Wield(_wrench)),
+            "{slow:?}"
+        );
     }
 
     #[test]

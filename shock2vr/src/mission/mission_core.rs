@@ -5920,10 +5920,10 @@ impl MissionCore {
         // processed this frame.
         // Keep the last drawn readout snapshot until input is consumed. A
         // pickup/drop this frame must not retarget a click on the previously drawn gun.
-        // Double-click windows are counted in simulation frames, so the debug
+        // Double-click windows age with simulation time, so the debug
         // runtime's zero-time administrative updates do not consume them.
         if !tick.elapsed.is_zero() {
-            self.flat_ui.advance_simulation_frame();
+            self.flat_ui.advance_simulation_frame(tick.elapsed);
         }
         let (ui_messages, ui_drag_actions) = match game_options.presentation_mode {
             crate::PresentationMode::Flat => {
