@@ -16068,6 +16068,14 @@ impl MissionCore {
                     .map(Into::into),
             );
         }
+        lights.extend(
+            crate::muzzle_lighting::flash_lights(
+                &self.world,
+                ss2_entity_info::get_hierarchy(&self.entity_info),
+            )
+            .into_iter()
+            .map(Into::into),
+        );
         lights
     }
 

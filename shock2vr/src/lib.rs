@@ -25,6 +25,7 @@ pub mod install;
 pub mod inventory;
 mod ladder_holds;
 mod melee_lighting;
+mod muzzle_lighting;
 mod melee_swing;
 pub mod message_trace;
 pub mod object_lighting;
