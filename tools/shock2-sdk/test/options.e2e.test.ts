@@ -1,176 +1,84 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { GameServer } from "../src/index.js";
-import { clickCanvas, pauseEntry, vrClickCanvasPoint } from "./helpers/frontend-menu.js";
+import { clickCanvas as click, pauseEntry } from "./helpers/frontend-menu.js";
 
 const enabled = process.env.SHOCK2_E2E === "1";
 const DONE: [number, number] = [320, 436];
+const OPTIONS_ENTRY: [number, number] = [490, 202];
+/** The three live tab slots (`options_panel::TABS`): Controls, Display, Audio. */
+const tab = (index: number): [number, number] => [80 + index * 160, 36];
+/** A settings row: 29px apart from the first row's centre. */
+const row = (index: number): [number, number] => [333, 84 + index * 29];
 
-for (const vr of [false, true]) {
-  test(`Comfort effects follow artificial movement and turning (${vr ? "VR" : "flat"})`, {
-    skip: !enabled && "set SHOCK2_E2E=1 to run",
-  }, async () => {
-    const root = await mkdtemp(join(tmpdir(), "shock2-comfort-test-"));
-    const path = join(root, "settings.json");
-    const previous = process.env.SHOCK2_SETTINGS_PATH;
-    process.env.SHOCK2_SETTINGS_PATH = path;
-    await writeFile(path, JSON.stringify({ vr: { vignette: "High" } }));
-    try {
-      await using game = await GameServer.launch({ mission: "debug_minimal", debugFlags: vr ? ["--vr"] : [] });
+type PcSettings = {
+  mouse_sensitivity: number;
+  invert_mouse_y: boolean;
+  field_of_view: number;
+  brightness: number;
+  music_volume: number;
+};
+
+// The flatscreen-only branch's Options pages are PC settings (mouse, display,
+// audio); the VR comfort pages, and their vignette and grid, are gone.
+test("Options saves PC settings from the main and pause menus", {
+  skip: !enabled && "set SHOCK2_E2E=1 to run",
+  timeout: 300_000,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "shock2-options-test-"));
+  const path = join(root, "settings.json");
+  const previous = process.env.SHOCK2_SETTINGS_PATH;
+  process.env.SHOCK2_SETTINGS_PATH = path;
+  const saved = async () => (JSON.parse(await readFile(path, "utf8")) as { pc: PcSettings }).pc;
+  try {
+    {
+      await using game = await GameServer.launch({ mission: "main_menu" });
       await game.step({ frames: 10 });
-      const mask = () => game.scene.fromSource("vr_comfort_vignette");
-      assert.equal((await mask()).length, 0);
-      await game.input.set("head.look", [45, 0]);
+      await click(game, OPTIONS_ENTRY);
+      await click(game, row(0)); // Mouse sensitivity 1.0 -> 1.25
+      assert.equal((await saved()).mouse_sensitivity, 1.25);
+      await click(game, row(1)); // Invert mouse Off -> On
+      assert.equal((await saved()).invert_mouse_y, true);
+      await click(game, tab(1));
+      await click(game, row(0)); // Field of view 45 -> 50
+      await click(game, row(1)); // Brightness 1.4 -> 1.6
+      assert.equal((await saved()).field_of_view, 50);
+      assert.ok(Math.abs((await saved()).brightness - 1.6) < 1e-4);
+      await click(game, tab(2));
+      await click(game, row(1)); // Music volume 100% wraps to 0%
+      assert.equal((await saved()).music_volume, 0);
+      await click(game, DONE);
+      assert.equal((await game.info()).mission, "main_menu");
+    }
+    {
+      await using game = await GameServer.launch({ mission: "debug_minimal" });
       await game.step({ frames: 10 });
-      assert.equal((await mask()).length, 0, "physical head motion must not activate the vignette");
-      await game.input.set(vr ? "left_hand.thumbstick" : "right_hand.thumbstick", [0, 1]);
-      await game.step({ frames: 20 });
-      assert.ok((await mask()).length > 0);
-      await game.input.set(vr ? "left_hand.thumbstick" : "right_hand.thumbstick", [0, 0]);
-      await game.step({ frames: 30 });
-      assert.equal((await mask()).length, 0);
-      {
-        const rotation = async () => (await game.info()).player.rotation;
-        if (vr) await game.input.set("head.position", [0.5, 0.72, -0.2]);
-        await game.step({ frames: 3 });
-        const eye = async () => {
-          const p = (await game.info()).player;
-          const [x, y, z, w] = p.rotation; // player snapshot uses XYZW
-          const [hx, hy, hz] = p.camera_offset;
-          const tx = 2 * (y * hz - z * hy);
-          const ty = 2 * (z * hx - x * hz);
-          const tz = 2 * (x * hy - y * hx);
-          return [p.position[0] + hx + w * tx + y * tz - z * ty,
-                  p.position[2] + hz + w * tz + x * ty - y * tx];
-        };
-        const eyeBefore = await eye();
-        const before = await rotation();
-        await game.input.set(vr ? "right_hand.thumbstick" : "left_hand.thumbstick", [-1, 0]);
-        await game.step({ frames: 1 });
-        const turned = await rotation();
-        const eyeAfter = await eye();
-        assert.ok(Math.hypot(...eyeAfter.map((v, i) => v - eyeBefore[i]!)) < 1e-4,
-          `snap must keep offset eye fixed: ${eyeBefore} -> ${eyeAfter}`);
-        const dot = before.reduce((sum, value, i) => sum + value * turned[i]!, 0);
-        const angle = 2 * Math.acos(Math.min(1, Math.abs(dot))) * 180 / Math.PI;
-        assert.ok(Math.abs(angle - 30) < 0.05, `expected 30 degree snap, got ${angle}`);
-        await game.step({ frames: 30 });
-        assert.deepEqual(await rotation(), turned, "held stick cannot repeat a snap");
-        await game.input.set(vr ? "right_hand.thumbstick" : "left_hand.thumbstick", [1, 0]);
-        await game.step({ frames: 2 });
-        assert.deepEqual(await rotation(), turned, "reversing without centering cannot snap");
-        await game.input.set(vr ? "right_hand.thumbstick" : "left_hand.thumbstick", [0, 0]);
-        await game.step({ frames: 2 });
-        await game.input.set(vr ? "right_hand.thumbstick" : "left_hand.thumbstick", [1, 0]);
-        await game.step({ frames: 1 });
-        const returned = await rotation();
-        assert.ok(returned.every((value, i) => Math.abs(value - before[i]!) < 1e-5));
-        assert.equal((await mask()).length, 0, "snap turns do not trigger the mask");
-
-      }
-    } finally {
-      if (previous === undefined) delete process.env.SHOCK2_SETTINGS_PATH;
-      else process.env.SHOCK2_SETTINGS_PATH = previous;
-      await rm(root, { recursive: true, force: true });
+      await game.input.trigger("TogglePauseMenu");
+      await game.step({ frames: 3 });
+      await click(game, pauseEntry(3));
+      // This process must start from the previous process's saved values.
+      await click(game, row(0)); // Mouse sensitivity 1.25 -> 1.5
+      assert.equal((await saved()).mouse_sensitivity, 1.5);
+      assert.equal((await saved()).invert_mouse_y, true);
+      await click(game, tab(1));
+      await click(game, row(4)); // Reset display defaults; controls untouched
+      const after = await saved();
+      assert.equal(after.field_of_view, 45);
+      assert.ok(Math.abs(after.brightness - 1.4) < 1e-4);
+      assert.equal(after.mouse_sensitivity, 1.5);
+      assert.equal(after.music_volume, 0);
+      await click(game, DONE);
+      assert.equal((await game.info()).paused, true);
+      await click(game, pauseEntry(0));
+      assert.equal((await game.info()).paused, false);
+      assert.equal((await game.info()).mission, "debug_minimal");
     }
-  });
-
-  test(`Smooth turning activates the vignette (${vr ? "VR" : "flat"})`, {
-    skip: !enabled && "set SHOCK2_E2E=1 to run",
-  }, async () => {
-    const root = await mkdtemp(join(tmpdir(), "shock2-smooth-test-"));
-    const path = join(root, "settings.json");
-    const previous = process.env.SHOCK2_SETTINGS_PATH;
-    process.env.SHOCK2_SETTINGS_PATH = path;
-    await writeFile(path, JSON.stringify({ vr: { turning: "Smooth", vignette: "High" } }));
-    try {
-      await using game = await GameServer.launch({ mission: "debug_minimal", debugFlags: vr ? ["--vr"] : [] });
-      await game.step({ frames: 10 });
-      const before = (await game.info()).player.rotation;
-      await game.input.set(vr ? "right_hand.thumbstick" : "left_hand.thumbstick", [-1, 0]);
-      await game.step({ frames: 30 });
-      const after = (await game.info()).player.rotation;
-      const dot = before.reduce((sum, value, i) => sum + value * after[i]!, 0);
-      const angle = 2 * Math.acos(Math.min(1, Math.abs(dot))) * 180 / Math.PI;
-      assert.ok(Math.abs(angle - 45) < 0.05, `expected smooth 90 degrees/sec, got ${angle}`);
-      assert.ok((await game.scene.fromSource("vr_comfort_vignette")).length > 0);
-    } finally {
-      if (previous === undefined) delete process.env.SHOCK2_SETTINGS_PATH;
-      else process.env.SHOCK2_SETTINGS_PATH = previous;
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  test(`Options saves from main and pause menus in ${vr ? "VR" : "flat"}`, {
-    skip: !enabled && "set SHOCK2_E2E=1 to run",
-  }, async () => {
-    const root = await mkdtemp(join(tmpdir(), "shock2-options-test-"));
-    const path = join(root, "settings.json");
-    const previous = process.env.SHOCK2_SETTINGS_PATH;
-    process.env.SHOCK2_SETTINGS_PATH = path;
-    const click = vr ? vrClickCanvasPoint : clickCanvas;
-    const debugFlags = vr ? ["--vr"] : [];
-    const saved = async () => JSON.parse(await readFile(path, "utf8")) as {
-      vr: { vignette: string; turning: string; snap_angle: number; reference_grid: string; grid_opacity: number; grid_spacing: number; grid_size: number; roomscale: string };
-    };
-    try {
-      {
-        await using game = await GameServer.launch({ mission: "main_menu", debugFlags });
-        await game.step({ frames: 10 });
-        await click(game, [490, 202]);
-        await click(game, [333, 84]); // Low -> Medium
-        assert.equal((await saved()).vr.vignette, "Medium");
-        await click(game, [333, 169]); // Off -> During movement
-        await click(game, [333, 198]); // 30 -> 50 percent
-        await click(game, [333, 227]); // 1 -> 2 metres
-        await click(game, [333, 256]); // 10 -> 12 metre cage
-        assert.equal((await saved()).vr.reference_grid, "DuringMovement");
-        assert.equal((await saved()).vr.grid_opacity, 0.5);
-        assert.equal((await saved()).vr.grid_spacing, 2);
-        assert.equal((await saved()).vr.grid_size, 12);
-        await click(game, [240, 36]);
-        await click(game, [333, 113]); // 30 -> 45 degrees
-        assert.equal((await saved()).vr.snap_angle, 45);
-        await click(game, [333, 84]); // Snap -> Smooth
-        assert.equal((await saved()).vr.turning, "Smooth");
-        await click(game, DONE);
-        assert.equal((await game.info()).mission, "main_menu");
-      }
-      {
-        await using game = await GameServer.launch({ mission: "debug_minimal", debugFlags });
-        await game.step({ frames: 10 });
-        await game.input.trigger("TogglePauseMenu");
-        await game.step({ frames: 3 });
-        await click(game, pauseEntry(3));
-        // This process must start with the previous process's Medium setting.
-        await click(game, [333, 84]);
-        assert.equal((await saved()).vr.vignette, "High");
-        assert.equal((await saved()).vr.reference_grid, "DuringMovement");
-        assert.equal((await saved()).vr.grid_opacity, 0.5);
-        assert.equal((await saved()).vr.grid_spacing, 2);
-        assert.equal((await saved()).vr.grid_size, 12);
-        await click(game, [333, 314]); // Roomscale Auto -> On
-        assert.equal((await saved()).vr.roomscale, "On");
-        await click(game, [333, 343]); // Reset comfort, keeping turning settings
-        assert.equal((await saved()).vr.roomscale, "Auto");
-        assert.equal((await saved()).vr.reference_grid, "Off");
-        assert.equal((await saved()).vr.grid_opacity, 0.3);
-        assert.equal((await saved()).vr.grid_spacing, 1);
-        assert.equal((await saved()).vr.grid_size, 10);
-        assert.equal((await saved()).vr.snap_angle, 45);
-        await click(game, DONE);
-        assert.equal((await game.info()).paused, true);
-        await click(game, pauseEntry(0));
-        assert.equal((await game.info()).paused, false);
-        assert.equal((await game.info()).mission, "debug_minimal");
-      }
-    } finally {
-      if (previous === undefined) delete process.env.SHOCK2_SETTINGS_PATH;
-      else process.env.SHOCK2_SETTINGS_PATH = previous;
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-}
+  } finally {
+    if (previous === undefined) delete process.env.SHOCK2_SETTINGS_PATH;
+    else process.env.SHOCK2_SETTINGS_PATH = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
