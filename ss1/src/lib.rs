@@ -5,9 +5,11 @@
 //! here depends on the System Shock 2 crates.
 
 pub mod image;
+pub mod level;
 pub mod lzw;
 pub mod paths;
 pub mod res;
 
 pub use image::{Image, Palette};
+pub use level::{Level, Tile, TileType};
 pub use res::{ResEntry, ResError, ResFile, ResType, Resource};

@@ -35,6 +35,13 @@ enum Command {
     },
     /// Load and decompress every resource in every resource file.
     Check,
+    /// Summarize a level from archive.dat (or list levels) and write a
+    /// top-down PNG: floor height as brightness, solid tiles black.
+    Level {
+        number: Option<u16>,
+        #[arg(long, default_value = "ss1_level.png")]
+        out: PathBuf,
+    },
     /// Export image resources as PNGs (all of a file's images, or one --id).
     Image {
         file: String,
@@ -189,6 +196,61 @@ fn main() -> Result<()> {
                 "wrote {written} images to {} ({failed} failed)",
                 out.display()
             );
+        }
+        Command::Level { number, out } => {
+            let archive = ResFile::open(data.join("archive.dat"))?;
+            let Some(number) = number else {
+                for n in ss1::Level::numbers(&archive) {
+                    let level = ss1::Level::load(&archive, n)?;
+                    let open = level.tiles.iter().filter(|t| !t.kind.is_solid()).count();
+                    println!(
+                        "level {n}: {}x{} z_shift {} open tiles {open} textures {}",
+                        level.width,
+                        level.height,
+                        level.z_shift,
+                        level.textures.len()
+                    );
+                }
+                return Ok(());
+            };
+            let level = ss1::Level::load(&archive, number)?;
+            let mut types = std::collections::BTreeMap::new();
+            let mut modes = std::collections::BTreeMap::new();
+            for t in &level.tiles {
+                *types.entry(t.raw_type).or_insert(0) += 1;
+                if t.slope > 0 {
+                    *modes.entry(format!("{:?}", t.slope_mode())).or_insert(0) += 1;
+                }
+            }
+            println!(
+                "level {number}: {}x{} z_shift {}",
+                level.width, level.height, level.z_shift
+            );
+            println!("tile types: {types:?}");
+            println!("sloped tiles by mode: {modes:?}");
+            println!("textures: {:?}", level.textures);
+            const SCALE: u32 = 8;
+            let mut img =
+                image::RgbImage::new(level.width as u32 * SCALE, level.height as u32 * SCALE);
+            for (px, py, pixel) in img.enumerate_pixels_mut() {
+                let (x, y) = ((px / SCALE) as usize, (py / SCALE) as usize);
+                let tile = level.tile(x, level.height - 1 - y).unwrap();
+                *pixel = match tile.kind {
+                    ss1::TileType::Solid => image::Rgb([0, 0, 0]),
+                    kind => {
+                        let v = 60 + tile.floor as u32 * 6;
+                        let v = v.min(255) as u8;
+                        match kind {
+                            ss1::TileType::Slope { .. } => image::Rgb([v, v, 40]),
+                            ss1::TileType::SolidDiagonal(_) => image::Rgb([40, v, v]),
+                            ss1::TileType::Other(_) => image::Rgb([v, 40, v]),
+                            _ => image::Rgb([v, v, v]),
+                        }
+                    }
+                };
+            }
+            img.save(&out)?;
+            println!("wrote {}", out.display());
         }
         Command::Check => {
             let mut files: Vec<_> = std::fs::read_dir(&data)?

@@ -24,7 +24,7 @@ from Night Dive's GPL-3.0 source release,
 2. **Palette and bitmaps** - `gamepal.res`, RLE/flat 8-bit images, texture
    atlas export (`cargo s1q image <file> --sheet`). *Done.*
 3. **Levels** - the tile map in `archive.dat` (heights, slopes, textures per
-   tile), objects.
+   tile). `cargo s1q level [N] --out map.png`. *Done* (objects still to do).
 4. **3D view** - build level geometry from tiles and draw it with `engine/`
    (lighting, filtering, our materials) in an SS1 runtime with free-look.
 5. **Objects and 3D models** - sprites and `obj3d.res` models.
