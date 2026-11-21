@@ -3,6 +3,7 @@ check-unused = "clippy --workspace --exclude shock2quest --all-targets --no-deps
 dv = "run -p dark_viewer --"
 dq = "run -p dark_query --"
 s1q = "run -p ss1_query --"
+s1 = "run -p ss1_runtime --"
 dr = "run -p desktop_runtime --"
 dbgr = "run -p debug_runtime --"
 dbgc = "run -p debug_command --"

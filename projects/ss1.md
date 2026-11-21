@@ -27,6 +27,11 @@ from Night Dive's GPL-3.0 source release,
    tile). `cargo s1q level [N] --out map.png`. *Done* (objects still to do).
 4. **3D view** - build level geometry from tiles and draw it with `engine/`
    (lighting, filtering, our materials) in an SS1 runtime with free-look.
+   *Done:* `cargo s1 --level N` (`runtimes/ss1_runtime`). Tiles become
+   floors, ceilings, slopes, diagonals and step walls (`ss1::mesh`); the
+   authored 0-15 tile shades are baked into a smooth lightmap with soft
+   contact shadows and drawn with the world lightmap material (fog, gloss,
+   bump, a player lamp). WASD/mouse, F fly, L lamp, PgUp/PgDn level.
 5. **Objects and 3D models** - sprites and `obj3d.res` models.
 6. **UI** - the original screen layout (`gamescr.res`, `mfdart.res`),
    upscaled and smoothed.

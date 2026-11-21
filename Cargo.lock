@@ -3116,6 +3116,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ss1_runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cgmath",
+ "clap",
+ "engine",
+ "glfw",
+ "image 0.24.7",
+ "ss1",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
