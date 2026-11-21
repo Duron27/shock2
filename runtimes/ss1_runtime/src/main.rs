@@ -19,7 +19,7 @@ use anyhow::{Result, anyhow};
 use cgmath::{Deg, InnerSpace, Quaternion, Rad, Rotation, Rotation3, Vector3, vec2, vec3};
 use clap::Parser;
 use engine::scene::{Scene, SpotLight};
-use glfw::{Action, Context, Key};
+use glfw::{Action, Key};
 use world::{TILE, World};
 
 #[derive(Parser)]
@@ -337,7 +337,6 @@ fn main() -> Result<()> {
             println!("Screenshot saved to {}", path.display());
             break;
         }
-        window.swap_buffers();
     }
     Ok(())
 }
