@@ -298,7 +298,7 @@ fn main() -> Result<()> {
 
         let mut objects = world.objects.clone();
         for thing in &world.things {
-            objects.extend(thing.object(player.yaw, player.eye()));
+            objects.extend(thing.objects(player.yaw, player.eye()));
         }
         if show_frame {
             objects.extend(hud.objects(screen));

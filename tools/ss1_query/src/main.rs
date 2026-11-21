@@ -35,6 +35,8 @@ enum Command {
     },
     /// Load and decompress every resource in every resource file.
     Check,
+    /// Decode every 3D model in obj3d.res and summarize it.
+    Models,
     /// Summarize a level from archive.dat (or list levels) and write a
     /// top-down PNG: floor height as brightness, solid tiles black.
     Level {
@@ -284,11 +286,13 @@ fn main() -> Result<()> {
                     ss1::objects::CLASS_NAMES.get(o.class as usize) == Some(&name.as_str())
                 }) {
                     println!(
-                        "  #{:<4} {}/{}/{} at ({:.2}, {:.2}) z {} heading {} pitch {} bank {} frame {}",
+                        "  #{:<4} {}/{}/{} {:?} model {} at ({:.2}, {:.2}) z {} heading {} pitch {} bank {} frame {}",
                         o.id,
                         o.class,
                         o.subclass,
                         o.kind,
+                        o.triple().map(|t| props.props[t].render_type),
+                        o.triple().map(|t| props.props[t].mfd_id).unwrap_or(-1),
                         o.x,
                         o.y,
                         o.z,
@@ -328,6 +332,32 @@ fn main() -> Result<()> {
                     }
                 }
                 println!("wrote {} types to {}", done.len(), out.display());
+            }
+        }
+        Command::Models => {
+            let res = ss1::ResFile::open(data.join("obj3d.res"))?;
+            for entry in res.entries() {
+                let r = res.load(entry.id)?;
+                let code = r.item(0).unwrap_or_default();
+                let model = ss1::model::parse(code);
+                let fills: std::collections::BTreeSet<String> = model
+                    .polys
+                    .iter()
+                    .map(|p| format!("{:?}", p.fill))
+                    .collect();
+                let bounds = model.bounds().map(|(lo, hi)| {
+                    format!(
+                        "[{:.2} {:.2} {:.2}]..[{:.2} {:.2} {:.2}]",
+                        lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]
+                    )
+                });
+                println!(
+                    "model {:3}: {:3} polys {} {}",
+                    entry.id - ss1::model::MODEL_BASE,
+                    model.polys.len(),
+                    bounds.unwrap_or_default(),
+                    fills.into_iter().collect::<Vec<_>>().join(",")
+                );
             }
         }
         Command::Check => {

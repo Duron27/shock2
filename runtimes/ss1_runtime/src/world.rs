@@ -181,12 +181,7 @@ impl World {
             ss1::objects::load_level_objects(&archive, number),
         ) {
             (Ok(props), Ok(art), Ok(objs)) => {
-                let mut art = crate::objects::ObjectArt::new(
-                    props,
-                    art,
-                    ResFile::open(data.join("objart2.res")).ok(),
-                    palette.clone(),
-                );
+                let mut art = crate::objects::ObjectArt::new(props, art, data, palette.clone());
                 art.place(&objs, level.z_shift, &lightmap_texture, light_uv)
             }
             (props, art, objs) => {

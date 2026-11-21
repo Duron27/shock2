@@ -8,6 +8,7 @@ pub mod image;
 pub mod level;
 pub mod lzw;
 pub mod mesh;
+pub mod model;
 pub mod objects;
 pub mod paths;
 pub mod res;

@@ -1,21 +1,24 @@
 //! Level objects drawn as the original drew them: camera-facing sprites
 //! (`FAUBJ_BITMAP`), fixed flat bitmaps such as doors and signs
 //! (`FAUBJ_TEXBITMAP`), and critters (`FAUBJ_CRIT`), whose sprite is the one
-//! of their (up to) eight views that faces the camera. 3D models come later.
+//! of their (up to) eight views that faces the camera, and polygon models
+//! (`obj3d.res`) as real meshes.
 //!
 //! Each object is lit by the baked lightmap texel of the floor under it, so
 //! it sits in the same light as the room, and its art is Scale2x'd for
 //! smoother edges.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 
-use cgmath::{Matrix4, Rad, Vector2, Vector3, Vector4, vec2, vec3};
+use cgmath::{InnerSpace, Matrix4, Rad, Vector2, Vector3, Vector4, vec2, vec3};
 use engine::materials::LightmapMaterial;
 use engine::scene::render_pass::RenderPass;
 use engine::scene::{SceneObject, VertexPositionTextureLightmapAtlasNormal};
 use engine::texture::{Texture, TextureOptions, TextureTrait};
 use engine::texture_format::{PixelFormat, RawTextureData};
+use ss1::model::{Fill, MATERIAL_BASE, MODEL_BASE, Model};
 use ss1::objects::{CLASS_CRITTER, FLAG_LARGE, Obj, ObjProps, RenderType, triple_index};
 use ss1::{Image, Palette, ResFile, Resource};
 
@@ -34,11 +37,13 @@ pub enum Facing {
     Fixed,
     /// Faces the camera, showing the view that matches its heading.
     Critter,
+    /// A 3D model, oriented like a fixed object.
+    Model,
 }
 
 pub struct Placed {
-    /// One sprite, or one per critter view.
-    views: Vec<Option<SceneObject>>,
+    /// One sprite or model (one object per texture), or one per critter view.
+    views: Vec<Vec<SceneObject>>,
     position: Vector3<f32>,
     facing: Facing,
     /// Orientation of fixed objects: heading, pitch, bank (`ORDER_YXZ`).
@@ -51,7 +56,7 @@ pub struct Placed {
 impl Placed {
     /// The object to draw for a camera at `eye` (world) looking at `yaw`
     /// degrees, with its transform set.
-    pub fn object(&self, camera_yaw: f32, eye: Vector3<f32>) -> Option<SceneObject> {
+    pub fn objects(&self, camera_yaw: f32, eye: Vector3<f32>) -> Vec<SceneObject> {
         let view = match self.facing {
             Facing::Critter if self.views.len() > 1 => ss1::objects::critter_view(
                 self.tile.0,
@@ -62,13 +67,22 @@ impl Placed {
             ),
             _ => 0,
         };
-        let mut object = self.views.get(view)?.clone()?;
+        let Some(parts) = self.views.get(view) else {
+            return Vec::new();
+        };
         let rotation = match self.facing {
-            Facing::Fixed => self.rotation,
+            Facing::Fixed | Facing::Model => self.rotation,
             _ => Matrix4::from_angle_y(Rad(-camera_yaw.to_radians())),
         };
-        object.transform = Matrix4::from_translation(self.position) * rotation;
-        Some(object)
+        let transform = Matrix4::from_translation(self.position) * rotation;
+        parts
+            .iter()
+            .map(|part| {
+                let mut part = part.clone();
+                part.transform = transform;
+                part
+            })
+            .collect()
     }
 }
 
@@ -131,21 +145,44 @@ pub struct ObjectArt {
     props: ObjProps,
     art: Resource,
     critters: Option<ResFile>,
+    models: Option<ResFile>,
+    materials: Option<ResFile>,
+    /// The palette as a 16x16 texture, for flat-coloured polygons.
+    swatches: Rc<dyn TextureTrait>,
+    material_cache: HashMap<u16, Option<Rc<dyn TextureTrait>>>,
+    model_cache: HashMap<u16, Option<Rc<Model>>>,
     palette: Palette,
     cache: HashMap<ArtKey, Option<Sprite>>,
 }
 
 impl ObjectArt {
-    pub fn new(
-        props: ObjProps,
-        art: Resource,
-        critters: Option<ResFile>,
-        palette: Palette,
-    ) -> Self {
+    pub fn new(props: ObjProps, art: Resource, data: &Path, palette: Palette) -> Self {
+        let mut bytes = Vec::with_capacity(256 * 4);
+        for i in 0..256 {
+            let [r, g, b] = palette.0[i];
+            bytes.extend_from_slice(&[r, g, b, 255]);
+        }
+        let swatches = engine::texture::init_from_memory2(
+            RawTextureData {
+                bytes,
+                width: 16,
+                height: 16,
+                format: PixelFormat::RGBA,
+            },
+            &TextureOptions {
+                wrap: false,
+                ..TextureOptions::default()
+            },
+        );
         ObjectArt {
             props,
             art,
-            critters,
+            critters: ResFile::open(data.join("objart2.res")).ok(),
+            models: ResFile::open(data.join("obj3d.res")).ok(),
+            materials: ResFile::open(data.join("citmat.res")).ok(),
+            swatches: Rc::new(swatches),
+            material_cache: HashMap::new(),
+            model_cache: HashMap::new(),
             palette,
             cache: HashMap::new(),
         }
@@ -204,6 +241,7 @@ impl ObjectArt {
             let Some(triple) = obj.triple() else { continue };
             let prop = self.props.props[triple];
             let facing = match prop.render_type {
+                RenderType::TextPoly | RenderType::AnimPoly | RenderType::FlatPoly => Facing::Model,
                 RenderType::Bitmap => Facing::Billboard,
                 RenderType::TexBitmap => Facing::Fixed,
                 RenderType::Critter => Facing::Critter,
@@ -212,6 +250,25 @@ impl ObjectArt {
             let Some(lm) = light_uv(obj.x, obj.y) else {
                 continue;
             };
+            let position = vec3(
+                obj.x * TILE,
+                obj.height_tiles(z_shift) * TILE,
+                -obj.y * TILE,
+            );
+            if let Facing::Model = facing {
+                let parts = self.model_objects(prop.mfd_id.max(0) as u16, lightmap, lm);
+                if !parts.is_empty() {
+                    out.push(Placed {
+                        views: vec![parts],
+                        position,
+                        facing,
+                        rotation: orientation(obj),
+                        raw_heading: obj.heading,
+                        tile: (obj.x, obj.y),
+                    });
+                }
+                continue;
+            }
             let keys: Vec<ArtKey> = match facing {
                 Facing::Critter => {
                     let critter = triple - first_critter;
@@ -227,23 +284,21 @@ impl ObjectArt {
                 },
             };
             let large = prop.flags & FLAG_LARGE != 0;
-            let views: Vec<Option<SceneObject>> = keys
+            let views: Vec<Vec<SceneObject>> = keys
                 .into_iter()
                 .map(|key| {
-                    let sprite = self.sprite(key)?;
-                    Some(make_object(&sprite, &facing, large, obj, lightmap, lm))
+                    self.sprite(key)
+                        .map(|sprite| make_object(&sprite, &facing, large, obj, lightmap, lm))
+                        .into_iter()
+                        .collect()
                 })
                 .collect();
-            if views.iter().all(Option::is_none) {
+            if views.iter().all(Vec::is_empty) {
                 continue;
             }
             out.push(Placed {
                 views,
-                position: vec3(
-                    obj.x * TILE,
-                    obj.height_tiles(z_shift) * TILE,
-                    -obj.y * TILE,
-                ),
+                position,
                 facing,
                 rotation: orientation(obj),
                 raw_heading: obj.heading,
@@ -253,6 +308,126 @@ impl ObjectArt {
         out
     }
 }
+
+impl ObjectArt {
+    fn model(&mut self, number: u16) -> Option<Rc<Model>> {
+        if let Some(hit) = self.model_cache.get(&number) {
+            return hit.clone();
+        }
+        let model = self
+            .models
+            .as_ref()
+            .and_then(|res| res.load(MODEL_BASE + number).ok())
+            .map(|r| Rc::new(ss1::model::parse(r.item(0).unwrap_or_default())))
+            .filter(|m| !m.polys.is_empty());
+        self.model_cache.insert(number, model.clone());
+        model
+    }
+
+    fn material(&mut self, vtext: u16) -> Option<Rc<dyn TextureTrait>> {
+        if let Some(hit) = self.material_cache.get(&vtext) {
+            return hit.clone();
+        }
+        let texture = self
+            .materials
+            .as_ref()
+            .and_then(|res| res.load(MATERIAL_BASE + vtext).ok())
+            .and_then(|r| r.item(0).and_then(|b| Image::parse(b).ok()))
+            .filter(|i| i.width > 0 && i.height > 0)
+            .map(|image| {
+                let big = ss1::scale::scale2x(&image);
+                let texture: Rc<dyn TextureTrait> = Rc::new(engine::texture::init_from_memory2(
+                    RawTextureData {
+                        bytes: rgba_dilated(&big, &self.palette),
+                        width: big.width as u32,
+                        height: big.height as u32,
+                        format: PixelFormat::RGBA,
+                    },
+                    &TextureOptions::default(),
+                ));
+                texture
+            });
+        self.material_cache.insert(vtext, texture.clone());
+        texture
+    }
+
+    /// A model's polygons as one scene object per texture (plus one for the
+    /// flat colours), in object space: the original's y points down and its
+    /// z north, so both flip.
+    fn model_objects(
+        &mut self,
+        number: u16,
+        lightmap: &Rc<Texture>,
+        lm: Vector2<f32>,
+    ) -> Vec<SceneObject> {
+        let Some(model) = self.model(number) else {
+            return Vec::new();
+        };
+        let mut groups: HashMap<Option<u16>, Vec<VertexPositionTextureLightmapAtlasNormal>> =
+            HashMap::new();
+        let atlas = Vector4::new(0.0, 0.0, 1.0, 1.0);
+        for poly in &model.polys {
+            let points: Vec<Vector3<f32>> = poly
+                .points
+                .iter()
+                .map(|p| vec3(p[0], -p[1], -p[2]) * TILE)
+                .collect();
+            let normal = (points[1] - points[0]).cross(points[2] - points[0]);
+            let normal = if normal.magnitude2() > 0.0 {
+                normal.normalize()
+            } else {
+                vec3(0.0, 1.0, 0.0)
+            };
+            let (key, uvs): (Option<u16>, Vec<Vector2<f32>>) = match poly.fill {
+                Fill::Texture(t) if self.material(t).is_some() => (
+                    Some(t),
+                    poly.uvs.iter().map(|uv| vec2(uv[0], uv[1])).collect(),
+                ),
+                fill => {
+                    let index = match fill {
+                        Fill::Color(c) => c,
+                        // Unknown per-instance colours: a neutral metal grey.
+                        _ => DEFAULT_COLOR,
+                    };
+                    let uv = vec2(
+                        ((index % 16) as f32 + 0.5) / 16.0,
+                        ((index / 16) as f32 + 0.5) / 16.0,
+                    );
+                    (None, vec![uv; points.len()])
+                }
+            };
+            let group = groups.entry(key).or_default();
+            for i in 1..points.len() - 1 {
+                for j in [0, i, i + 1] {
+                    group.push(VertexPositionTextureLightmapAtlasNormal {
+                        position: points[j],
+                        uv: uvs[j],
+                        lightmap_uv: lm,
+                        lightmap_atlas: atlas,
+                        normal,
+                    });
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (key, vertices) in groups {
+            let texture = match key {
+                Some(t) => self.material(t).unwrap(),
+                None => self.swatches.clone(),
+            };
+            let material =
+                LightmapMaterial::create(lightmap.clone(), texture, vec3(0.02, 0.02, 0.025));
+            out.push(SceneObject::new(
+                material,
+                Box::new(engine::scene::mesh::create(vertices)),
+            ));
+        }
+        out
+    }
+}
+
+/// The palette index drawn for colours the original takes per instance.
+const DEFAULT_COLOR: u8 = 217;
 
 /// An object's heading, pitch and bank. The original composes them
 /// `ORDER_YXZ` in a space whose z points north; ours points south, which
