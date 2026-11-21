@@ -1506,9 +1506,20 @@ impl FlatUiHost {
                 .iter()
                 .any(|r| r.contains(canvas_pos))
         }) {
-            // These are read-only holster snapshots. Hand weapon controls use
-            // their own selectors below; a paperdoll click must not select a
-            // different, currently held object or transfer storage ownership.
+            // Dropping a weapon carried on the cursor onto either arm wields it
+            // (flat wields with the one visible hand, whichever arm is hit).
+            if pressed_edge
+                && let Some(held) = self.cursor_item.as_ref().map(|item| item.entity)
+                && crate::virtual_hand::is_wieldable_weapon(world, held)
+            {
+                self.cursor_item = None;
+                self.last_lift = None;
+                return (Vec::new(), vec![FlatUiDragAction::Wield(held)]);
+            }
+            // Otherwise these are read-only holster snapshots. Hand weapon
+            // controls use their own selectors below; a paperdoll click must not
+            // select a different, currently held object or transfer storage
+            // ownership.
             return (Vec::new(), Vec::new());
         }
         let panel_rect = self.panel_rect();
@@ -3841,13 +3852,26 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_arm_chrome_does_not_throw_or_equip_a_cursor_item() {
+    fn mirrored_arm_chrome_does_not_throw_or_equip_a_non_weapon() {
         let (world, mut host, item, _) = drag_world();
         host.cursor_item = Some(make_cursor_item(&world, item));
         let point = mirrored_arm_rect(host.strip_rect().unwrap()).center();
         let actions = press_edge(&mut host, &world, (point.x, point.y));
         assert!(actions.is_empty());
         assert_eq!(host.held_entity(), Some(item));
+    }
+
+    #[test]
+    fn dropping_a_weapon_on_either_arm_wields_it() {
+        for arm in 0..2 {
+            let (mut world, mut host, wrench, _) = drag_world();
+            world.add_component(wrench, dark::properties::PropLimbModel("wrench_h".into()));
+            host.cursor_item = Some(make_cursor_item(&world, wrench));
+            let point = holster_readout_rects(host.strip_rect().unwrap())[arm].center();
+            let actions = press_edge(&mut host, &world, (point.x, point.y));
+            assert_eq!(actions, vec![FlatUiDragAction::Wield(wrench)], "arm {arm}");
+            assert_eq!(host.held_entity(), None, "the cursor is cleared");
+        }
     }
 
     #[test]
