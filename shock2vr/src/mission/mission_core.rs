@@ -15634,7 +15634,12 @@ impl MissionCore {
                 let light_scale = v_animated_light
                     .get(*entity_id)
                     .ok()
-                    .filter(|light| light.mode == dark::properties::AnimLightMode::Alternate)
+                    // Every mode the timer animates, so a flickering lamp's
+                    // own glow flickers with the walls it lights.
+                    .filter(|light| {
+                        use dark::properties::AnimLightMode::*;
+                        matches!(light.mode, Alternate | Flicker | Random | SemiRandom)
+                    })
                     .map(|light| light.initial_intensity() * self_illumination.unwrap_or(1.0))
                     .or(self_illumination);
                 let emissivity_scale = match (emissivity_scale, light_scale) {
