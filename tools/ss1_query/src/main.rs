@@ -35,6 +35,18 @@ enum Command {
     },
     /// Load and decompress every resource in every resource file.
     Check,
+    /// Export image resources as PNGs (all of a file's images, or one --id).
+    Image {
+        file: String,
+        #[arg(long)]
+        id: Option<String>,
+        /// Output folder.
+        #[arg(long, default_value = "ss1_images")]
+        out: PathBuf,
+        /// Also write one contact sheet of every exported image.
+        #[arg(long)]
+        sheet: bool,
+    },
 }
 
 fn parse_id(text: &str) -> Result<u16> {
@@ -118,6 +130,66 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Image {
+            file,
+            id,
+            out,
+            sheet,
+        } => {
+            let palette = ss1::Palette::load_game(&data)?;
+            let res = ResFile::open(data.join(&file))?;
+            let ids: Vec<u16> = match id {
+                Some(id) => vec![parse_id(&id)?],
+                None => res
+                    .entries()
+                    .iter()
+                    .filter(|e| e.res_type == ss1::ResType::Image)
+                    .map(|e| e.id)
+                    .collect(),
+            };
+            std::fs::create_dir_all(&out)?;
+            let (mut written, mut failed) = (0, 0);
+            let mut decoded = Vec::new();
+            for id in ids {
+                let resource = res.load(id)?;
+                for index in 0..resource.len() {
+                    let item = resource.item(index).unwrap();
+                    if item.is_empty() {
+                        continue;
+                    }
+                    match ss1::Image::parse(item) {
+                        Ok(image) if image.width > 0 && image.height > 0 => {
+                            let path = out.join(format!("{id}_{index}.png"));
+                            image::save_buffer(
+                                &path,
+                                &image.to_rgba(&palette),
+                                image.width as u32,
+                                image.height as u32,
+                                image::ColorType::Rgba8,
+                            )?;
+                            written += 1;
+                            if sheet {
+                                decoded.push(image);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            failed += 1;
+                            if failed <= 5 {
+                                println!("{id}[{index}]: {err}");
+                            }
+                        }
+                    }
+                }
+            }
+            if sheet && !decoded.is_empty() {
+                write_sheet(&decoded, &palette, &out.join("sheet.png"))?;
+            }
+            println!(
+                "wrote {written} images to {} ({failed} failed)",
+                out.display()
+            );
+        }
         Command::Check => {
             let mut files: Vec<_> = std::fs::read_dir(&data)?
                 .flatten()
@@ -160,5 +232,47 @@ fn main() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Lay images out in rows, up to 1024 pixels wide, on a dark backdrop.
+fn write_sheet(
+    images: &[ss1::Image],
+    palette: &ss1::Palette,
+    path: &std::path::Path,
+) -> Result<()> {
+    const WIDTH: usize = 1024;
+    let (mut x, mut y, mut row_h) = (0usize, 0usize, 0usize);
+    let mut spots = Vec::new();
+    for image in images {
+        let w = image.width.min(WIDTH);
+        if x + w > WIDTH {
+            x = 0;
+            y += row_h + 2;
+            row_h = 0;
+        }
+        spots.push((x, y));
+        x += w + 2;
+        row_h = row_h.max(image.height);
+    }
+    let height = y + row_h;
+    let mut sheet =
+        image::RgbaImage::from_pixel(WIDTH as u32, height as u32, image::Rgba([24, 24, 32, 255]));
+    for (image, (x, y)) in images.iter().zip(spots) {
+        let rgba = image.to_rgba(palette);
+        for py in 0..image.height {
+            for px in 0..image.width.min(WIDTH) {
+                let i = (py * image.width + px) * 4;
+                if rgba[i + 3] > 0 {
+                    sheet.put_pixel(
+                        (x + px) as u32,
+                        (y + py) as u32,
+                        image::Rgba([rgba[i], rgba[i + 1], rgba[i + 2], 255]),
+                    );
+                }
+            }
+        }
+    }
+    sheet.save(path)?;
     Ok(())
 }

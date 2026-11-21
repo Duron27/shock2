@@ -4,8 +4,10 @@
 //! formats documented by Night Dive's GPL source release (`shockmac`). Nothing
 //! here depends on the System Shock 2 crates.
 
+pub mod image;
 pub mod lzw;
 pub mod paths;
 pub mod res;
 
+pub use image::{Image, Palette};
 pub use res::{ResEntry, ResError, ResFile, ResType, Resource};

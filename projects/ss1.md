@@ -22,7 +22,7 @@ from Night Dive's GPL-3.0 source release,
 1. **Resource files** - `LG Res File v2` directory, LZW, compound ref tables.
    `cargo s1q res <file> [--id N]`, `cargo s1q check`. *Done.*
 2. **Palette and bitmaps** - `gamepal.res`, RLE/flat 8-bit images, texture
-   atlas export (`cargo s1q image`).
+   atlas export (`cargo s1q image <file> --sheet`). *Done.*
 3. **Levels** - the tile map in `archive.dat` (heights, slopes, textures per
    tile), objects.
 4. **3D view** - build level geometry from tiles and draw it with `engine/`
