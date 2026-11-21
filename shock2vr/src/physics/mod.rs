@@ -2603,6 +2603,14 @@ pub struct DynamicPhysicsOptions {
     pub friction: f32,
 }
 
+/// Broken-off debris: little bounce (Dark scales object bounce by its 0.1
+/// terrain factor), firm friction, and enough damping to settle in a couple
+/// of seconds instead of tumbling forever.
+const DEBRIS_RESTITUTION: f32 = 0.1;
+const DEBRIS_MIN_FRICTION: f32 = 0.6;
+const DEBRIS_LINEAR_DAMPING: f32 = 0.3;
+const DEBRIS_ANGULAR_DAMPING: f32 = 2.0;
+
 impl Default for DynamicPhysicsOptions {
     fn default() -> DynamicPhysicsOptions {
         DynamicPhysicsOptions {
@@ -5740,6 +5748,31 @@ impl PhysicsWorld {
         body.set_angvel(vec_to_nvec(motion.angular), true);
         body.enable_ccd(true);
         true
+    }
+
+    /// Make a broken-off piece (Flinderize debris, wreckage) land and come to
+    /// rest like dropped junk: it is light and thin, so with the default
+    /// bounce and no damping it tumbled on the floor forever, and a fast one
+    /// could pass through the floor in a single step.
+    pub fn settle_as_debris(&mut self, entity_id: EntityId) {
+        let Some(handle) = self.entity_id_to_body.get(&entity_id).copied() else {
+            return;
+        };
+        let Some(body) = self.rigid_body_set.get_mut(handle) else {
+            return;
+        };
+        if !body.is_dynamic() {
+            return;
+        }
+        body.set_linear_damping(DEBRIS_LINEAR_DAMPING);
+        body.set_angular_damping(DEBRIS_ANGULAR_DAMPING);
+        body.enable_ccd(true);
+        for collider in body.colliders().to_vec() {
+            if let Some(collider) = self.collider_set.get_mut(collider) {
+                collider.set_restitution(DEBRIS_RESTITUTION);
+                collider.set_friction(collider.friction().max(DEBRIS_MIN_FRICTION));
+            }
+        }
     }
 
     pub fn set_velocity(&mut self, entity_id: EntityId, velocity: Vector3<f32>) {
