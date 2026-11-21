@@ -1353,6 +1353,10 @@ impl AnimatedMonsterAI {
         if !self.current_behavior.borrow().opens_doors() {
             return Effect::NoEffect;
         }
+        // A ghost is a replay, not a body: doors ignore it.
+        if crate::scripts::script_util::entity_has_script(world, entity_id, "Apparition") {
+            return Effect::NoEffect;
+        }
         // The scan below (cell_from_position is O(cells) + a graph BFS) runs
         // at a few Hz, not every frame - arm the poll cooldown up front,
         // regardless of whether a door is found. The act paths override it
