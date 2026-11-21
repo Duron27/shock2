@@ -181,7 +181,17 @@ impl World {
             ss1::objects::load_level_objects(&archive, number),
         ) {
             (Ok(props), Ok(art), Ok(objs)) => {
-                let mut art = crate::objects::ObjectArt::new(props, art, data, palette.clone());
+                let containers =
+                    ss1::objects::load_class_table(&archive, number, ss1::objects::CLASS_CONTAINER)
+                        .ok();
+                let mut art = crate::objects::ObjectArt::new(
+                    props,
+                    art,
+                    data,
+                    palette.clone(),
+                    level.textures.clone(),
+                    containers,
+                );
                 art.place(&objs, level.z_shift, &lightmap_texture, light_uv)
             }
             (props, art, objs) => {

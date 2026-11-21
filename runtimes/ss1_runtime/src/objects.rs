@@ -18,7 +18,7 @@ use engine::scene::render_pass::RenderPass;
 use engine::scene::{SceneObject, VertexPositionTextureLightmapAtlasNormal};
 use engine::texture::{Texture, TextureOptions, TextureTrait};
 use engine::texture_format::{PixelFormat, RawTextureData};
-use ss1::model::{Fill, MATERIAL_BASE, MODEL_BASE, Model};
+use ss1::model::{Fill, MATERIAL_BASE, MODEL_BASE, Model, Poly};
 use ss1::objects::{CLASS_CRITTER, FLAG_LARGE, Obj, ObjProps, RenderType, triple_index};
 use ss1::{Image, Palette, ResFile, Resource};
 
@@ -147,6 +147,11 @@ pub struct ObjectArt {
     critters: Option<ResFile>,
     models: Option<ResFile>,
     materials: Option<ResFile>,
+    textures: Option<ResFile>,
+    /// The level's texture ids, for crates that use them.
+    level_textures: Vec<u16>,
+    /// The level's container table, for crate sizes.
+    containers: Option<Vec<u8>>,
     /// The palette as a 16x16 texture, for flat-coloured polygons.
     swatches: Rc<dyn TextureTrait>,
     material_cache: HashMap<u16, Option<Rc<dyn TextureTrait>>>,
@@ -156,7 +161,14 @@ pub struct ObjectArt {
 }
 
 impl ObjectArt {
-    pub fn new(props: ObjProps, art: Resource, data: &Path, palette: Palette) -> Self {
+    pub fn new(
+        props: ObjProps,
+        art: Resource,
+        data: &Path,
+        palette: Palette,
+        level_textures: Vec<u16>,
+        containers: Option<Vec<u8>>,
+    ) -> Self {
         let mut bytes = Vec::with_capacity(256 * 4);
         for i in 0..256 {
             let [r, g, b] = palette.0[i];
@@ -180,6 +192,9 @@ impl ObjectArt {
             critters: ResFile::open(data.join("objart2.res")).ok(),
             models: ResFile::open(data.join("obj3d.res")).ok(),
             materials: ResFile::open(data.join("citmat.res")).ok(),
+            textures: ResFile::open(data.join("texture.res")).ok(),
+            level_textures,
+            containers,
             swatches: Rc::new(swatches),
             material_cache: HashMap::new(),
             model_cache: HashMap::new(),
@@ -242,6 +257,7 @@ impl ObjectArt {
             let prop = self.props.props[triple];
             let facing = match prop.render_type {
                 RenderType::TextPoly | RenderType::AnimPoly | RenderType::FlatPoly => Facing::Model,
+                RenderType::Special if self.crate_model(obj).is_some() => Facing::Model,
                 RenderType::Bitmap => Facing::Billboard,
                 RenderType::TexBitmap => Facing::Fixed,
                 RenderType::Critter => Facing::Critter,
@@ -256,7 +272,14 @@ impl ObjectArt {
                 -obj.y * TILE,
             );
             if let Facing::Model = facing {
-                let parts = self.model_objects(prop.mfd_id.max(0) as u16, lightmap, lm);
+                let model = self
+                    .crate_model(obj)
+                    .map(Rc::new)
+                    .or_else(|| self.model(prop.mfd_id.max(0) as u16));
+                let parts = match model {
+                    Some(model) => self.model_objects(&model, lightmap, lm),
+                    None => Vec::new(),
+                };
                 if !parts.is_empty() {
                     out.push(Placed {
                         views: vec![parts],
@@ -324,14 +347,72 @@ impl ObjectArt {
         model
     }
 
+    /// A crate as a six-sided box model, as `_fr_draw_parm_cube` builds it.
+    fn crate_model(&self, obj: &Obj) -> Option<Model> {
+        let shape = ss1::objects::crate_shape(self.containers.as_deref()?, obj)?;
+        let [rx, ry, rz] = shape.radius;
+        let h = rz * 2.0;
+        // The original's space: y down, so the box rises to -h.
+        let p = |x: f32, y: f32, z: f32| [x, y, z];
+        let c = [
+            p(-rx, 0.0, -ry),
+            p(-rx, 0.0, ry),
+            p(rx, 0.0, ry),
+            p(rx, 0.0, -ry),
+            p(-rx, -h, -ry),
+            p(-rx, -h, ry),
+            p(rx, -h, ry),
+            p(rx, -h, -ry),
+        ];
+        let key = |t: u8| {
+            if t & 0x80 != 0 {
+                LEVEL_TEXTURE_KEY + (t & 0x7f) as u16
+            } else {
+                CUSTOM_MATERIAL_KEY + (t & 0x7f) as u16
+            }
+        };
+        let quad = |a: usize, b: usize, cc: usize, d: usize, t: u8| Poly {
+            fill: Fill::Texture(key(t)),
+            points: vec![c[a], c[b], c[cc], c[d]],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        };
+        Some(Model {
+            polys: vec![
+                quad(0, 3, 2, 1, shape.top),
+                quad(4, 5, 6, 7, shape.top),
+                quad(4, 7, 3, 0, shape.side),
+                quad(7, 6, 2, 3, shape.side),
+                quad(6, 5, 1, 2, shape.side),
+                quad(5, 4, 0, 1, shape.side),
+            ],
+        })
+    }
+
+    /// A texture by key: a model's virtual texture (`citmat.res` 475+),
+    /// a custom material (2180+), or one of the level's own textures.
     fn material(&mut self, vtext: u16) -> Option<Rc<dyn TextureTrait>> {
         if let Some(hit) = self.material_cache.get(&vtext) {
             return hit.clone();
         }
-        let texture = self
-            .materials
-            .as_ref()
-            .and_then(|res| res.load(MATERIAL_BASE + vtext).ok())
+        let (res, id) = if vtext >= LEVEL_TEXTURE_KEY {
+            let index = (vtext - LEVEL_TEXTURE_KEY) as usize;
+            (
+                self.textures.as_ref(),
+                self.level_textures
+                    .get(index)
+                    .map(|&t| LEVEL_TEXTURE_BASE + t),
+            )
+        } else if vtext >= CUSTOM_MATERIAL_KEY {
+            (
+                self.materials.as_ref(),
+                Some(CUSTOM_MATERIAL_BASE + vtext - CUSTOM_MATERIAL_KEY),
+            )
+        } else {
+            (self.materials.as_ref(), Some(MATERIAL_BASE + vtext))
+        };
+        let texture = res
+            .zip(id)
+            .and_then(|(res, id)| res.load(id).ok())
             .and_then(|r| r.item(0).and_then(|b| Image::parse(b).ok()))
             .filter(|i| i.width > 0 && i.height > 0)
             .map(|image| {
@@ -356,13 +437,10 @@ impl ObjectArt {
     /// z north, so both flip.
     fn model_objects(
         &mut self,
-        number: u16,
+        model: &Model,
         lightmap: &Rc<Texture>,
         lm: Vector2<f32>,
     ) -> Vec<SceneObject> {
-        let Some(model) = self.model(number) else {
-            return Vec::new();
-        };
         let mut groups: HashMap<Option<u16>, Vec<VertexPositionTextureLightmapAtlasNormal>> =
             HashMap::new();
         let atlas = Vector4::new(0.0, 0.0, 1.0, 1.0);
@@ -425,6 +503,15 @@ impl ObjectArt {
         out
     }
 }
+
+/// Texture keys past the model materials: custom crate materials and
+/// level textures.
+const CUSTOM_MATERIAL_KEY: u16 = 0x1000;
+const LEVEL_TEXTURE_KEY: u16 = 0x2000;
+/// `RES_customTextureMaps` in `citmat.res`.
+const CUSTOM_MATERIAL_BASE: u16 = 2180;
+/// 64x64 level textures in `texture.res`.
+const LEVEL_TEXTURE_BASE: u16 = 707;
 
 /// The palette index drawn for colours the original takes per instance.
 const DEFAULT_COLOR: u8 = 217;

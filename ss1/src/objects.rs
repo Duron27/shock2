@@ -294,6 +294,54 @@ impl Obj {
 }
 
 /// The active objects of a level.
+/// Size and textures of a container (crate) drawn as a box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrateShape {
+    /// Half extents east, north, and full height, in tiles.
+    pub radius: [f32; 3],
+    /// Side and top/bottom textures: bit 7 set picks a level texture
+    /// (`loved textures` index), clear a custom material.
+    pub side: u8,
+    pub top: u8,
+}
+
+/// `ObjContainer` records (21 bytes) in the level's container table.
+const CONTAINER_LEN: usize = 21;
+pub const CLASS_CONTAINER: u8 = 13;
+
+/// The box of a crate (`SML_CRT`, `LG_CRT`, `SECURE_CONTR`), as
+/// `obj_get_model_data` computes it, or None for other objects.
+pub fn crate_shape(table: &[u8], obj: &Obj) -> Option<CrateShape> {
+    if obj.class != CLASS_CONTAINER || obj.subclass != 0 || obj.kind > 2 {
+        return None;
+    }
+    let (dims, tex) = match obj.kind {
+        0 => ([8u8, 8, 8], [0x0c, 0x0b]),
+        1 => ([16, 16, 16], [0x0c, 0x0b]),
+        _ => ([32, 32, 32], [0x0a, 0x0a]),
+    };
+    let at = obj.spec_id as usize * CONTAINER_LEN;
+    let rec = table.get(at..at + CONTAINER_LEN)?;
+    let pick = |v: u8, d: u8| if v == 0 { d } else { v };
+    let data1 = u32::from_le_bytes([rec[17], rec[18], rec[19], rec[20]]);
+    // `dim << CONTAINER_MODEL_SHF` (10) in 16.16 fixed point.
+    let r = |v: u8| v as f32 * 1024.0 / 65536.0;
+    Some(CrateShape {
+        radius: [
+            r(pick(rec[14], dims[0])),
+            r(pick(rec[15], dims[1])),
+            r(pick(rec[16], dims[2])),
+        ],
+        side: pick(data1 as u8, tex[0]),
+        top: pick((data1 >> 8) as u8, tex[1]),
+    })
+}
+
+/// A class's per-object table from a level (`level_base + 10 + class`).
+pub fn load_class_table(archive: &ResFile, level: u16, class: u8) -> Result<Vec<u8>, ResError> {
+    Ok(archive.load(level_base(level) + 10 + class as u16)?.data)
+}
+
 pub fn load_level_objects(archive: &ResFile, level: u16) -> Result<Vec<Obj>, ResError> {
     let res = archive.load(level_base(level) + 8)?;
     let mut out = Vec::new();
