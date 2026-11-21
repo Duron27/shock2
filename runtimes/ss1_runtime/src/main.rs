@@ -210,7 +210,7 @@ fn main() -> Result<()> {
                 glfw::WindowEvent::CursorPos(x, y) => {
                     if let Some((lx, ly)) = last_mouse {
                         player.yaw += (x - lx) as f32 * 0.12;
-                        player.pitch = (player.pitch - (y - ly) as f32 * 0.12).clamp(-85.0, 85.0);
+                        player.pitch = (player.pitch + (y - ly) as f32 * 0.12).clamp(-85.0, 85.0);
                     }
                     last_mouse = Some((x, y));
                 }
