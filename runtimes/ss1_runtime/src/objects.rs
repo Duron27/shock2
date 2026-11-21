@@ -39,6 +39,8 @@ pub enum Facing {
     Critter,
     /// A 3D model, oriented like a fixed object.
     Model,
+    /// A pickup: its sprite extruded into a solid slab that turns slowly.
+    Spin,
 }
 
 pub struct Placed {
@@ -56,7 +58,7 @@ pub struct Placed {
 impl Placed {
     /// The object to draw for a camera at `eye` (world) looking at `yaw`
     /// degrees, with its transform set.
-    pub fn objects(&self, camera_yaw: f32, eye: Vector3<f32>) -> Vec<SceneObject> {
+    pub fn objects(&self, camera_yaw: f32, eye: Vector3<f32>, time: f32) -> Vec<SceneObject> {
         let view = match self.facing {
             Facing::Critter if self.views.len() > 1 => ss1::objects::critter_view(
                 self.tile.0,
@@ -72,6 +74,12 @@ impl Placed {
         };
         let rotation = match self.facing {
             Facing::Fixed | Facing::Model => self.rotation,
+            Facing::Spin => {
+                // Each pickup starts at its own heading and turns once every
+                // six seconds.
+                let phase = self.raw_heading as f32 / 256.0 * std::f32::consts::TAU;
+                Matrix4::from_angle_y(Rad(phase + time * std::f32::consts::TAU / 6.0))
+            }
             _ => Matrix4::from_angle_y(Rad(-camera_yaw.to_radians())),
         };
         let transform = Matrix4::from_translation(self.position) * rotation;
@@ -128,6 +136,8 @@ fn rgba_dilated(image: &Image, palette: &Palette) -> Vec<u8> {
 #[derive(Clone)]
 struct Sprite {
     texture: Rc<dyn TextureTrait>,
+    /// Which pixels of the original art are opaque, row by row from the top.
+    opaque: Rc<Vec<bool>>,
     width: f32,
     height: f32,
     anchor: [i16; 4],
@@ -233,6 +243,7 @@ impl ObjectArt {
                 );
                 Sprite {
                     texture: Rc::new(texture),
+                    opaque: Rc::new(image.pixels.iter().map(|&p| p != 0).collect()),
                     width: image.width as f32,
                     height: image.height as f32,
                     anchor: image.anchor,
@@ -258,6 +269,7 @@ impl ObjectArt {
             let facing = match prop.render_type {
                 RenderType::TextPoly | RenderType::AnimPoly | RenderType::FlatPoly => Facing::Model,
                 RenderType::Special if self.crate_model(obj).is_some() => Facing::Model,
+                RenderType::Bitmap if obj.class <= PICKUP_CLASSES_END => Facing::Spin,
                 RenderType::Bitmap => Facing::Billboard,
                 RenderType::TexBitmap => Facing::Fixed,
                 RenderType::Critter => Facing::Critter,
@@ -526,6 +538,125 @@ fn orientation(obj: &Obj) -> Matrix4<f32> {
         * Matrix4::from_angle_z(Rad(angle(obj.bank)))
 }
 
+/// Classes 0..=6 (guns, ammo, physics, grenades, drugs, hardware,
+/// software) are things you pick up.
+const PICKUP_CLASSES_END: u8 = 6;
+/// How thick an extruded pickup is, in sprite pixels.
+const EXTRUDE_PIXELS: f32 = 2.0;
+
+/// A sprite as a solid slab: its picture on the front and back, and a wall
+/// along every edge between an opaque and a clear pixel, coloured by the
+/// pixel it bounds.
+fn extrude(
+    sprite: &Sprite,
+    (x0, x1, y0, y1): (f32, f32, f32, f32),
+    lm: Vector2<f32>,
+) -> Vec<VertexPositionTextureLightmapAtlasNormal> {
+    let (w, h) = (sprite.width as usize, sprite.height as usize);
+    let px = (x1 - x0) / w as f32;
+    let py = (y1 - y0) / h as f32;
+    let half = EXTRUDE_PIXELS * px / 2.0;
+    let atlas = Vector4::new(0.0, 0.0, 1.0, 1.0);
+    let mut out = Vec::new();
+    let mut quad = |corners: [Vector3<f32>; 4], uvs: [Vector2<f32>; 4], normal: Vector3<f32>| {
+        for i in [0, 1, 2, 0, 2, 3] {
+            out.push(VertexPositionTextureLightmapAtlasNormal {
+                position: corners[i],
+                uv: uvs[i],
+                lightmap_uv: lm,
+                lightmap_atlas: atlas,
+                normal,
+            });
+        }
+    };
+    let face_uvs = [
+        vec2(0.0, 1.0),
+        vec2(1.0, 1.0),
+        vec2(1.0, 0.0),
+        vec2(0.0, 0.0),
+    ];
+    for z in [half, -half] {
+        quad(
+            [
+                vec3(x0, y0, z),
+                vec3(x1, y0, z),
+                vec3(x1, y1, z),
+                vec3(x0, y1, z),
+            ],
+            face_uvs,
+            vec3(0.0, 0.0, z.signum()),
+        );
+    }
+    let opaque = |x: isize, y: isize| {
+        x >= 0
+            && y >= 0
+            && (x as usize) < w
+            && (y as usize) < h
+            && sprite.opaque[y as usize * w + x as usize]
+    };
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            if !opaque(x, y) {
+                continue;
+            }
+            // Pixel bounds; image rows run down from the top edge.
+            let (l, r) = (x0 + x as f32 * px, x0 + (x + 1) as f32 * px);
+            let (t, b) = (y1 - y as f32 * py, y1 - (y + 1) as f32 * py);
+            let uv = vec2((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+            let uvs = [uv; 4];
+            if !opaque(x - 1, y) {
+                quad(
+                    [
+                        vec3(l, b, -half),
+                        vec3(l, b, half),
+                        vec3(l, t, half),
+                        vec3(l, t, -half),
+                    ],
+                    uvs,
+                    vec3(-1.0, 0.0, 0.0),
+                );
+            }
+            if !opaque(x + 1, y) {
+                quad(
+                    [
+                        vec3(r, b, half),
+                        vec3(r, b, -half),
+                        vec3(r, t, -half),
+                        vec3(r, t, half),
+                    ],
+                    uvs,
+                    vec3(1.0, 0.0, 0.0),
+                );
+            }
+            if !opaque(x, y - 1) {
+                quad(
+                    [
+                        vec3(l, t, half),
+                        vec3(r, t, half),
+                        vec3(r, t, -half),
+                        vec3(l, t, -half),
+                    ],
+                    uvs,
+                    vec3(0.0, 1.0, 0.0),
+                );
+            }
+            if !opaque(x, y + 1) {
+                quad(
+                    [
+                        vec3(l, b, -half),
+                        vec3(r, b, -half),
+                        vec3(r, b, half),
+                        vec3(l, b, half),
+                    ],
+                    uvs,
+                    vec3(0.0, -1.0, 0.0),
+                );
+            }
+        }
+    }
+    out
+}
+
 /// One textured quad in the object's local space, lit at lightmap `lm`.
 fn make_object(
     sprite: &Sprite,
@@ -572,7 +703,11 @@ fn make_object(
         vertex(x1, y1, 1.0, 0.0),
         vertex(x0, y1, 0.0, 0.0),
     );
-    let geometry = engine::scene::mesh::create(vec![a.clone(), b, c.clone(), a, c, d]);
+    let vertices = match facing {
+        Facing::Spin => extrude(sprite, (x0, x1, y0, y1), lm),
+        _ => vec![a.clone(), b, c.clone(), a, c, d],
+    };
+    let geometry = engine::scene::mesh::create(vertices);
     let mut material = LightmapMaterial::create(
         lightmap.clone(),
         sprite.texture.clone(),
