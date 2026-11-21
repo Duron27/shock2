@@ -3099,6 +3099,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ss1"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.48",
+]
+
+[[package]]
+name = "ss1_query"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ss1",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

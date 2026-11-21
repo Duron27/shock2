@@ -1,0 +1,11 @@
+[package]
+name = "ss1"
+version = "0.1.0"
+edition = "2024"
+# Formats and behavior follow Night Dive's GPL-3.0 System Shock source release
+# (github.com/NightDive-Studio/shockmac). This crate is kept separate from the
+# System Shock 2 crates and depends on nothing of theirs.
+license = "GPL-3.0-or-later"
+
+[dependencies]
+thiserror = "1.0"

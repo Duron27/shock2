@@ -1,0 +1,14 @@
+[package]
+name = "ss1_query"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "ss1_query"
+path = "src/main.rs"
+
+[dependencies]
+ss1 = { path = "../../ss1" }
+clap = { version = "4.5.4", features = ["derive"] }
+anyhow = "1.0"

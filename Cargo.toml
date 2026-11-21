@@ -23,6 +23,7 @@ members = [
     "engine_ffmpeg",
     "shock2vr",
     "dark",
+    "ss1",
     "tools/asset_probe",
     "tools/dark_viewer",
     "tools/dark_query",
@@ -30,6 +31,7 @@ members = [
     "tools/debug_command",
     "tools/hitbox_analyzer",
     "tools/bench",
+    "tools/ss1_query",
 ]
 
 [workspace.lints.rust]
