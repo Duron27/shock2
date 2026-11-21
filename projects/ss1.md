@@ -34,5 +34,8 @@ from Night Dive's GPL-3.0 source release,
    bump, a player lamp). WASD/mouse, F fly, L lamp, PgUp/PgDn level.
 5. **Objects and 3D models** - sprites and `obj3d.res` models.
 6. **UI** - the original screen layout (`gamescr.res`, `mfdart.res`),
-   upscaled and smoothed.
+   upscaled and smoothed. *Started:* the in-game frame (`gamescr.res` 617)
+   is Scale2x'd 4x and drawn over the view, with the 3D projection fitted
+   to its window (Tab toggles a full-screen view). Next: status bars, MFD
+   contents and inventory, text in the game's fonts.
 7. **Gameplay** - movement, doors, inventory, AI, ... (to be broken down).

@@ -6,9 +6,11 @@
 //! ```
 //!
 //! Mouse looks; WASD moves; Shift runs; F toggles walking and flying (Space
-//! and C rise and sink); L toggles the lamp; PageUp/PageDown change level;
+//! and C rise and sink); L toggles the lamp; Tab toggles the interface
+//! frame; PageUp/PageDown change level;
 //! Escape quits.
 
+mod hud;
 mod world;
 
 use std::path::PathBuf;
@@ -48,6 +50,9 @@ struct Cli {
     /// Start flying instead of walking.
     #[arg(long)]
     fly: bool,
+    /// Start in full-screen view, without the interface frame.
+    #[arg(long)]
+    fullscreen_view: bool,
 }
 
 fn parse_pair(text: &str) -> Result<(f32, f32), String> {
@@ -151,6 +156,8 @@ fn main() -> Result<()> {
     }
     let engine = engine::renderer();
 
+    let hud = hud::Hud::load(&data)?;
+    let mut show_frame = !cli.fullscreen_view;
     let mut level_number = cli.level;
     let mut world = World::load(&data, level_number)?;
     println!(
@@ -191,6 +198,7 @@ fn main() -> Result<()> {
                         Key::Escape => window.set_should_close(true),
                         Key::F => player.flying = !player.flying,
                         Key::L => player.lamp = !player.lamp,
+                        Key::Tab => show_frame = !show_frame,
                         Key::PageUp => change_level = Some((level_number + 1) % 16),
                         Key::PageDown => change_level = Some((level_number + 15) % 16),
                         _ => {}
@@ -256,6 +264,15 @@ fn main() -> Result<()> {
         let (fb_w, fb_h) = window.get_framebuffer_size();
         let aspect = fb_w.max(1) as f32 / fb_h.max(1) as f32;
         let rotation = player.rotation();
+        let screen = (fb_w.max(1) as f32, fb_h.max(1) as f32);
+        let projection_matrix = if show_frame {
+            hud.window_projection(
+                screen,
+                cgmath::perspective(Deg(60.0), hud.window_aspect(), 0.1, 4000.0),
+            )
+        } else {
+            cgmath::perspective(Deg(70.0), aspect, 0.1, 4000.0)
+        };
         let render_context = engine::EngineRenderContext {
             terrain_wetness: 0.0,
             self_depth: engine::scene::self_depth::Phase::None,
@@ -267,11 +284,15 @@ fn main() -> Result<()> {
             camera_rotation: Quaternion::new(1.0, 0.0, 0.0, 0.0),
             head_offset: vec3(0.0, 0.0, 0.0),
             head_rotation: rotation,
-            projection_matrix: cgmath::perspective(Deg(75.0), aspect, 0.1, 4000.0),
+            projection_matrix,
             screen_size: vec2(fb_w as f32, fb_h as f32),
         };
 
-        let mut scene = Scene::from_objects(world.objects.clone());
+        let mut objects = world.objects.clone();
+        if show_frame {
+            objects.extend(hud.objects(screen));
+        }
+        let mut scene = Scene::from_objects(objects);
         scene.fog_density = 0.025;
         scene.world_gloss = 0.5;
         scene.bump_strength = 0.8;

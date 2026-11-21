@@ -10,6 +10,7 @@ pub mod lzw;
 pub mod mesh;
 pub mod paths;
 pub mod res;
+pub mod scale;
 
 pub use image::{Image, Palette};
 pub use level::{Level, Tile, TileType};
