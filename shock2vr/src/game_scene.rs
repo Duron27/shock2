@@ -206,6 +206,9 @@ pub trait GameScene {
         false
     }
 
+    /// Escape on a non-pausable scene: a cutscene ends now. Others ignore it.
+    fn request_skip(&mut self) {}
+
     /// Total of the world clock (slowed by `world_time_scale`, frozen while
     /// paused), for scenes that run one. Animated world textures render on it.
     fn world_time(&self) -> Option<std::time::Duration> {

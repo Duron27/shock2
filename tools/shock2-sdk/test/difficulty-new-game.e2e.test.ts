@@ -3,10 +3,10 @@ import { test } from "node:test";
 import { GameServer } from "../src/index.js";
 import { clickCanvas, pauseEntry, menuEntry, newGameEntry, panelPoint, AIM_AT_PANEL } from "./helpers/frontend-menu.js";
 async function finishIntro(game:GameServer) {
-  // Exercise the real hold-to-skip path rather than render the entire movie.
-  await game.input.set("right_hand.trigger",1);
-  await game.step({frames:125});
-  await game.input.set("right_hand.trigger",0);
+  // Skip with Space, the real skip path, rather than render the entire movie.
+  await game.input.set("jump",1);
+  await game.step({frames:2});
+  await game.input.set("jump",0);
   await game.step({frames:5});
   assert.equal((await game.info()).mission,"earth.mis");
 }

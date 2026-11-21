@@ -2263,7 +2263,7 @@ impl Game {
         // flight, a dead player - the hold means nothing, so it is not run at
         // all: no ring promising a menu that will not come, and no long press
         // minted for `update_pause_menu` to drop. (The cutscene player is one
-        // of these, and draws this very ring for its own hold-to-skip.)
+        // of these; Escape skips it instead, see `update_pause_menu`.)
         if !self.pause_is_allowed() {
             self.menu_hold.cancel();
             return;
@@ -2354,6 +2354,10 @@ impl Game {
             // than strand the player on a panel over a screen that has taken
             // over. The toggle itself is left unhandled - i.e. ignored.
             self.close_pause_menu(false);
+            // On a cutscene, Escape (the pause toggle) skips it instead.
+            if actions.just_triggered(InputAction::TogglePauseMenu) {
+                self.active_game_scene.request_skip();
+            }
             return;
         }
 
