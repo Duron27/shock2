@@ -78,6 +78,9 @@ pub trait PlayerInteraction {
 
     fn is_wielding(&self) -> bool;
 
+    /// Put the wielded weapon back into the backpack.
+    fn stow(&mut self) -> Vec<VirtualHandEffect>;
+
     /// The camera/crosshair fire ray (origin, forward).
     fn flat_aim_ray(&self) -> Option<(Point3<f32>, Vector3<f32>)>;
 }
@@ -168,6 +171,10 @@ impl PlayerInteraction for FlatInteraction {
 
     fn is_wielding(&self) -> bool {
         self.controller.is_wielding()
+    }
+
+    fn stow(&mut self) -> Vec<VirtualHandEffect> {
+        self.controller.stow()
     }
 
     fn flat_aim_ray(&self) -> Option<(Point3<f32>, Vector3<f32>)> {

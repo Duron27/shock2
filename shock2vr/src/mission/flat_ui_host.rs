@@ -98,6 +98,9 @@ pub enum FlatUiDragAction {
     Throw(EntityId),
     Apply(EntityId),
     Wield(EntityId),
+    /// Take the wielded weapon off its arm and put it on the cursor (via the
+    /// backpack), so it can be dropped back into the inventory.
+    Unwield(EntityId),
     /// VR trigger uses the item in place; squeeze remains the grab gesture.
     UseInventory(EntityId),
     Maintain {
@@ -257,6 +260,9 @@ pub struct FlatUiHost {
     hand_items: [Option<CursorItem>; 2],
     /// Read-only paperdoll contents, in physical left/right holster order.
     holster_items: [Option<CursorItem>; 2],
+    /// The paperdoll arm (0 left, 1 right) the wielded weapon is drawn on:
+    /// the one it was last dropped on. Flat wields with one hand either way.
+    wield_arm: usize,
     implant_items: [Option<CursorItem>; 2],
     armor_item: Option<CursorItem>,
     armor_status: String,
@@ -344,6 +350,7 @@ impl FlatUiHost {
             components: Vec::new(),
             strip: None,
             cursor_item: None,
+            wield_arm: 1,
             item_use: None,
             placement_preview: Vec::new(),
             last_lift: None,
@@ -675,9 +682,9 @@ impl FlatUiHost {
         let rects = holster_readout_rects(self.strip_rect()?);
         let slot = rects.iter().position(|rect| rect.contains(pointer))?;
         let side = ["Left holster", "Right holster"][slot];
-        let name = self.holster_items[slot]
-            .as_ref()
-            .map(|item| item.label.as_deref().unwrap_or("Holstered item"))
+        let name = self
+            .arm_item(slot)
+            .map(|item| item.label.as_deref().unwrap_or("Item"))
             .unwrap_or("Empty");
         Some(format!("{side}: {name}"))
     }
@@ -849,6 +856,23 @@ impl FlatUiHost {
         self.readout_buttons_debug()
             .into_iter()
             .find(|element| element.label.as_deref() == Some(ReadoutButton::CycleAmmo.label()))
+    }
+
+    /// What paperdoll arm `slot` shows: that side's holster, or else the
+    /// wielded weapon when this is the arm it was dropped on.
+    fn arm_item(&self, slot: usize) -> Option<&CursorItem> {
+        self.holster_items[slot].as_ref().or_else(|| {
+            (slot == self.wield_arm)
+                .then(|| self.hand_items.iter().flatten().next())
+                .flatten()
+        })
+    }
+
+    /// Put a backpack item on the cursor, as if the player had lifted it -
+    /// the end of an [`FlatUiDragAction::Unwield`].
+    pub fn lift_onto_cursor(&mut self, world: &World, entity: EntityId) {
+        self.cursor_item = Some(make_cursor_item(world, entity));
+        self.last_lift = None;
     }
 
     /// Take the item off the cursor (clearing it), returning its entity id.
@@ -1427,7 +1451,7 @@ impl FlatUiHost {
             let holster_item = holster_readout_rects(rect)
                 .iter()
                 .position(|r| r.contains(canvas_pos))
-                .and_then(|slot| self.holster_items[slot].as_ref().map(|item| item.entity));
+                .and_then(|slot| self.arm_item(slot).map(|item| item.entity));
             let candidate = self
                 .held_entity()
                 .or(holster_item)
@@ -1501,20 +1525,34 @@ impl FlatUiHost {
             };
             return (messages, Vec::new());
         }
-        if strip_rect.is_some_and(|r| {
+        if let Some(arm) = strip_rect.and_then(|r| {
             holster_readout_rects(r)
                 .iter()
-                .any(|r| r.contains(canvas_pos))
+                .position(|r| r.contains(canvas_pos))
         }) {
             // Dropping a weapon carried on the cursor onto either arm wields it
-            // (flat wields with the one visible hand, whichever arm is hit).
+            // and draws it on that arm (flat wields with one hand either way).
             if pressed_edge
                 && let Some(held) = self.cursor_item.as_ref().map(|item| item.entity)
                 && crate::virtual_hand::is_wieldable_weapon(world, held)
             {
                 self.cursor_item = None;
                 self.last_lift = None;
+                self.wield_arm = arm;
                 return (Vec::new(), vec![FlatUiDragAction::Wield(held)]);
+            }
+            // Pressing the arm that shows the wielded weapon picks it back up,
+            // to be dropped into the backpack.
+            if pressed_edge
+                && self.cursor_item.is_none()
+                && let Some(shown) = self.arm_item(arm).map(|item| item.entity)
+                && self
+                    .hand_items
+                    .iter()
+                    .flatten()
+                    .any(|item| item.entity == shown)
+            {
+                return (Vec::new(), vec![FlatUiDragAction::Unwield(shown)]);
             }
             // Otherwise these are read-only holster snapshots. Hand weapon
             // controls use their own selectors below; a paperdoll click must not
@@ -1887,7 +1925,7 @@ impl FlatUiHost {
                     VAlign::Middle,
                 );
                 let content = Rect::new(arm.x + 3.0, arm.y + 30.0, arm.w - 6.0, arm.h - 34.0);
-                if let Some(item) = self.holster_items[slot].as_ref() {
+                if let Some(item) = self.arm_item(slot) {
                     match item.icon.as_deref() {
                         Some(icon) => {
                             canvas.fitted_object_icon(content, icon);
@@ -2172,13 +2210,13 @@ impl FlatUiHost {
                 ));
                 elements.extend(holster_readout_rects(rect).into_iter().enumerate().map(
                     |(slot, r)| {
-                        let item = self.holster_items[slot].as_ref();
+                        let item = self.arm_item(slot);
                         crate::game_scene::DebugUiElement {
                             kind: "readout".to_owned(),
                             texture: item.and_then(|item| item.icon.clone()),
                             text: Some({
                                 let name = item
-                                    .map(|item| item.label.as_deref().unwrap_or("Holstered item"))
+                                    .map(|item| item.label.as_deref().unwrap_or("Item"))
                                     .unwrap_or("Empty");
                                 name.to_owned()
                             }),
@@ -3776,9 +3814,10 @@ mod tests {
         );
         host.on_entity_destroyed(item);
         host.cursor_canvas = Some(right.center());
+        // The emptied right arm now shows the weapon wielded on it.
         assert_eq!(
             host.pointed_equipment_name().as_deref(),
-            Some("Right holster: Empty")
+            Some("Right holster: Item")
         );
     }
 
@@ -3871,6 +3910,27 @@ mod tests {
             let actions = press_edge(&mut host, &world, (point.x, point.y));
             assert_eq!(actions, vec![FlatUiDragAction::Wield(wrench)], "arm {arm}");
             assert_eq!(host.held_entity(), None, "the cursor is cleared");
+        }
+    }
+
+    #[test]
+    fn the_wielded_weapon_shows_on_its_arm_and_lifts_back_off_it() {
+        for arm in 0..2 {
+            let (mut world, mut host, wrench, _) = drag_world();
+            world.add_component(wrench, dark::properties::PropLimbModel("wrench_h".into()));
+            host.cursor_item = Some(make_cursor_item(&world, wrench));
+            let rects = holster_readout_rects(host.strip_rect().unwrap());
+            let on = rects[arm].center();
+            let other = rects[1 - arm].center();
+            press_edge(&mut host, &world, (on.x, on.y));
+            // The mission reports the wield back as the flat hand's item.
+            host.hand_items[1] = Some(make_cursor_item(&world, wrench));
+            assert_eq!(host.arm_item(arm).map(|i| i.entity), Some(wrench), "arm {arm}");
+            assert!(host.arm_item(1 - arm).is_none(), "only one arm shows it");
+
+            assert!(press_edge(&mut host, &world, (other.x, other.y)).is_empty());
+            let actions = press_edge(&mut host, &world, (on.x, on.y));
+            assert_eq!(actions, vec![FlatUiDragAction::Unwield(wrench)], "arm {arm}");
         }
     }
 

@@ -5942,6 +5942,10 @@ impl MissionCore {
         }
         self.device_inspect_only = self.flat_ui.device && self.flat_ui.utilities.is_inspecting();
         for action in ui_drag_actions {
+            if let crate::mission::flat_ui_host::FlatUiDragAction::Unwield(entity) = action {
+                effects.extend(self.unwield_to_cursor(asset_cache, entity));
+                continue;
+            }
             // Flattened: an action can answer with a composite (using a
             // maintenance tool is a restore plus a consume plus a sound), and
             // this list is applied one variant at a time.
@@ -8197,6 +8201,8 @@ impl MissionCore {
             // `GrabEntity` (which also clears its Contains link and holsters
             // any displaced weapon back to the grid), anything else is used
             // where it stands.
+            // Needs the asset cache; `update` handles it before this.
+            FlatUiDragAction::Unwield(_) => Vec::new(),
             FlatUiDragAction::Wield(entity_id) => {
                 vec![crate::scripts::maintenance::use_carried_item(
                     &self.world,
@@ -16269,6 +16275,21 @@ impl MissionCore {
             return Err("cannot crouch while topping out".to_string());
         }
         self.teleport_player(position)
+    }
+
+    /// Put the wielded `entity` back into the backpack and onto the cursor, so
+    /// the player can drop it where they like. A full backpack leaves it
+    /// wherever `StoreItem` refuses to (back in the world) with its feedback.
+    fn unwield_to_cursor(&mut self, asset_cache: &mut AssetCache, entity: EntityId) -> Vec<Effect> {
+        if !self.interaction.is_holding(entity) {
+            return Vec::new();
+        }
+        let stow = self.interaction.stow();
+        let effects = self.process_virtual_hand_effects(asset_cache, stow);
+        if crate::scripts::script_util::player_carried_items(&self.world).contains(&entity) {
+            self.flat_ui.lift_onto_cursor(&self.world, entity);
+        }
+        effects
     }
 
     fn grab_entity_into_hand(

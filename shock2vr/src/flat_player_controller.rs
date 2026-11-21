@@ -190,6 +190,18 @@ impl FlatPlayerController {
         effects
     }
 
+    /// Put the wielded weapon away into the backpack, leaving the hand empty.
+    pub fn stow(&mut self) -> Vec<VirtualHandEffect> {
+        let Some(prev) = self.wielded_entity.take() else {
+            return Vec::new();
+        };
+        self.last_fire_pressed = false;
+        vec![
+            out_message(prev, MessagePayload::Drop),
+            VirtualHandEffect::StoreItem { entity_id: prev },
+        ]
+    }
+
     /// Apply the original flat pickup split: weapons become the first-person
     /// viewmodel, while ordinary loot goes straight into the backpack.
     fn pick_up(&mut self, world: &World, entity_id: EntityId) -> Vec<VirtualHandEffect> {
