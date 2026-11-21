@@ -33,6 +33,12 @@ from Night Dive's GPL-3.0 source release,
    contact shadows and drawn with the world lightmap material (fog, gloss,
    bump, a player lamp). WASD/mouse, F fly, L lamp, PgUp/PgDn level.
 5. **Objects and 3D models** - sprites and `obj3d.res` models.
+   *Started:* `ss1::objects` reads the level object table, `objprop.dat`'s
+   common properties and the `objart.res` layout (`cargo s1q objects N
+   [--class door] [--art dir]`). The runtime draws sprites (camera-facing)
+   and flat bitmaps (doors, signs, panels) lit from the lightmap under
+   them. Still to do: critters (`objart2/3.res`), 3D models (`obj3d.res`),
+   textured-poly objects, animation, door opening.
 6. **UI** - the original screen layout (`gamescr.res`, `mfdart.res`),
    upscaled and smoothed. *Started:* the in-game frame (`gamescr.res` 617)
    is Scale2x'd 4x and drawn over the view, with the 3D projection fitted

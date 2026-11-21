@@ -42,6 +42,16 @@ enum Command {
         #[arg(long, default_value = "ss1_level.png")]
         out: PathBuf,
     },
+    /// List a level's objects by class and render type; with --art, export
+    /// each object type's first world frame as a PNG.
+    Objects {
+        level: u16,
+        #[arg(long)]
+        art: Option<PathBuf>,
+        /// Print each object of this class (e.g. door) with its position.
+        #[arg(long)]
+        class: Option<String>,
+    },
     /// Export image resources as PNGs (all of a file's images, or one --id).
     Image {
         file: String,
@@ -251,6 +261,64 @@ fn main() -> Result<()> {
             }
             img.save(&out)?;
             println!("wrote {}", out.display());
+        }
+        Command::Objects { level, art, class } => {
+            let archive = ResFile::open(data.join("archive.dat"))?;
+            let props = ss1::objects::ObjProps::load(&data)?;
+            let objs = ss1::objects::load_level_objects(&archive, level)?;
+            let mut by_class = std::collections::BTreeMap::new();
+            for o in &objs {
+                let render = o
+                    .triple()
+                    .map(|t| format!("{:?}", props.props[t].render_type))
+                    .unwrap_or_else(|| "bad-triple".into());
+                let class = ss1::objects::CLASS_NAMES
+                    .get(o.class as usize)
+                    .copied()
+                    .unwrap_or("?");
+                *by_class.entry((class, render)).or_insert(0) += 1;
+            }
+            println!("level {level}: {} objects", objs.len());
+            if let Some(name) = &class {
+                for o in objs.iter().filter(|o| {
+                    ss1::objects::CLASS_NAMES.get(o.class as usize) == Some(&name.as_str())
+                }) {
+                    println!(
+                        "  #{:<4} {}/{}/{} at ({:.2}, {:.2}) z {} heading {} frame {}",
+                        o.id, o.class, o.subclass, o.kind, o.x, o.y, o.z, o.heading, o.frame
+                    );
+                }
+            }
+            for ((class, render), n) in by_class {
+                println!("  {class:<11} {render:<10} {n}");
+            }
+            if let Some(out) = art {
+                std::fs::create_dir_all(&out)?;
+                let palette = ss1::Palette::load_game(&data)?;
+                let objart = ResFile::open(data.join("objart.res"))?.load(1350)?;
+                let mut done = std::collections::BTreeSet::new();
+                for o in &objs {
+                    let Some(t) = o.triple() else { continue };
+                    if !done.insert(t) {
+                        continue;
+                    }
+                    let Some(item) = props.world_art(t, 0).and_then(|i| objart.item(i)) else {
+                        continue;
+                    };
+                    if let Ok(image) = ss1::Image::parse(item)
+                        && image.width > 0
+                    {
+                        image::save_buffer(
+                            out.join(format!("{t:03}_{}_{}_{}.png", o.class, o.subclass, o.kind)),
+                            &image.to_rgba(&palette),
+                            image.width as u32,
+                            image.height as u32,
+                            image::ColorType::Rgba8,
+                        )?;
+                    }
+                }
+                println!("wrote {} types to {}", done.len(), out.display());
+            }
         }
         Command::Check => {
             let mut files: Vec<_> = std::fs::read_dir(&data)?

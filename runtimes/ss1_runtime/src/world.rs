@@ -20,6 +20,8 @@ const LIGHTMAP_WIDTH: usize = 2048;
 pub struct World {
     pub level: Level,
     pub objects: Vec<SceneObject>,
+    /// Sprites, doors, signs: transformed per frame.
+    pub things: Vec<crate::objects::Placed>,
     pub face_count: usize,
 }
 
@@ -73,7 +75,7 @@ fn v3([x, y, z]: mesh::Vec3) -> Vector3<f32> {
 }
 
 impl World {
-    pub fn load(data: &Path, number: u16) -> Result<World> {
+    pub fn load(data: &Path, number: u16, ceilings: bool) -> Result<World> {
         let archive = ResFile::open(data.join("archive.dat")).context("archive.dat")?;
         let textures = ResFile::open(data.join("texture.res")).context("texture.res")?;
         let palette = Palette::load_game(data)?;
@@ -100,6 +102,9 @@ impl World {
             HashMap::new();
         let atlas: Vector4<f32> = Vector4::new(0.0, 0.0, 1.0, 1.0);
         for (face, lm) in faces.iter().zip(&lightmap.uvs) {
+            if !ceilings && face.surface == mesh::Surface::Ceiling {
+                continue;
+            }
             let vertex = |i: usize| VertexPositionTextureLightmapAtlasNormal {
                 position: v3(face.corners[i]),
                 uv: vec2(face.uvs[i][0], face.uvs[i][1]),
@@ -134,7 +139,64 @@ impl World {
             objects.push(SceneObject::new(material, Box::new(geometry)));
         }
 
+        // Each floor's lightmap patch, so an object takes the light it stands in.
+        let floor_patches: HashMap<(usize, usize), (usize, &mesh::Face)> = faces
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.surface == mesh::Surface::Floor)
+            .map(|(i, f)| (f.tile, (i, f)))
+            .collect();
+        let light_uv = |x: f32, y: f32| {
+            let (tx, ty) = (x.max(0.0) as usize, y.max(0.0) as usize);
+            let (i, face) = floor_patches.get(&(tx, ty))?;
+            let uvs = lightmap.uvs[*i];
+            // Find the face's (s, t) of this point from its corner box; the
+            // patch spans corner 0 -> 1 in s and 0 -> 3 in t.
+            let c = face.corners;
+            let along = |p: f32, a: f32, b: f32| {
+                if (b - a).abs() < 1e-4 {
+                    0.5
+                } else {
+                    ((p - a) / (b - a)).clamp(0.0, 1.0)
+                }
+            };
+            let (px, pz) = (x, -y);
+            let s = if (c[1][0] - c[0][0]).abs() > (c[1][2] - c[0][2]).abs() {
+                along(px, c[0][0], c[1][0])
+            } else {
+                along(pz, c[0][2], c[1][2])
+            };
+            let t = if (c[3][0] - c[0][0]).abs() > (c[3][2] - c[0][2]).abs() {
+                along(px, c[0][0], c[3][0])
+            } else {
+                along(pz, c[0][2], c[3][2])
+            };
+            let u = uvs[0][0] + (uvs[1][0] - uvs[0][0]) * s;
+            let v = uvs[0][1] + (uvs[3][1] - uvs[0][1]) * t;
+            Some(lightmap_uv([u, v]))
+        };
+        let things = match (
+            ss1::objects::ObjProps::load(data),
+            ResFile::open(data.join("objart.res")).and_then(|r| r.load(1350)),
+            ss1::objects::load_level_objects(&archive, number),
+        ) {
+            (Ok(props), Ok(art), Ok(objs)) => {
+                let mut art = crate::objects::ObjectArt::new(props, art, palette.clone());
+                art.place(&objs, level.z_shift, &lightmap_texture, light_uv)
+            }
+            (props, art, objs) => {
+                eprintln!(
+                    "objects unavailable: {:?} {:?} {:?}",
+                    props.err(),
+                    art.err(),
+                    objs.err()
+                );
+                Vec::new()
+            }
+        };
+
         Ok(World {
+            things,
             face_count: faces.len(),
             level,
             objects,

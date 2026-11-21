@@ -11,6 +11,7 @@
 //! Escape quits.
 
 mod hud;
+mod objects;
 mod world;
 
 use std::path::PathBuf;
@@ -50,6 +51,12 @@ struct Cli {
     /// Start flying instead of walking.
     #[arg(long)]
     fly: bool,
+    /// Leave out ceilings (for looking down on a level).
+    #[arg(long)]
+    no_ceilings: bool,
+    /// Start flying with the eye this many tiles above height zero.
+    #[arg(long)]
+    altitude: Option<f32>,
     /// Start in full-screen view, without the interface frame.
     #[arg(long)]
     fullscreen_view: bool,
@@ -159,7 +166,7 @@ fn main() -> Result<()> {
     let hud = hud::Hud::load(&data)?;
     let mut show_frame = !cli.fullscreen_view;
     let mut level_number = cli.level;
-    let mut world = World::load(&data, level_number)?;
+    let mut world = World::load(&data, level_number, !cli.no_ceilings)?;
     println!(
         "level {level_number}: {} faces in {} draws",
         world.face_count,
@@ -172,11 +179,15 @@ fn main() -> Result<()> {
         }
         None => world.start_position(),
     };
+    let mut feet = start(&world);
+    if let Some(altitude) = cli.altitude {
+        feet.y = altitude * TILE - EYE;
+    }
     let mut player = Player {
-        feet: start(&world),
+        feet,
         yaw: cli.yaw,
         pitch: cli.pitch,
-        flying: cli.fly,
+        flying: cli.fly || cli.altitude.is_some(),
         lamp: true,
     };
 
@@ -218,7 +229,7 @@ fn main() -> Result<()> {
             }
         }
         if let Some(number) = change_level {
-            match World::load(&data, number) {
+            match World::load(&data, number, !cli.no_ceilings) {
                 Ok(next) => {
                     level_number = number;
                     world = next;
@@ -289,6 +300,11 @@ fn main() -> Result<()> {
         };
 
         let mut objects = world.objects.clone();
+        for thing in &world.things {
+            let mut object = thing.object.clone();
+            object.transform = thing.transform(player.yaw);
+            objects.push(object);
+        }
         if show_frame {
             objects.extend(hud.objects(screen));
         }
