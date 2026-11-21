@@ -40,8 +40,12 @@ from Night Dive's GPL-3.0 source release,
    them, oriented by heading, pitch and bank (the pitch/bank sign is
    inferred, not yet checked against the original). Critters stand in
    their standing pose, showing the one of their eight views that faces
-   the camera (the original's octant test). Still to do: 3D models
-   (`obj3d.res`), textured-poly objects, animation, door opening.
+   the camera (the original's octant test). Polygon models (`obj3d.res`, decoded from
+   the original interpreter's bytecode) draw as real meshes; crates are
+   textured boxes sized from the container table; pickups are their
+   sprites extruded into slabs that turn; wall screens show their texture.
+   Still to do: per-instance model colours and TextPoly labels, camera and
+   text screens, animation, door opening.
 6. **UI** - the original screen layout (`gamescr.res`, `mfdart.res`),
    upscaled and smoothed. *Started:* the in-game frame (`gamescr.res` 617)
    is Scale2x'd 4x and drawn over the view, with the 3D projection fitted

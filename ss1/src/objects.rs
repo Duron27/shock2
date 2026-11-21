@@ -337,6 +337,55 @@ pub fn crate_shape(table: &[u8], obj: &Obj) -> Option<CrateShape> {
     })
 }
 
+pub const CLASS_BIGSTUFF: u8 = 7;
+/// `ObjBigstuff` records: header, cosmetic value, data1, data2.
+const BIGSTUFF_LEN: usize = 16;
+
+/// A bigstuff object's `data2` (a screen's picture, a texture index).
+pub fn bigstuff_data2(table: &[u8], obj: &Obj) -> Option<u32> {
+    let at = obj.spec_id as usize * BIGSTUFF_LEN + 12;
+    Some(u32::from_le_bytes(table.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// What a wall screen (`SCREEN`, `TMAP`, `SUPERSCREEN`, `BIGSCREEN`) shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScreenArt {
+    /// `texture.res` small texture.
+    SmallTexture(u16),
+    /// A custom material (`citmat.res` 2180+).
+    Custom(u16),
+    /// One of the level's textures.
+    LevelTexture(u16),
+}
+
+/// A wall screen's half width in tiles and its picture, as the original's
+/// `FAUBJ_TPOLY` case picks them, or None for anything else.
+pub fn screen(table: &[u8], obj: &Obj) -> Option<(f32, ScreenArt)> {
+    if obj.class != CLASS_BIGSTUFF || obj.subclass != 2 || !(6..=9).contains(&obj.kind) {
+        return None;
+    }
+    let data2 = bigstuff_data2(table, obj)?;
+    // `scale = n - wlog` makes the picture 2^n / 128 tiles across.
+    let half = match obj.kind {
+        6 => 0.25,
+        8 => 1.0,
+        _ => 0.5,
+    };
+    if obj.kind == 7 {
+        return Some((half, ScreenArt::LevelTexture(data2 as u16)));
+    }
+    if data2 == 0 {
+        return None;
+    }
+    let rep = (data2 + obj.frame as u32) & 0xfff;
+    let index = (rep & 0x7f) as u16;
+    match (rep >> 7) & 3 {
+        0 => Some((half, ScreenArt::SmallTexture(index))),
+        1 => Some((half, ScreenArt::Custom(index))),
+        _ => None, // text and scrolling text: not drawn yet
+    }
+}
+
 /// A class's per-object table from a level (`level_base + 10 + class`).
 pub fn load_class_table(archive: &ResFile, level: u16, class: u8) -> Result<Vec<u8>, ResError> {
     Ok(archive.load(level_base(level) + 10 + class as u16)?.data)

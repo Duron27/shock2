@@ -191,6 +191,8 @@ impl World {
                     palette.clone(),
                     level.textures.clone(),
                     containers,
+                    ss1::objects::load_class_table(&archive, number, ss1::objects::CLASS_BIGSTUFF)
+                        .ok(),
                 );
                 art.place(&objs, level.z_shift, &lightmap_texture, light_uv)
             }

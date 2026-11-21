@@ -281,6 +281,17 @@ fn main() -> Result<()> {
                 *by_class.entry((class, render)).or_insert(0) += 1;
             }
             println!("level {level}: {} objects", objs.len());
+            let bigstuff =
+                ss1::objects::load_class_table(&archive, level, ss1::objects::CLASS_BIGSTUFF)
+                    .unwrap_or_default();
+            for o in &objs {
+                if let Some(screen) = ss1::objects::screen(&bigstuff, o) {
+                    println!(
+                        "  screen #{} at ({:.2}, {:.2}): {:?}",
+                        o.id, o.x, o.y, screen
+                    );
+                }
+            }
             if let Some(name) = &class {
                 for o in objs.iter().filter(|o| {
                     ss1::objects::CLASS_NAMES.get(o.class as usize) == Some(&name.as_str())

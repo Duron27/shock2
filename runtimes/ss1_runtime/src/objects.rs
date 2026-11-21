@@ -162,6 +162,8 @@ pub struct ObjectArt {
     level_textures: Vec<u16>,
     /// The level's container table, for crate sizes.
     containers: Option<Vec<u8>>,
+    /// The level's bigstuff table, for wall screens.
+    bigstuff: Option<Vec<u8>>,
     /// The palette as a 16x16 texture, for flat-coloured polygons.
     swatches: Rc<dyn TextureTrait>,
     material_cache: HashMap<u16, Option<Rc<dyn TextureTrait>>>,
@@ -178,6 +180,7 @@ impl ObjectArt {
         palette: Palette,
         level_textures: Vec<u16>,
         containers: Option<Vec<u8>>,
+        bigstuff: Option<Vec<u8>>,
     ) -> Self {
         let mut bytes = Vec::with_capacity(256 * 4);
         for i in 0..256 {
@@ -205,6 +208,7 @@ impl ObjectArt {
             textures: ResFile::open(data.join("texture.res")).ok(),
             level_textures,
             containers,
+            bigstuff,
             swatches: Rc::new(swatches),
             material_cache: HashMap::new(),
             model_cache: HashMap::new(),
@@ -269,6 +273,7 @@ impl ObjectArt {
             let facing = match prop.render_type {
                 RenderType::TextPoly | RenderType::AnimPoly | RenderType::FlatPoly => Facing::Model,
                 RenderType::Special if self.crate_model(obj).is_some() => Facing::Model,
+                RenderType::TPoly if self.screen_model(obj).is_some() => Facing::Model,
                 RenderType::Bitmap if obj.class <= PICKUP_CLASSES_END => Facing::Spin,
                 RenderType::Bitmap => Facing::Billboard,
                 RenderType::TexBitmap => Facing::Fixed,
@@ -286,6 +291,7 @@ impl ObjectArt {
             if let Facing::Model = facing {
                 let model = self
                     .crate_model(obj)
+                    .or_else(|| self.screen_model(obj))
                     .map(Rc::new)
                     .or_else(|| self.model(prop.mfd_id.max(0) as u16));
                 let parts = match model {
@@ -400,13 +406,40 @@ impl ObjectArt {
         })
     }
 
+    /// A wall screen as one textured quad, centred on the object.
+    fn screen_model(&self, obj: &Obj) -> Option<Model> {
+        let (half, art) = ss1::objects::screen(self.bigstuff.as_deref()?, obj)?;
+        let key = match art {
+            ss1::objects::ScreenArt::SmallTexture(i) => SMALL_TEXTURE_KEY + i,
+            ss1::objects::ScreenArt::Custom(i) => CUSTOM_MATERIAL_KEY + i,
+            ss1::objects::ScreenArt::LevelTexture(i) => LEVEL_TEXTURE_KEY + i,
+        };
+        Some(Model {
+            polys: vec![Poly {
+                fill: Fill::Texture(key),
+                points: vec![
+                    [-half, -half, 0.0],
+                    [half, -half, 0.0],
+                    [half, half, 0.0],
+                    [-half, half, 0.0],
+                ],
+                uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            }],
+        })
+    }
+
     /// A texture by key: a model's virtual texture (`citmat.res` 475+),
     /// a custom material (2180+), or one of the level's own textures.
     fn material(&mut self, vtext: u16) -> Option<Rc<dyn TextureTrait>> {
         if let Some(hit) = self.material_cache.get(&vtext) {
             return hit.clone();
         }
-        let (res, id) = if vtext >= LEVEL_TEXTURE_KEY {
+        let (res, id) = if vtext >= SMALL_TEXTURE_KEY {
+            (
+                self.textures.as_ref(),
+                Some(SMALL_TEXTURE_BASE + vtext - SMALL_TEXTURE_KEY),
+            )
+        } else if vtext >= LEVEL_TEXTURE_KEY {
             let index = (vtext - LEVEL_TEXTURE_KEY) as usize;
             (
                 self.textures.as_ref(),
@@ -520,6 +553,9 @@ impl ObjectArt {
 /// level textures.
 const CUSTOM_MATERIAL_KEY: u16 = 0x1000;
 const LEVEL_TEXTURE_KEY: u16 = 0x2000;
+const SMALL_TEXTURE_KEY: u16 = 0x3000;
+/// `TEXTURE_SMALL_ID` in `texture.res`.
+const SMALL_TEXTURE_BASE: u16 = 321;
 /// `RES_customTextureMaps` in `citmat.res`.
 const CUSTOM_MATERIAL_BASE: u16 = 2180;
 /// 64x64 level textures in `texture.res`.
