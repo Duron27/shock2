@@ -181,7 +181,12 @@ impl World {
             ss1::objects::load_level_objects(&archive, number),
         ) {
             (Ok(props), Ok(art), Ok(objs)) => {
-                let mut art = crate::objects::ObjectArt::new(props, art, palette.clone());
+                let mut art = crate::objects::ObjectArt::new(
+                    props,
+                    art,
+                    ResFile::open(data.join("objart2.res")).ok(),
+                    palette.clone(),
+                );
                 art.place(&objs, level.z_shift, &lightmap_texture, light_uv)
             }
             (props, art, objs) => {
@@ -229,6 +234,32 @@ impl World {
         let tile = self.level.tile(mx as usize, my as usize)?;
         let lowest = tile.ceiling_corners().into_iter().fold(f32::MAX, f32::min);
         Some(lowest * self.level.height_scale() * TILE)
+    }
+
+    /// The nearest point to tile coordinates `(x, y)` that is open floor
+    /// with room to stand, as a world position on that floor.
+    pub fn nearest_open(&self, x: f32, y: f32) -> Vector3<f32> {
+        let level = &self.level;
+        let mut best: Option<(f32, f32, f32)> = None;
+        for ty in 0..level.height {
+            for tx in 0..level.width {
+                let tile = level.tile(tx, ty).unwrap();
+                if tile.kind.is_solid() || tile.ceiling < tile.floor + 6 {
+                    continue;
+                }
+                let (cx, cy) = (
+                    x.clamp(tx as f32 + 0.2, tx as f32 + 0.8),
+                    y.clamp(ty as f32 + 0.2, ty as f32 + 0.8),
+                );
+                let d = (cx - x).powi(2) + (cy - y).powi(2);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, cx, cy));
+                }
+            }
+        }
+        let (_, cx, cy) = best.unwrap_or((0.0, x, y));
+        let (wx, wz) = (cx * TILE, -cy * TILE);
+        vec3(wx, self.floor_at(wx, wz).unwrap_or(0.0), wz)
     }
 
     /// A reasonable place to stand: the open tile with the most open space

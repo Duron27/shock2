@@ -284,8 +284,18 @@ fn main() -> Result<()> {
                     ss1::objects::CLASS_NAMES.get(o.class as usize) == Some(&name.as_str())
                 }) {
                     println!(
-                        "  #{:<4} {}/{}/{} at ({:.2}, {:.2}) z {} heading {} frame {}",
-                        o.id, o.class, o.subclass, o.kind, o.x, o.y, o.z, o.heading, o.frame
+                        "  #{:<4} {}/{}/{} at ({:.2}, {:.2}) z {} heading {} pitch {} bank {} frame {}",
+                        o.id,
+                        o.class,
+                        o.subclass,
+                        o.kind,
+                        o.x,
+                        o.y,
+                        o.z,
+                        o.heading,
+                        o.pitch,
+                        o.bank,
+                        o.frame
                     );
                 }
             }

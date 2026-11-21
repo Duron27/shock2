@@ -37,8 +37,11 @@ from Night Dive's GPL-3.0 source release,
    common properties and the `objart.res` layout (`cargo s1q objects N
    [--class door] [--art dir]`). The runtime draws sprites (camera-facing)
    and flat bitmaps (doors, signs, panels) lit from the lightmap under
-   them. Still to do: critters (`objart2/3.res`), 3D models (`obj3d.res`),
-   textured-poly objects, animation, door opening.
+   them, oriented by heading, pitch and bank (the pitch/bank sign is
+   inferred, not yet checked against the original). Critters stand in
+   their standing pose, showing the one of their eight views that faces
+   the camera (the original's octant test). Still to do: 3D models
+   (`obj3d.res`), textured-poly objects, animation, door opening.
 6. **UI** - the original screen layout (`gamescr.res`, `mfdart.res`),
    upscaled and smoothed. *Started:* the in-game frame (`gamescr.res` 617)
    is Scale2x'd 4x and drawn over the view, with the 3D projection fitted

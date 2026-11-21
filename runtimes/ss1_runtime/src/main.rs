@@ -173,10 +173,7 @@ fn main() -> Result<()> {
         world.objects.len()
     );
     let start = |world: &World| match cli.tile {
-        Some((x, y)) => {
-            let (x, z) = (x * TILE, -y * TILE);
-            vec3(x, world.floor_at(x, z).unwrap_or(0.0), z)
-        }
+        Some((x, y)) => world.nearest_open(x, y),
         None => world.start_position(),
     };
     let mut feet = start(&world);
@@ -301,9 +298,7 @@ fn main() -> Result<()> {
 
         let mut objects = world.objects.clone();
         for thing in &world.things {
-            let mut object = thing.object.clone();
-            object.transform = thing.transform(player.yaw);
-            objects.push(object);
+            objects.extend(thing.object(player.yaw, player.eye()));
         }
         if show_frame {
             objects.extend(hud.objects(screen));

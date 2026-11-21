@@ -137,6 +137,11 @@ pub struct ObjProp {
 }
 
 pub const OBJ_PROP_LEN: usize = 27;
+const CRITTER_PROP_LEN: usize = 75;
+/// Mutant, robot, cyborg, cyber and robobabe subclass properties.
+const CRITTER_TAIL_LEN: usize = 9 + 12 * 2 + 7 * 2 + 7 * 6 + 2;
+/// `RES_bmCritterStanding_0` in `objart2.res`.
+pub const CRITTER_STANDING_BASE: u16 = 1585;
 /// `MY_IM_LARGE`: the sprite draws at twice the usual scale.
 pub const FLAG_LARGE: u16 = 0x0008;
 
@@ -163,6 +168,8 @@ impl ObjProp {
 /// All object types' common properties, and where their art starts.
 pub struct ObjProps {
     pub props: Vec<ObjProp>,
+    /// Per critter type: how many directions its sprites are drawn from.
+    pub critter_views: Vec<u8>,
     /// Per triple: the `objart.res` item of its inventory picture; its world
     /// frames follow it (`obj_load_art`).
     pub art_start: Vec<usize>,
@@ -181,6 +188,17 @@ impl ObjProps {
     pub fn parse(bytes: &[u8]) -> Option<ObjProps> {
         let n = num_triples();
         let start = bytes.len().checked_sub(n * OBJ_PROP_LEN)?;
+        // `CritterProp` records (75 bytes each) sit just before the critter
+        // subclass tables (91 bytes) and the common properties; `views` is
+        // byte 69 of each.
+        let critters = SUBCLASS_TYPES[CLASS_CRITTER as usize]
+            .iter()
+            .map(|&n| n as usize)
+            .sum::<usize>();
+        let critter_start = start.checked_sub(CRITTER_TAIL_LEN + critters * CRITTER_PROP_LEN)?;
+        let critter_views = (0..critters)
+            .map(|i| bytes[critter_start + i * CRITTER_PROP_LEN + 69])
+            .collect();
         let props: Vec<ObjProp> = bytes[start..]
             .chunks_exact(OBJ_PROP_LEN)
             .map(ObjProp::parse)
@@ -193,7 +211,23 @@ impl ObjProps {
             art_start.push(at);
             at += 3 + p.extra_frames();
         }
-        Some(ObjProps { props, art_start })
+        Some(ObjProps {
+            props,
+            critter_views,
+            art_start,
+        })
+    }
+
+    /// The `objart2.res` resource of a critter's standing sprite from
+    /// `view` (0..8), following `critter_id_table`.
+    pub fn critter_standing(&self, critter: usize, view: usize) -> Option<u16> {
+        let views = *self.critter_views.get(critter)? as usize;
+        let before: usize = self.critter_views[..critter]
+            .iter()
+            .map(|&v| v as usize)
+            .sum();
+        let view = if views > 1 { view % views } else { 0 };
+        Some(CRITTER_STANDING_BASE + (before + view) as u16)
     }
 
     /// The `objart.res` item of a type's world frame.
@@ -201,6 +235,29 @@ impl ObjProps {
         let p = self.props.get(triple)?;
         Some(self.art_start[triple] + 1 + frame.min(p.extra_frames()))
     }
+}
+
+/// The view (0..8) of a critter at `(x, y)` with `heading` drawn for an eye
+/// at `(eye_x, eye_y)` (tiles), exactly as the original's octant test.
+pub fn critter_view(x: f32, y: f32, heading: u8, eye_x: f32, eye_y: f32) -> usize {
+    const QTAB: [i32; 4] = [3, 0, 2, 1];
+    let xd = ((x - eye_x) * 256.0) as i32;
+    let yd = ((y - eye_y) * 256.0) as i32;
+    let q = QTAB[(if xd > 0 { 2 } else { 0 }) + (if yd > 0 { 1 } else { 0 })];
+    let (xd, yd) = (xd.abs(), yd.abs());
+    let l = if xd >= yd << 1 {
+        0
+    } else if xd << 1 <= yd {
+        2
+    } else {
+        1
+    };
+    let view = if q & 1 != 0 {
+        (q << 1) + 2 - l
+    } else {
+        (q << 1) + l
+    };
+    (((heading as i32 - (view << 5) + 0x180) & 0xff) >> 5) as usize
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -276,5 +333,15 @@ mod tests {
         assert_eq!(triple_index(1, 0, 0), Some(16));
         assert_eq!(triple_index(14, 4, 1), Some(475));
         assert_eq!(triple_index(14, 4, 2), None);
+    }
+
+    /// Which of a critter's 8 views faces a viewer, as `FAUBJ_CRIT` picks it.
+    #[test]
+    fn critter_view_faces_the_viewer() {
+        // A critter heading 0 seen from straight ahead of where it faces.
+        let front = critter_view(0.0, 0.0, 0, 0.0, 5.0);
+        let back = critter_view(0.0, 0.0, 0, 0.0, -5.0);
+        assert_ne!(front, back);
+        assert_eq!((front + 4) % 8, back);
     }
 }
