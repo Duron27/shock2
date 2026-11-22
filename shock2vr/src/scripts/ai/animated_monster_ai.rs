@@ -163,6 +163,18 @@ pub(crate) fn door_is_passable(fraction: f32, rise: f32, actor_height: f32) -> b
 /// never over a performance the level authored.
 /// Whether a door has kept the AI waiting long enough to read as impatience
 /// rather than as a door simply opening for it.
+/// Whether an AI waiting on a door it opened should stand still: only once
+/// it is close enough to walk into the leaf. From further off it keeps
+/// walking - the leaf finishes its travel on the way - instead of freezing
+/// mid-room until the door is fully open.
+pub(crate) fn holds_for_door(distance_to_door: f32) -> bool {
+    distance_to_door <= DOOR_HOLD_RANGE
+}
+
+/// How near the door centre (XZ) a waiting AI actually stops: within this
+/// it would reach the leaf before it clears.
+const DOOR_HOLD_RANGE: f32 = DOOR_FACING_RANGE;
+
 pub(crate) fn door_wait_is_thwarting(door_wait_seconds: Option<f32>) -> bool {
     door_wait_seconds.is_some_and(|seconds| seconds >= FRUSTRATION_DOOR_WAIT_SECONDS)
 }
@@ -338,7 +350,8 @@ pub struct AnimatedMonsterAI {
     door_cooldown: f32,
     /// The door this AI is standing off from, and how long it has waited, while
     /// the leaf travels clear (see `update_door_wait`)
-    door_wait: Option<(EntityId, f32)>,
+    /// (door, seconds waited, door centre).
+    door_wait: Option<(EntityId, f32, cgmath::Vector3<f32>)>,
     /// Seconds left before this AI may show frustration again
     frustration_cooldown: f32,
     combat_frustration: CombatFrustration,
@@ -1103,7 +1116,7 @@ impl AnimatedMonsterAI {
     /// than walking into a leaf still crossing the doorway. Returns whether
     /// the AI is holding this frame.
     fn update_door_wait(&mut self, world: &World, entity_id: EntityId, time: &Time) -> Option<f32> {
-        let (door_ent, waited) = self.door_wait?;
+        let (door_ent, waited, door_center) = self.door_wait?;
         // Only a behavior that opens doors waits at one; anything else (a
         // scripted Wait or Play takes over, the AI calms down) walks away
         // from the doorway rather than holding.
@@ -1133,8 +1146,10 @@ impl AnimatedMonsterAI {
             self.door_wait = None;
             return None;
         }
-        self.door_wait = Some((door_ent, waited));
-        Some(waited)
+        self.door_wait = Some((door_ent, waited, door_center));
+        let (position, _) = get_position_and_forward(world, entity_id);
+        let (dx, dz) = (door_center.x - position.x, door_center.z - position.z);
+        holds_for_door((dx * dx + dz * dz).sqrt()).then_some(waited)
     }
 
     /// A pivot costs seconds of standing still, so it belongs to a creature
@@ -1471,9 +1486,18 @@ impl AnimatedMonsterAI {
             // is idempotent, but restarting the clock here is not: the wait
             // would never age out and a jammed door could hold the AI for
             // good. Only a DIFFERENT door starts a fresh wait.
-            if !matches!(self.door_wait, Some((waiting_on, _)) if waiting_on == door_ent) {
-                tracing::debug!("ai {:?} waits for door {:?} to clear", entity_id, door_ent);
-                self.door_wait = Some((door_ent, 0.0));
+            if !matches!(self.door_wait, Some((waiting_on, _, _)) if waiting_on == door_ent) {
+                let fwd_len = (forward.x * forward.x + forward.z * forward.z)
+                    .sqrt()
+                    .max(1e-3);
+                tracing::debug!(
+                    "ai {:?} waits for door {:?} to clear (dist {:.2}, ahead {:.2})",
+                    entity_id,
+                    door_ent,
+                    dist,
+                    (forward.x * dx + forward.z * dz) / (fwd_len * dist)
+                );
+                self.door_wait = Some((door_ent, 0.0, door_center));
             }
             return Effect::Send {
                 msg: Message {
@@ -2603,15 +2627,14 @@ impl Script for AnimatedMonsterAI {
                 } else {
                     fire_ranged_projectile(world, physics, entity_id)
                 };
-                let connected = if motion_flags.contains(MotionFlags::MELEE_CONTACT_START)
-                    && can_act
-                {
-                    // The swing reached its authored contact frame - resolve
-                    // the hit through the attacker's melee weapon archetype.
-                    super::ai_util::melee_contact_attack(world, entity_id, physics)
-                } else {
-                    Effect::NoEffect
-                };
+                let connected =
+                    if motion_flags.contains(MotionFlags::MELEE_CONTACT_START) && can_act {
+                        // The swing reached its authored contact frame - resolve
+                        // the hit through the attacker's melee weapon archetype.
+                        super::ai_util::melee_contact_attack(world, entity_id, physics)
+                    } else {
+                        Effect::NoEffect
+                    };
 
                 Effect::combine(vec![fired, connected, footstep])
             }
@@ -4624,6 +4647,16 @@ mod tests {
     fn frustration_needs_a_block() {
         assert!(!door_wait_is_thwarting(None));
         assert!(door_wait_is_thwarting(LONG_WAIT));
+    }
+
+    #[test]
+    fn an_ai_far_from_the_door_it_opened_keeps_walking() {
+        // The freeze this guards against: opening a door from across the
+        // room and standing there until the leaf was fully open.
+        assert!(!holds_for_door(DOOR_INTERACT_RANGE));
+        assert!(!holds_for_door(DOOR_HOLD_RANGE + 0.5));
+        assert!(holds_for_door(DOOR_HOLD_RANGE));
+        assert!(holds_for_door(0.5));
     }
 
     #[test]
