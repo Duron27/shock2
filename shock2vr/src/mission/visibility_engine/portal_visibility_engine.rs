@@ -226,12 +226,23 @@ impl PortalVisibilityEngine {
         let positions = world.borrow::<View<PropPosition>>().unwrap();
         let dimensions = world.borrow::<View<PropPhysDimensions>>().unwrap();
         let has_refs = world.borrow::<View<PropHasRefs>>().unwrap();
+        let attachments = world
+            .borrow::<View<crate::runtime_props::RuntimePropAttachment>>()
+            .unwrap();
+        let out_of_world = |id: EntityId| has_refs.get(id).is_ok_and(|refs| !refs.0);
         // Remove destroyed entities and entities that lost their position.
         self.entity_cell_cache
             .retain(|id, _| positions.get(*id).is_ok());
         self.is_visible.clear();
         for (id, pos) in positions.iter().with_id() {
-            let visible = if has_refs.get(id).is_ok_and(|refs| !refs.0) {
+            // A particle bolted to an object that is not in the world is not
+            // in it either: medsci1 parks the Blue Monkey Shot prototype
+            // (HasRefs=false, no position) at the origin, and its cryo jets
+            // drew as a glowing orb over the starting stairwell.
+            let parent_out_of_world = attachments
+                .get(id)
+                .is_ok_and(|attachment| out_of_world(attachment.parent));
+            let visible = if out_of_world(id) || parent_out_of_world {
                 false
             } else {
                 let size = dimensions.get(id).ok().map(|dim| dim.size);
