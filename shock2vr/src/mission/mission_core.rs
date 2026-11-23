@@ -13646,6 +13646,26 @@ impl MissionCore {
                         });
                     }
                 }
+                Effect::SlayAllCreatures => {
+                    // Creatures plus every other AI: security cameras and
+                    // turrets carry no `PropCreature`, only an alertness level.
+                    let creature_ids: Vec<EntityId> = {
+                        let v_creature = self.world.borrow::<View<PropCreature>>().unwrap();
+                        let v_alertness = self.world.borrow::<View<PropAIAlertness>>().unwrap();
+                        let mut ids: Vec<EntityId> = v_creature.iter().ids().collect();
+                        ids.extend(v_alertness.iter().ids());
+                        ids.sort_unstable();
+                        ids.dedup();
+                        ids
+                    };
+                    // Silently: a death cry from every creature on the deck at
+                    // once is noise, not feedback.
+                    for id in creature_ids {
+                        if self.slay_entity(id, asset_cache) {
+                            self.remove_entity(id);
+                        }
+                    }
+                }
                 Effect::MaxPlayerStats => {
                     // Reuse the debug provisioning path rather than writing the
                     // sheet directly: it caps each field, raises one level at a

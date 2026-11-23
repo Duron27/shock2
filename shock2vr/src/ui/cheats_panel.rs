@@ -66,6 +66,9 @@ pub enum CheatAction {
     /// Raise every stat, skill and psi tier to its cap, as if bought from the
     /// trainers. Raises only - it can never undo a character.
     MaxStats,
+    /// Slay every creature, camera and turret on the level, for testing
+    /// without enemies.
+    SlayAllCreatures,
     StartHordeWave,
     /// Add ten points of contamination, bypassing protective equipment.
     AddRadiation,
@@ -109,6 +112,22 @@ pub static CHEATS: &[Cheat] = &[
             -1358, // Small Standard Clip
             -1360, // Small AP Clip
             -42,   // Pellet Shot Box (shotgun shells)
+        ]),
+    },
+    Cheat {
+        label: "Kill all enemies",
+        action: CheatAction::SlayAllCreatures,
+    },
+    Cheat {
+        label: "Rain assault rifle + ammo",
+        // A soak-test loadout: the rifle and full-size boxes of both rounds
+        // it fires, enough to clear a deck without hunting for clips.
+        action: CheatAction::Rain(&[
+            -18, // Assault Rifle
+            -31, // Standard Clip
+            -31, -31, -31, -31, -31,  //
+            -307, // AP Clip
+            -307, -307, -307, //
         ]),
     },
     Cheat {
@@ -479,7 +498,8 @@ mod tests {
         let field = crate::ui::dev_params_panel::field_line_rect(rects);
         assert!(field.y >= FIELD_TOP_Y, "the field line sits below the rows");
         let geometry = list(rects);
-        for slot in 0..CHEATS.len() {
+        // Only a page of slots is ever on screen; the rest scroll into them.
+        for slot in 0..geometry.rows_per_page().min(CHEATS.len()) {
             let row = geometry.row_rect(CHEATS.len(), slot);
             assert!(
                 row.y + row.h <= field.y,
@@ -540,16 +560,23 @@ mod tests {
     /// The page renders on the developer frame, with a row per cheat.
     #[test]
     fn the_page_draws_a_row_per_cheat() {
-        let mut canvas = UiCanvas::new(vec2(640.0, 480.0));
-        draw(&mut canvas, PanelRects::default(), 0, None, None);
-        let drawn: Vec<&str> = canvas
-            .elements()
-            .iter()
-            .filter_map(|element| match element {
-                UiElement::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
+        // Draw every page, so a cheat scrolled past the first still counts.
+        let max_scroll = list(PanelRects::default()).max_scroll(CHEATS.len());
+        let mut drawn: Vec<String> = Vec::new();
+        for scroll in 0..=max_scroll {
+            let mut canvas = UiCanvas::new(vec2(640.0, 480.0));
+            draw(&mut canvas, PanelRects::default(), scroll, None, None);
+            drawn.extend(
+                canvas
+                    .elements()
+                    .iter()
+                    .filter_map(|element| match element {
+                        UiElement::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    }),
+            );
+        }
+        let drawn: Vec<&str> = drawn.iter().map(String::as_str).collect();
 
         for cheat in CHEATS {
             assert!(drawn.contains(&cheat.label), "missing row: {}", cheat.label);

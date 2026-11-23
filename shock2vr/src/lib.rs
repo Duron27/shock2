@@ -2429,6 +2429,7 @@ impl Game {
                         Effect::SetAllAIAlertness { level, pin }
                     }
                     CheatAction::MaxStats => Effect::MaxPlayerStats,
+                    CheatAction::SlayAllCreatures => Effect::SlayAllCreatures,
                     CheatAction::MaxAlcohol => Effect::MaxPlayerAlcohol,
                     CheatAction::ClearAlcohol => Effect::ClearPlayerAlcohol,
                     CheatAction::StartHordeWave => Effect::StartHordeWave {

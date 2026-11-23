@@ -1485,6 +1485,10 @@ pub enum Effect {
         pin: bool,
     },
 
+    /// Debug: slay every creature and AI device (camera, turret) at once, so
+    /// doors and mechanics can be tested without interruption.
+    SlayAllCreatures,
+
     AcquireKeyCard {
         key_card: KeyCard,
     },
