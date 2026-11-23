@@ -15857,13 +15857,6 @@ impl MissionCore {
         let mut _player = SceneObject::new(player_mat, Box::new(engine::scene::cube::create()));
         _player.set_transform(Matrix4::from_translation(player.pos));
 
-        // The old synthetic blue inventory cube remains a desktop diagnostic.
-        // VR presents the authored INVBACK canvas through GuiManager instead.
-        if options.presentation_mode == crate::PresentationMode::Flat {
-            let inventory_objs = PlayerInventoryEntity::render(&self.world);
-            scene.extend(inventory_objs);
-        }
-
         // Player trail: shared world pass, so flat and VR draw the same lines.
         scene.extend(self.debug_trail.render());
 

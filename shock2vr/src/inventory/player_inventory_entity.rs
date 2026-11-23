@@ -1,6 +1,5 @@
 use cgmath::{Matrix4, Quaternion, Vector3, vec3};
 use dark::properties::{Links, PropPosition, PropScripts, PropTemplateId};
-use engine::scene::SceneObject;
 use shipyard::{Component, EntityId, IntoIter, View, ViewMut, World};
 
 use crate::runtime_props::RuntimePropTransform;
@@ -33,28 +32,6 @@ impl PlayerInventoryEntity {
             },
             RuntimePropTransform(Matrix4::from_translation(vec3(0.0, 1.0, 0.0))),
         ))
-    }
-
-    pub fn render(world: &World) -> Vec<SceneObject> {
-        let mut ret = Vec::with_capacity(1);
-        let (player_inventory_entities, position) = world
-            .borrow::<(View<PlayerInventoryEntity>, View<PropPosition>)>()
-            .unwrap();
-        for (_player_inventory_entity, position) in (&player_inventory_entities, &position).iter() {
-            let inventory_material =
-                engine::scene::color_material::create(Vector3::new(0.0, 0.0, 1.0));
-            let mut cube =
-                SceneObject::new(inventory_material, Box::new(engine::scene::cube::create()));
-
-            let transform = Matrix4::from_translation(position.position)
-                * Matrix4::from(position.rotation)
-                * Matrix4::from_scale(0.1);
-            cube.set_transform(transform);
-
-            ret.push(cube);
-        }
-
-        ret
     }
 
     pub fn set_position_rotation(
