@@ -129,12 +129,21 @@ impl SteeringStrategy for CollisionAvoidanceSteeringStrategy {
                     .maybe_entity_id
                     .map(|m| ai_util::is_entity_door(world, m))
                     .unwrap_or(false);
+                // The creature's own target is where it is going, not
+                // something to steer around: a whisker that lands on the
+                // player a stride ahead aims along the hit normal, which is
+                // straight back past the creature, and the 180 degree error
+                // stops the body and plays a turn-around clip in the
+                // player's face (the medsci1 blast-door hybrid stood ~2 s).
+                let entity_is_target = main_whisker_hit_result
+                    .maybe_entity_id
+                    .is_some_and(|hit| is_combat_target(world, physics, entity_id, hit));
 
                 // let distance_to_hit = (main_whisker_hit_result.hit_point - position).magnitude();
                 // if distance_to_hit < dist {
                 // dist = distance_to_hit;
 
-                if !is_normal_mostly_vertical && !entity_is_door {
+                if !is_normal_mostly_vertical && !entity_is_door && !entity_is_target {
                     match mitigation {
                         // Main whisker: steer toward the point deflected off
                         // the obstacle along its surface normal - glancing
@@ -166,4 +175,15 @@ impl SteeringStrategy for CollisionAvoidanceSteeringStrategy {
             None
         }
     }
+}
+
+/// Whether `hit` is the entity `observer` is fighting - the player for a
+/// monster, the nearest visible hostile for a friendly AI.
+fn is_combat_target(
+    world: &World,
+    physics: &PhysicsWorld,
+    observer: EntityId,
+    hit: EntityId,
+) -> bool {
+    ai_util::combat_target(world, physics, observer).is_some_and(|(target, _)| target == hit)
 }
