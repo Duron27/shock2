@@ -30,8 +30,11 @@ for (const fixture of [
     // The watch is the real trigger. Move the player back to safety afterward.
     await game.player.teleport({ x: spawn[0], y: spawn[1], z: spawn[2] });
     let appeared = false, vanished = false, closest = Infinity, travelled = 0;
-    for (let second = 0; second < 29; second++) {
-      await game.step({ frames: 60 });
+    // Sample every 10 frames: the walk can end within a second and the
+    // following cutscene's root motion carries the actor back off the marker,
+    // so once-a-second samples can miss the closest approach entirely.
+    for (let tick = 0; tick < 29 * 6; tick++) {
+      await game.step({ frames: 10 });
       const current = await game.entities.detail(actor.id);
       appeared ||= visible(current);
       closest = Math.min(closest, distance(current.position, goal.position));
