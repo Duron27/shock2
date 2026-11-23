@@ -85,7 +85,9 @@ const NAME_STRIP_FONT: &str = "mainfont.fon";
 /// A lifted item **stays in the backpack
 /// container** (the host just hides it from the strip while it rides the
 /// cursor), so it is always reachable and serializes correctly on
-/// save/transition. **Place** only requests audible feedback. **Throw**
+/// save/transition. **Place** moves it to the backpack cell it was dropped on
+/// (`at`: the container and cell; `None` keeps its slot) with audible
+/// feedback. **Throw**
 /// detaches it and gives it world presence with an impulse along the view ray;
 /// **Apply** offers it to the crosshair target if that target accepts it as a
 /// tool, leaving it on the cursor until the target consumes it;
@@ -94,7 +96,10 @@ const NAME_STRIP_FONT: &str = "mainfont.fon";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlatUiDragAction {
     ToggleMap,
-    Place(EntityId),
+    Place {
+        entity: EntityId,
+        at: Option<(EntityId, (usize, usize))>,
+    },
     Throw(EntityId),
     Apply(EntityId),
     Wield(EntityId),
@@ -1622,6 +1627,14 @@ impl FlatUiHost {
                 // whole time, so placing is just dropping it off the cursor.
                 // Dropping onto another item swaps by lifting that occupant.
                 self.last_lift = None;
+                // An empty cell (or the item's own) is a move there. A swap
+                // keeps the held item's stored slot: the occupant it lifts
+                // still holds the cell until it is placed in turn.
+                let mut at = self
+                    .strip
+                    .as_ref()
+                    .map(|strip| strip.entity)
+                    .zip(self.strip_cell_at(canvas_pos, world));
                 match self.strip_item_at(canvas_pos) {
                     // An always-collected occupant is collected rather than
                     // swapped onto the cursor - the same rule as a plain click
@@ -1640,6 +1653,7 @@ impl FlatUiHost {
                         );
                     }
                     Some(target) if target != held => {
+                        at = None;
                         self.cursor_item = Some(make_cursor_item(world, target));
                         self.last_lift = Some(LiftMark {
                             entity: target,
@@ -1649,7 +1663,10 @@ impl FlatUiHost {
                     }
                     _ => self.cursor_item = None,
                 }
-                return (Vec::new(), vec![FlatUiDragAction::Place(held)]);
+                return (
+                    Vec::new(),
+                    vec![FlatUiDragAction::Place { entity: held, at }],
+                );
             }
             if over_panel || over_readout || pointer.bare_view == BareViewPress::Ignore {
                 // A click on an open MFD or either bottom strip keeps the held
@@ -4168,13 +4185,37 @@ mod tests {
         );
     }
 
+    /// Rearranging: a drop on an empty cell asks for that cell, not the
+    /// first free one.
+    #[test]
+    fn dropping_on_an_empty_cell_moves_the_item_there() {
+        let (world, mut host, wrench, inventory) = drag_world();
+        press_edge(&mut host, &world, (23.5, 34.0)); // lift from slot 0
+        // Slot 1's center: (2 + 4 + 35 + 17.5, 34) = (58.5, 34), now empty.
+        let actions = press_edge(&mut host, &world, (58.5, 34.0));
+        let cell = host
+            .strip_cell_at(vec2(58.5, 34.0), &world)
+            .expect("slot 1 is a backpack cell");
+        assert_ne!(cell, (0, 0), "not the slot it was lifted from");
+        assert_eq!(
+            actions,
+            vec![FlatUiDragAction::Place {
+                entity: wrench,
+                at: Some((inventory, cell))
+            }]
+        );
+    }
+
     #[test]
     fn placing_over_the_strip_returns_the_item_and_clears_the_cursor() {
         let (world, mut host, wrench, _inv) = drag_world();
         press_edge(&mut host, &world, (23.5, 34.0)); // lift
         // Placement clears the cursor and emits feedback; ownership stays put.
         let actions = press_edge(&mut host, &world, (400.0, 60.0));
-        assert_eq!(actions, vec![FlatUiDragAction::Place(wrench)]);
+        let at = host
+            .strip_cell_at(vec2(400.0, 60.0), &world)
+            .map(|cell| (_inv, cell));
+        assert_eq!(actions, vec![FlatUiDragAction::Place { entity: wrench, at }]);
         assert!(host.cursor_debug().is_none(), "placing clears the cursor");
         // The item is visible in the strip again.
         assert_eq!(host.strip_item_at(vec2(23.5, 34.0)), Some(wrench));
@@ -4242,7 +4283,15 @@ mod tests {
         // Swapping is host-internal - the Pistol lifts onto the cursor, the
         // Wrench returns to the grid and earns placement feedback.
         let actions = press_edge(&mut host, &world, (58.5, 34.0));
-        assert_eq!(actions, vec![FlatUiDragAction::Place(wrench)]);
+        // A swap keeps the Wrench's stored slot: the Pistol still holds the
+        // cell it was dropped on.
+        assert_eq!(
+            actions,
+            vec![FlatUiDragAction::Place {
+                entity: wrench,
+                at: None
+            }]
+        );
         let cursor = host
             .cursor_debug()
             .expect("the swapped-in Pistol is on the cursor");

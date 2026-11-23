@@ -8096,10 +8096,14 @@ impl MissionCore {
                     },
                 },
             ],
-            FlatUiDragAction::Place(entity_id) => vec![crate::scripts::script_util::announce(
-                entity_id,
-                "place_item",
-            )],
+            FlatUiDragAction::Place { entity, at } => {
+                // Retail drops an item where the cursor is; only a cell that
+                // cannot take it falls back to the first free one.
+                if let Some((container, cell)) = at {
+                    self.drop_entity_into_container_at_cell(container, entity, cell);
+                }
+                vec![crate::scripts::script_util::announce(entity, "place_item")]
+            }
             FlatUiDragAction::Throw(entity_id) => {
                 self.throw_entity_into_world(entity_id);
                 Vec::new()
