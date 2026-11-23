@@ -372,6 +372,8 @@ dev_params! {
     FLAT_RECOIL_AIM = Recoil::float("flat_recoil_aim", "Flat aim follow", 1.0, 0.0, 1.0, 0.1),
     /// Cosmetic camera-turn lean, layered over flat weapon clips.
     FLAT_TURN_SWAY = Recoil::float("flat_turn_sway", "Flat turn sway", 1.0, 0.0, 3.0, 0.1),
+    /// Cosmetic walking bob of the held item, scaled by ground speed.
+    FLAT_WALK_BOB = Recoil::float("flat_walk_bob", "Flat walk bob", 1.0, 0.0, 3.0, 0.1),
     /// Ceiling on how fast a physically simulated held melee weapon may be
     /// driven onto its tracked-hand target, in world units per second.
     ///

@@ -102,6 +102,7 @@ pub struct FlatPlayerController {
     /// never moves the crosshair or the shot (see `weapon_recoil::flat_impulse`).
     recoil: crate::weapon_recoil::RecoilState,
     turn_sway: crate::flat_turn_sway::FlatTurnSway,
+    walk_bob: crate::flat_walk_bob::FlatWalkBob,
 }
 
 impl FlatPlayerController {
@@ -115,6 +116,7 @@ impl FlatPlayerController {
             last_aim_bias: vec3(0.0, 0.0, 0.0).truncate(),
             recoil: crate::weapon_recoil::RecoilState::default(),
             turn_sway: crate::flat_turn_sway::FlatTurnSway::default(),
+            walk_bob: crate::flat_walk_bob::FlatWalkBob::default(),
         }
     }
 
@@ -267,6 +269,11 @@ impl FlatPlayerController {
             look,
             step_dt,
             crate::dev_params::get(crate::dev_params::FLAT_TURN_SWAY),
+        );
+        let bob = self.walk_bob.step(
+            player_pos,
+            step_dt,
+            crate::dev_params::get(crate::dev_params::FLAT_WALK_BOB),
         );
 
         // The first visible surface is the HUD pick, irrespective of frob reach
@@ -433,6 +440,12 @@ impl FlatPlayerController {
             let visual_sway = look * sway * look.conjugate();
             let position = camera_pos + visual_sway.rotate_vector(position - camera_pos);
             let rotation = visual_sway * rotation;
+            // Walking bob: the same camera-space layering, after the sway.
+            let bob_roll = look * bob.roll * look.conjugate();
+            let position = camera_pos
+                + bob_roll.rotate_vector(position - camera_pos)
+                + look.rotate_vector(bob.offset);
+            let rotation = bob_roll * rotation;
             effects.push(VirtualHandEffect::SetPositionRotation {
                 entity_id,
                 position,

@@ -60,6 +60,7 @@ pub mod fixed_step;
 mod flat_lean;
 mod flat_player_controller;
 mod flat_turn_sway;
+mod flat_walk_bob;
 mod flat_weapon_animation;
 pub mod free_camera;
 mod glove_fit;
