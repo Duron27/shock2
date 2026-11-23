@@ -62,7 +62,7 @@ impl ScriptedSequenceBehavior {
         let current_behavior = get_behavior_from_action(world, owner, &actions[0]);
         let initial_effect = current_behavior.borrow().initial_effect();
 
-        ScriptedSequenceBehavior {
+        let mut sequence = ScriptedSequenceBehavior {
             owner,
             origin_signal,
             actions,
@@ -72,6 +72,43 @@ impl ScriptedSequenceBehavior {
             finished: false,
             action_elapsed: 0.0,
             timed_out: false,
+        };
+        // A sequence that opens on instant actions (`ApparBegin`, a
+        // metaproperty change) runs through them now, so none of them ever
+        // requests the null animation: a completion owed for one of those
+        // requests would otherwise land on whichever action is current when
+        // the 0.5 s failure window closes - an apparition's walk, ending it.
+        if sequence.current_scripted_action.borrow().is_instant() {
+            sequence.complete_current_action(world);
+        }
+        sequence
+    }
+
+    /// Close the current action, then run straight through any instant
+    /// actions behind it (see `ScriptedAction::is_instant`), stopping at the
+    /// first one that takes time - or at the end of the sequence.
+    fn complete_current_action(&mut self, world: &World) {
+        loop {
+            let outgoing_effect = self.current_scripted_action.borrow().completion_effect();
+            self.queued_effects.push(outgoing_effect);
+
+            if self.current_action_idx >= ((self.actions.len() as i32) - 1) {
+                self.finished = true;
+                return;
+            }
+            self.current_action_idx += 1;
+            let behavior = get_behavior_from_action(
+                world,
+                self.owner,
+                &self.actions[self.current_action_idx as usize],
+            );
+            self.current_scripted_action = behavior;
+            let incoming_effect = self.current_scripted_action.borrow().initial_effect();
+            self.queued_effects.push(incoming_effect);
+
+            if !self.current_scripted_action.borrow().is_instant() {
+                return;
+            }
         }
     }
 }
@@ -186,28 +223,14 @@ impl Behavior for ScriptedSequenceBehavior {
                 .current_scripted_action
                 .borrow()
                 .is_complete(entity_id, world);
-        if action_complete {
-            let outgoing_effect = self.current_scripted_action.borrow().completion_effect();
-            self.queued_effects.push(outgoing_effect);
-            self.timed_out = false;
-            self.action_elapsed = 0.0;
-
-            if self.current_action_idx >= ((self.actions.len() as i32) - 1) {
-                self.finished = true;
-                super::NextBehavior::NoOpinion
-            } else {
-                self.current_action_idx += 1;
-                let behavior = get_behavior_from_action(
-                    world,
-                    self.owner,
-                    &self.actions[self.current_action_idx as usize],
-                );
-                self.current_scripted_action = behavior;
-                let incoming_effect = self.current_scripted_action.borrow().initial_effect();
-                self.queued_effects.push(incoming_effect);
-
-                super::NextBehavior::Stay
-            }
+        if !action_complete {
+            return super::NextBehavior::Stay;
+        }
+        self.timed_out = false;
+        self.action_elapsed = 0.0;
+        self.complete_current_action(world);
+        if self.finished {
+            super::NextBehavior::NoOpinion
         } else {
             super::NextBehavior::Stay
         }
@@ -303,6 +326,18 @@ trait ScriptedAction {
         false
     }
 
+    /// Whether the action is over the moment it starts (a frob, a signal, a
+    /// metaproperty change, `Nothing`), as it is in Dark. The sequence runs
+    /// through these as it advances, rather than having each one request an
+    /// animation and wait for that to report completion: the request is the
+    /// deliberately unmatched `__NULL_ANIMATION__`, whose repeat failures are
+    /// throttled to one every 0.5 s, so a run of them froze the creature in
+    /// place - the medsci1 ThreatenOG stood ~1.5 s at its moan trap on the
+    /// `Frob, Nothing, Nothing, Nothing` tail of its signal response.
+    fn is_instant(&self) -> bool {
+        false
+    }
+
     /// Called when the entity's current animation clip finishes (also fires
     /// when a motion query fails, so waiting on this cannot deadlock).
     fn on_animation_completed(&mut self) {}
@@ -394,6 +429,10 @@ impl ScriptedAction for ScriptMessageScriptedAction {
         vec![MotionQueryItem::new("__NULL_ANIMATION__")]
     }
 
+    fn is_instant(&self) -> bool {
+        true
+    }
+
     fn initial_effect(&self) -> Effect {
         Effect::Send {
             msg: Message {
@@ -428,6 +467,10 @@ impl ScriptedAction for SendSignalScriptedAction {
         vec![MotionQueryItem::new("__NULL_ANIMATION__")]
     }
 
+    fn is_instant(&self) -> bool {
+        true
+    }
+
     fn initial_effect(&self) -> Effect {
         match self.target {
             Some(to) => Effect::Send {
@@ -449,6 +492,10 @@ impl ScriptedAction for NoopScriptedAction {
     fn animation(self: &NoopScriptedAction) -> Vec<MotionQueryItem> {
         // vec![MotionQueryItem::with_value("cs", 2)]
         vec![MotionQueryItem::new("__NULL_ANIMATION__")]
+    }
+
+    fn is_instant(&self) -> bool {
+        true
     }
 }
 
@@ -478,6 +525,10 @@ impl MetaPropertyScriptedAction {
 impl ScriptedAction for MetaPropertyScriptedAction {
     fn animation(&self) -> Vec<MotionQueryItem> {
         vec![MotionQueryItem::new("__NULL_ANIMATION__")]
+    }
+
+    fn is_instant(&self) -> bool {
+        true
     }
 
     fn initial_effect(&self) -> Effect {
@@ -513,11 +564,26 @@ impl ScriptedAction for WaitScriptedAction {
         current_heading: Deg<f32>,
         _world: &World,
         _physics: &PhysicsWorld,
-        _entity_id: EntityId,
+        entity_id: EntityId,
         time: &Time,
     ) -> Option<(SteeringOutput, Effect)> {
+        let was_running = self.remaining_duration_in_seconds > 0.0;
         self.remaining_duration_in_seconds -= time.elapsed.as_secs_f32();
-        Some((Steering::from_current(current_heading), Effect::NoEffect))
+        // The sequence advances on AnimationCompleted, and the only clip a
+        // wait has is the unmatched null one, whose repeat failures arrive
+        // every 0.5 s - so report the end of the wait the frame it happens
+        // rather than at the next of those.
+        let effect = if was_running && self.remaining_duration_in_seconds <= 0.0 {
+            Effect::Send {
+                msg: Message {
+                    to: entity_id,
+                    payload: crate::scripts::MessagePayload::AnimationCompleted,
+                },
+            }
+        } else {
+            Effect::NoEffect
+        };
+        Some((Steering::from_current(current_heading), effect))
     }
 
     fn is_complete(&self, _entity_id: EntityId, _world: &World) -> bool {
@@ -537,6 +603,10 @@ impl FrobScriptedAction {
 impl ScriptedAction for FrobScriptedAction {
     fn animation(self: &FrobScriptedAction) -> Vec<MotionQueryItem> {
         vec![MotionQueryItem::new("__NULL_ANIMATION__")]
+    }
+
+    fn is_instant(&self) -> bool {
+        true
     }
 
     fn completion_effect(&self) -> Effect {
@@ -749,6 +819,139 @@ mod tests {
     use crate::mission::PlayerInfo;
     use cgmath::{One, Quaternion};
     use dark::properties::PropSymName;
+
+    fn action(action_type: AIScriptedActionType) -> AIScriptedAction {
+        AIScriptedAction { action_type }
+    }
+
+    fn frame(seconds: f32) -> Time {
+        Time {
+            elapsed: Duration::from_secs_f32(seconds),
+            total: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn instant_actions_run_through_without_waiting_on_an_animation() {
+        // The medsci1 ThreatenOG's OGMoan response ends `Goto, Frob,
+        // Nothing, Nothing, Nothing`: once the walk is done, the rest of the
+        // sequence is over in the same step, frob included.
+        let mut world = World::new();
+        let owner = world.add_entity(());
+        let button = world.add_entity(PropSymName("ogmoanbutton".to_owned()));
+        let mut sequence = ScriptedSequenceBehavior::new(
+            &world,
+            owner,
+            Some("OGMoan".to_owned()),
+            vec![
+                action(AIScriptedActionType::Wait(Duration::ZERO)),
+                action(AIScriptedActionType::Frob("ogmoanbutton".to_owned())),
+                action(AIScriptedActionType::Nothing),
+                action(AIScriptedActionType::Nothing),
+                action(AIScriptedActionType::Nothing),
+            ],
+        );
+
+        let next = sequence.next_behavior(&world, &PhysicsWorld::new(), owner);
+        assert!(matches!(next, super::super::NextBehavior::NoOpinion));
+        assert_eq!(
+            sequence.scripted_state(),
+            super::super::ScriptedState::Finished
+        );
+        assert!(
+            sequence.queued_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Send { msg: Message { to, payload: crate::scripts::MessagePayload::Frob } }
+                    if *to == button
+            )),
+            "the skipped-through frob still fires"
+        );
+    }
+
+    #[test]
+    fn instant_actions_stop_at_the_next_timed_one() {
+        let mut world = World::new();
+        let owner = world.add_entity(());
+        let mut sequence = ScriptedSequenceBehavior::new(
+            &world,
+            owner,
+            None,
+            vec![
+                action(AIScriptedActionType::Wait(Duration::ZERO)),
+                action(AIScriptedActionType::Nothing),
+                action(AIScriptedActionType::Wait(Duration::from_secs(1))),
+                action(AIScriptedActionType::Nothing),
+            ],
+        );
+
+        let next = sequence.next_behavior(&world, &PhysicsWorld::new(), owner);
+        assert!(matches!(next, super::super::NextBehavior::Stay));
+        assert_eq!(sequence.current_action_idx, 2);
+        assert_eq!(
+            sequence.scripted_state(),
+            super::super::ScriptedState::Running
+        );
+    }
+
+    #[test]
+    fn a_sequence_opening_on_instant_actions_starts_at_the_first_timed_one() {
+        // Yount's apparition response opens `ApparBegin, Frob, Goto`: neither
+        // instant action may request the null animation, or a completion
+        // owed for it lands on the Goto later and ends the walk.
+        let mut world = World::new();
+        let owner = world.add_entity(());
+        let sequence = ScriptedSequenceBehavior::new(
+            &world,
+            owner,
+            Some("apparition".to_owned()),
+            vec![
+                action(AIScriptedActionType::ScriptMessage("ApparBegin".to_owned())),
+                action(AIScriptedActionType::Frob("team1button".to_owned())),
+                action(AIScriptedActionType::Wait(Duration::from_secs(1))),
+            ],
+        );
+        assert_eq!(sequence.current_action_idx, 2);
+        assert_eq!(
+            sequence.scripted_state(),
+            super::super::ScriptedState::Running
+        );
+        assert!(
+            sequence.queued_effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Send { msg: Message { to, payload: crate::scripts::MessagePayload::Signal { name } } }
+                    if *to == owner && name == "ApparBegin"
+            )),
+            "the opening action's effect still fires"
+        );
+    }
+
+    #[test]
+    fn a_wait_reports_its_own_end_once() {
+        let mut world = World::new();
+        let owner = world.add_entity(());
+        let mut wait = WaitScriptedAction::new(Duration::from_secs_f32(0.25));
+        let physics = PhysicsWorld::new();
+        let completions = |effect: &Effect| {
+            matches!(
+                effect,
+                Effect::Send { msg: Message { to, payload: crate::scripts::MessagePayload::AnimationCompleted } }
+                    if *to == owner
+            )
+        };
+
+        let (_, effect) = wait
+            .update(Deg(0.0), &world, &physics, owner, &frame(0.2))
+            .unwrap();
+        assert!(!completions(&effect), "still waiting");
+        let (_, effect) = wait
+            .update(Deg(0.0), &world, &physics, owner, &frame(0.1))
+            .unwrap();
+        assert!(completions(&effect), "the frame the wait ends");
+        let (_, effect) = wait
+            .update(Deg(0.0), &world, &physics, owner, &frame(0.1))
+            .unwrap();
+        assert!(!completions(&effect), "only once");
+    }
 
     #[test]
     fn reserved_player_target_resolves_without_a_symbolic_name() {
