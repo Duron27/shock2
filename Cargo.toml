@@ -27,6 +27,7 @@ members = [
     "tools/asset_probe",
     "tools/dark_viewer",
     "tools/dark_query",
+    "tools/xbox360_datacheck",
     "tools/ci_artifacts",
     "tools/debug_command",
     "tools/hitbox_analyzer",
@@ -40,3 +41,7 @@ members = [
 # See: https://github.com/rust-num/num-derive/issues
 non_local_definitions = "allow"
 
+
+[patch.crates-io]
+# Big-endian fixes for the Xbox 360 build; little-endian code unchanged (xbox360/patches/README.md).
+texture2ddecoder = { path = "xbox360/patches/texture2ddecoder-0.1.2" }

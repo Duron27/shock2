@@ -75,3 +75,19 @@ mod platform_event_pump_tests {
         crate::platform::set_event_pump(None);
     }
 }
+
+/// `rand`'s entropy on the Xbox 360, which `getrandom` doesn't know: the
+/// kernel's `XeCryptRandom`, which xsdk imports.
+#[cfg(target_os = "xbox360")]
+mod xbox360_random {
+    unsafe extern "C" {
+        fn XeCryptRandom(buffer: *mut u8, length: u32);
+    }
+
+    fn fill(buffer: &mut [u8]) -> Result<(), getrandom::Error> {
+        unsafe { XeCryptRandom(buffer.as_mut_ptr(), buffer.len() as u32) };
+        Ok(())
+    }
+
+    getrandom::register_custom_getrandom!(fill);
+}

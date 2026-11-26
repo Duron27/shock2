@@ -81,7 +81,21 @@ impl VkContext {
         window_extensions: &[String],
         create_surface: impl FnOnce(vk::Instance) -> Result<vk::SurfaceKHR, vk::Result>,
     ) -> Result<VkContext, String> {
+        #[cfg(not(target_os = "xbox360"))]
         let entry = unsafe { Entry::load() }.map_err(|e| format!("no Vulkan loader: {e}"))?;
+        // vulkan4xenon is linked in, with no loader to open.
+        #[cfg(target_os = "xbox360")]
+        let entry = unsafe {
+            unsafe extern "system" {
+                fn vkGetInstanceProcAddr(
+                    instance: vk::Instance,
+                    name: *const std::ffi::c_char,
+                ) -> vk::PFN_vkVoidFunction;
+            }
+            Entry::from_static_fn(vk::StaticFn {
+                get_instance_proc_addr: vkGetInstanceProcAddr,
+            })
+        };
 
         let validation = validation_requested()
             && entry

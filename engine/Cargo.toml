@@ -15,10 +15,17 @@ ndk = "0.7.0"
 ndk-context = "0.1.1"
 ndk-sys = "0.4.0"
 
-[dependencies]
-c_string = "0.7.2"
-ash = "0.37.3"
+# The Xbox 360 (xbox360/README.md) links Vulkan statically (vulkan4xenon) and has no dynamic libraries, so `ash`'s
+# `loaded` and `libloading` are everywhere else; there, `getrandom` (rand's) gets the console's XeCryptRandom.
+[target.'cfg(not(target_os = "xbox360"))'.dependencies]
+ash = { version = "0.37.3", features = ["loaded"] }
 libloading = "0.8"
+
+[target.'cfg(target_os = "xbox360")'.dependencies]
+getrandom = { version = "0.2", features = ["custom"] }
+
+[dependencies]
+ash = { version = "0.37.3", default-features = false, features = ["debug"] }
 cgmath = "0.18.0"
 collision = { version = "0.20.1", git = "https://github.com/rustgd/collision-rs" }
 fbxcel-dom = "0.0.10"
@@ -34,3 +41,7 @@ tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 
 [dev-dependencies]
 glfw = { version = "0.56.0", features = ["vulkan"] }
+
+[lints.rust]
+# xenon-forge's Xbox 360 target (xbox360/README.md), which stock rustc doesn't list.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("xbox360"))'] }

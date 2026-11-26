@@ -31,8 +31,14 @@ type Compiler = *mut c_void;
 type Options = *mut c_void;
 type CompileResult = *mut c_void;
 
+#[cfg(not(target_os = "xbox360"))]
+type ShadercLibrary = libloading::Library;
+/// The Xbox 360 has no libshaderc: its shaders are compiled ahead of time.
+#[cfg(target_os = "xbox360")]
+type ShadercLibrary = ();
+
 struct Shaderc {
-    _lib: libloading::Library,
+    _lib: ShadercLibrary,
     compiler: Compiler,
     options: Options,
     compile: unsafe extern "C" fn(
@@ -51,12 +57,22 @@ struct Shaderc {
     release: unsafe extern "C" fn(CompileResult),
 }
 
+#[cfg_attr(target_os = "xbox360", allow(dead_code))]
 const SHADERC_TARGET_ENV_VULKAN: i32 = 0;
+#[cfg_attr(target_os = "xbox360", allow(dead_code))]
 const SHADERC_ENV_VERSION_VULKAN_1_0: u32 = 1 << 22;
+#[cfg_attr(target_os = "xbox360", allow(dead_code))]
 const SHADERC_VERTEX: i32 = 0;
+#[cfg_attr(target_os = "xbox360", allow(dead_code))]
 const SHADERC_FRAGMENT: i32 = 1;
 
 impl Shaderc {
+    #[cfg(target_os = "xbox360")]
+    fn load() -> Result<Shaderc, String> {
+        Err("no libshaderc on the Xbox 360: its shaders are compiled ahead of time".into())
+    }
+
+    #[cfg(not(target_os = "xbox360"))]
     fn load() -> Result<Shaderc, String> {
         let lib = [
             "libshaderc_shared.so.1",
