@@ -445,8 +445,6 @@ mod loot_table_tests {
     }
 }
 
-
-
 /// Move a VR overlay built in the tracked pawn space (the cyber interface, the
 /// `show_position` readout) into world coordinates, and put it in the system-
 /// overlay group. The pawn transform is the same one the runtime builds its
@@ -5221,14 +5219,15 @@ impl MissionCore {
 
             // Bloody footprints: the player (whose pawn origin is at the
             // feet) and every living creature.
-            let movers = {
-                let transforms = self.world.borrow::<View<RuntimePropTransform>>().unwrap();
-                std::iter::once((player_id, new_character_pos))
-                    .chain(living_creatures.iter().filter_map(|id| {
-                        transforms.get(*id).ok().map(|t| (*id, t.0.w.truncate()))
-                    }))
-                    .collect::<Vec<_>>()
-            };
+            let movers =
+                {
+                    let transforms = self.world.borrow::<View<RuntimePropTransform>>().unwrap();
+                    std::iter::once((player_id, new_character_pos))
+                        .chain(living_creatures.iter().filter_map(|id| {
+                            transforms.get(*id).ok().map(|t| (*id, t.0.w.truncate()))
+                        }))
+                        .collect::<Vec<_>>()
+                };
             self.blood_tracks.update(
                 &self.world,
                 &self.physics,
@@ -6804,7 +6803,6 @@ impl MissionCore {
                 self.world
                     .add_component(*id, RuntimePropJointTransforms(joint_transforms));
             }
-
 
             let v_transform = self.world.borrow::<View<RuntimePropTransform>>().unwrap();
             let maybe_transform = v_transform.get(*id);
@@ -9753,6 +9751,15 @@ impl MissionCore {
                             // The tint fires for the killing blow too - that
                             // is the hit the player most needs to see land.
                             global_effects.push(GlobalEffect::PlayerHit { damage });
+                            // And feel it: both hands, scaled by the loss.
+                            let pulse = crate::haptics::player_hit_pulse(damage);
+                            let mut haptics = self
+                                .world
+                                .borrow::<UniqueViewMut<crate::haptics::HapticFeedback>>()
+                                .unwrap();
+                            haptics.request(crate::Handedness::Left, pulse);
+                            haptics.request(crate::Handedness::Right, pulse);
+                            drop(haptics);
                             // The grunt does not: `begin_player_death` plays
                             // the death vocalization, and two player voices at
                             // once is a mess. Nor does a second grunt for a
@@ -12430,6 +12437,12 @@ impl MissionCore {
                         }
                     }
                     self.flat_weapon_animation.fired(&self.world, entity_id);
+                    // Only the player's own guns run `weapon_script`, the
+                    // sole source of this effect: kick the trigger hand.
+                    self.world
+                        .borrow::<UniqueViewMut<crate::haptics::HapticFeedback>>()
+                        .unwrap()
+                        .request(crate::Handedness::Right, crate::haptics::WEAPON_FIRE);
                 }
                 Effect::HandHaptic { hand, pulse } => {
                     self.world
@@ -15754,7 +15767,6 @@ impl MissionCore {
             total_model_count
         );
 
-
         // Where letting go of every hold lands (VR climbing), or the landing a
         // committed release is gliding to.
 
@@ -16117,9 +16129,9 @@ impl MissionCore {
     pub fn get_hand_lights(&self, options: &GameOptions) -> Vec<engine::scene::light::SceneLight> {
         let _ = options;
         let mut lights: Vec<_> = crate::weapon_attachments::flashlights(&self.world)
-        .into_iter()
-        .map(Into::into)
-        .collect();
+            .into_iter()
+            .map(Into::into)
+            .collect();
         if self.player_is_alive() {
             let (left, right) = self.interaction.held_entities();
             lights.extend(
@@ -16221,8 +16233,6 @@ impl MissionCore {
             (PlayerMedium::Air, cgmath::vec3(0.0, 0.0, 0.0))
         }
     }
-
-
 
     /// Both VR hands for the player trail: each controller's world point (the
     /// one climbing grabs with, on the rendered rig) and the hold it is on.
@@ -16356,7 +16366,6 @@ impl MissionCore {
         }
         deferred
     }
-
 
     /// Per hand: the release target that will accept the held item. Flat's
     /// equivalent is the use-mode cursor item, the one RMB applies.
@@ -19715,7 +19724,6 @@ mod saved_script_namespace_tests {
 mod held_item_restore_tests {
     use super::*;
 
-
     /// #787: flat mode only has one wield slot, so restoring a VR save with
     /// two held items must retain the first grab's displacement effects. The
     /// load path applies this batch after the backpack is available.
@@ -20799,9 +20807,6 @@ impl crate::game_scene::GameScene for MissionCore {
         crate::vr_tracking::RoomscaleState::invalidate(&self.world);
         self.flat_ui.cancel_item_use();
     }
-
-
-
 
     fn on_exit(&mut self, audio_context: &mut AudioContext<EntityId, String>) {
         for (_, handle) in self.looping_sounds.drain() {

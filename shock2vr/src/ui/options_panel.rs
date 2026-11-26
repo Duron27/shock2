@@ -211,6 +211,7 @@ fn row_labels(pc: &PcSettings, tab: usize) -> Vec<String> {
         0 => vec![
             format!("Mouse sensitivity: {}x", pc.mouse_sensitivity),
             format!("Invert mouse: {}", on_off(pc.invert_mouse_y)),
+            format!("Gamepad rumble: {}", on_off(pc.gamepad_rumble)),
             "Reset control defaults".to_owned(),
         ],
         1 => vec![
@@ -234,9 +235,11 @@ fn change(pc: &mut PcSettings, tab: usize, row: usize) {
     match (tab, row) {
         (0, 0) => pc.mouse_sensitivity = cycle(pc.mouse_sensitivity, &MOUSE_SENSITIVITIES),
         (0, 1) => pc.invert_mouse_y = !pc.invert_mouse_y,
-        (0, 2) => {
+        (0, 2) => pc.gamepad_rumble = !pc.gamepad_rumble,
+        (0, 3) => {
             pc.mouse_sensitivity = defaults.mouse_sensitivity;
             pc.invert_mouse_y = defaults.invert_mouse_y;
+            pc.gamepad_rumble = defaults.gamepad_rumble;
         }
         (1, 0) => pc.field_of_view = cycle(pc.field_of_view, &FIELDS_OF_VIEW),
         (1, 1) => pc.brightness = cycle(pc.brightness, &BRIGHTNESSES),
@@ -301,7 +304,7 @@ mod tests {
     fn rows_past_a_tabs_last_setting_do_not_hit() {
         let panel = OptionsPanel::default();
         let layout = layout();
-        let beyond = layout.rows[3];
+        let beyond = layout.rows[4];
         assert_eq!(
             panel.hit(&layout, vec2(beyond.x + 1.0, beyond.y + 1.0)),
             None
@@ -316,6 +319,8 @@ mod tests {
         change(&mut pc, 0, 1);
         assert!(pc.invert_mouse_y);
         change(&mut pc, 0, 2);
+        assert!(!pc.gamepad_rumble);
+        change(&mut pc, 0, 3);
         assert_eq!(pc, PcSettings::default());
     }
 

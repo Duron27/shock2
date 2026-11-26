@@ -1,0 +1,16 @@
+[package]
+name = "gamepad"
+version = "0.1.0"
+edition = "2024"
+description = "SDL2 game controller input and rumble shared by the flatscreen runtimes"
+
+[dependencies]
+sdl2 = "0.37"
+cgmath = "0.18.0"
+tracing = "0.1.37"
+
+[target.'cfg(not(any(target_os = "android", windows)))'.dependencies]
+shock2vr = { path = "../../shock2vr" }
+
+[target.'cfg(any(target_os = "android", windows))'.dependencies]
+shock2vr = { path = "../../shock2vr", default-features = false }

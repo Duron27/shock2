@@ -209,6 +209,8 @@ pub struct PcSettings {
     /// Multiplier on the desktop runtime's mouse-look speed.
     pub mouse_sensitivity: f32,
     pub invert_mouse_y: bool,
+    /// Rumble a connected gamepad on gunfire and hits.
+    pub gamepad_rumble: bool,
     /// Vertical field of view in degrees.
     pub field_of_view: f32,
     pub fullscreen: bool,
@@ -225,6 +227,7 @@ impl Default for PcSettings {
         Self {
             mouse_sensitivity: 1.0,
             invert_mouse_y: false,
+            gamepad_rumble: true,
             field_of_view: 45.0,
             fullscreen: false,
             vsync: true,

@@ -77,6 +77,22 @@ pub const PSI_FIZZLE: HapticPulse = HapticPulse {
     duration_ms: 150,
 };
 
+/// A shot leaving the player's gun: a sharp kick on the trigger hand.
+pub const WEAPON_FIRE: HapticPulse = HapticPulse {
+    amplitude: 0.55,
+    duration_ms: 70,
+};
+
+/// The player losing `damage` hit points, sent to both hands: a scratch is a
+/// tap, a blast a long jolt. Reads the loss actually applied, so armour that
+/// soaked a hit makes it gentler.
+pub fn player_hit_pulse(damage: f32) -> HapticPulse {
+    let damage = damage.max(0.0);
+    HapticPulse {
+        amplitude: (0.35 + damage / 20.0).min(1.0),
+        duration_ms: (120.0 + damage * 12.0).min(450.0) as u32,
+    }
+}
 
 #[derive(Default, Unique, serde::Serialize)]
 pub struct HapticFeedback {
@@ -112,11 +128,26 @@ impl HapticFeedback {
     }
 }
 
-
 /// Consume once. A menu/transition world without gameplay output is silent.
 pub fn take(world: &World) -> [Option<HapticPulse>; 2] {
     world
         .borrow::<UniqueViewMut<HapticFeedback>>()
         .map(|mut feedback| std::mem::take(&mut feedback.pending))
         .unwrap_or([None; 2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_hits_scale_with_damage_and_stay_in_range() {
+        let scratch = player_hit_pulse(1.0);
+        let blast = player_hit_pulse(40.0);
+        assert!(scratch.amplitude < blast.amplitude);
+        assert!(scratch.duration_ms < blast.duration_ms);
+        assert_eq!(blast.amplitude, 1.0);
+        assert_eq!(player_hit_pulse(1000.0).duration_ms, 450);
+        assert!(player_hit_pulse(-5.0).amplitude > 0.0);
+    }
 }
