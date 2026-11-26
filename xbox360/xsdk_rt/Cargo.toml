@@ -6,3 +6,8 @@ description = "The few xsdk calls the Rust test titles share: the log, checks, t
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+default = ["runtime"]
+# The heap over newlib and the panic handler, for no_std titles.
+runtime = []

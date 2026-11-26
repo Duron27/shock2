@@ -1,6 +1,9 @@
 //! What the Rust test titles share on xsdk: the log, self-checks, the
 //! controller, a heap over newlib's allocator and the panic handler.
 //!
+//! The heap and the panic handler are the `runtime` feature, on by default:
+//! a title built with std leaves it off and has std's.
+//!
 //! These are plain `extern "C"` calls into xsdk's C. They are sound because
 //! the titles are compiled by xenon-forge's PPC64-ILP32 LLVM, whose calling
 //! convention is the console's own, the one xsdk's GCC (`-mcall-xsdk`) uses
@@ -8,10 +11,12 @@
 
 #![no_std]
 
-extern crate alloc;
-
+#[cfg(feature = "runtime")]
 use core::alloc::{GlobalAlloc, Layout};
-use core::ffi::{c_char, c_void};
+use core::ffi::c_char;
+#[cfg(feature = "runtime")]
+use core::ffi::c_void;
+#[cfg(feature = "runtime")]
 use core::panic::PanicInfo;
 
 pub type NtStatus = i32;
@@ -52,9 +57,12 @@ unsafe extern "C" {
     pub fn xsdk_splash_show(duration_ms: u32) -> NtStatus;
     pub fn XamInputGetState(user: u32, flags: u32, state: *mut InputState) -> u32;
     pub fn XamInputSetState(user: u32, flags: u32, vibration: *const InputVibration) -> u32;
+    #[cfg(feature = "runtime")]
     fn memalign(align: usize, size: usize) -> *mut c_void;
+    #[cfg(feature = "runtime")]
     fn free(ptr: *mut c_void);
-    fn exit(status: i32) -> !;
+    /// newlib's, which writes xsdk's last log lines.
+    pub fn exit(status: i32) -> !;
 }
 
 /// A fixed-size log line: `core::fmt` with no allocation, so it works in the
@@ -154,9 +162,11 @@ pub fn rumble(user: u32, low: u16, high: u16) -> u32 {
     unsafe { XamInputSetState(user, 0, &vibration) }
 }
 
+#[cfg(feature = "runtime")]
 /// The heap: newlib's, which xsdk makes thread-safe.
 pub struct Heap;
 
+#[cfg(feature = "runtime")]
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         unsafe { memalign(layout.align().max(8), layout.size()) as *mut u8 }
@@ -167,9 +177,11 @@ unsafe impl GlobalAlloc for Heap {
     }
 }
 
+#[cfg(feature = "runtime")]
 #[global_allocator]
 static HEAP: Heap = Heap;
 
+#[cfg(feature = "runtime")]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     if let Some(location) = info.location() {

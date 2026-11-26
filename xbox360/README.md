@@ -7,6 +7,7 @@ and xenon-forge's compiler. There's no Microsoft tooling or SDK material in any 
 ```
 xbox360/build.sh hello      # -> hello/build/rust_hello.xex: clears the screen to a colour the controller sets
 xbox360/build.sh triangle   # -> triangle/build/rust_triangle.xex: a triangle through ash on vulkan4xenon
+xbox360/build.sh stdcheck   # -> stdcheck/build/rust_stdcheck.xex: Rust's std (threads, locks, files, clocks) on the console
 xbox360/ftp.sh push triangle; xbox360/ftp.sh log triangle
 ```
 
@@ -14,6 +15,7 @@ xbox360/ftp.sh push triangle; xbox360/ftp.sh log triangle
 |---|---|---|
 | `rust_hello` | The screen's colour follows the sticks and triggers (xsdk's `hello`, in Rust); A rumbles | Back |
 | `rust_triangle` | A turning triangle drawn with `ash` on vulkan4xenon: the left stick moves it, RT grows it, A rumbles | Back |
+| `rust_stdcheck` | Nothing on screen: std's threads, `Mutex`/`Condvar`/channels, `thread_local!`, clocks, heap, `HashMap` and files in `game:\rust_stdcheck` | By itself |
 
 Each title writes `rust_<title>.log` beside its `.xex`, with `PASS:`/`FAIL:` lines and `checks: N passed, M failed`,
 as xsdk's samples do. On the console they live in `Hdd1\Games\Shock2`, the only folder `ftp.sh` touches. Launch them
@@ -79,13 +81,36 @@ reads) or any vector instruction, and both are flagged `xsdk call`.
 - floats loaded from unaligned addresses, which fault on the console. xsdk's GCC avoids them, and xenon-forge's LLVM
   may not.
 
+## std
+
+`rust_stdcheck` is built with Rust's own std, using xenon-forge's Xbox 360 backend (`toolchain/rust-std-xbox360`,
+MIT/Apache). That backend replaces std's `sys` modules (and core's atomics) for `target_os = "xbox360"`: threads on
+`ExCreateThread`, locks on a wait-on-address table over kernel events, `thread_local!` on `KeTls*`, files on the NT
+file API (`game:\x` is the object `\??\game:\x`), the heap on `ExAllocatePoolWithTag`, clocks, and `DbgPrint` for
+`println!`. `tools/std_source.sh` lays it over Rust 1.98.0's library source (default `~/xenon-forge-std/library`; the
+overlay on this PC is in openxbdm's Buck2 cache) and `build.sh stdcheck` builds std from that.
+
+The backend reaches the kernel through `xbox360-sys`'s import thunks, which xenon-forge's own `xex-link` collects.
+`rust_object.py` rewrites each one into xsdk's form: the two record words, then `mtctr r11; bctr`. It also adds an
+`.xsdk.imports` record for each, so `elf2xex.py` lists them in the import table beside xsdk's own (28 imports for
+`rust_stdcheck`). `elf2xex.py` already gives every title the 64 TLS slots std needs.
+
+The PPC64-ILP32 LLVM emits atomics in the protected-reservation form the kernel accepts: `mtmsrd r13,1` (r13, the
+processor block's address, has the interrupt-enable bit clear) before each `lwarx`, and the saved MSR restored after
+`stwcx.`. That form only reads r13, which nothing writes.
+
+Not yet known: whether xsdk's C (newlib's per-thread state, its pthreads) is safe to call from a thread std started
+with `ExCreateThread`. `rust_stdcheck`'s workers call `xsdk_log_write`, which is a first test of that.
+
 ## Files
 
 | File | What it is |
 |---|---|
 | `powerpc64-xsdk-ilp32.json` | The target |
 | `xsdk_rt/` | What the titles share: the log, checks, controller and rumble, a heap over newlib's `memalign`, the panic handler |
-| `hello/`, `triangle/` | The titles, `no_std` `staticlib`s; the triangle's GLSL is in `triangle/shaders/` |
-| `tools/rust_object.py` | The archive into one object for xsdk's linker |
+| `hello/`, `triangle/` | The `no_std` titles, as `staticlib`s; the triangle's GLSL is in `triangle/shaders/` |
+| `stdcheck/` | The std title |
+| `tools/std_source.sh` | xenon-forge's std overlay over Rust's library source |
+| `tools/rust_object.py` | The archive into one object for xsdk's linker, std's kernel imports in xsdk's form |
 | `build.sh` | Shaders (the triangle), cargo with xenon-forge's rustc, `rust_object.py`, xsdk's GCC link, `xenia_scan`, `elf2xex.py` |
 | `ftp.sh` | Push a title to `Hdd1\Games\Shock2`, read its log, list the folder |

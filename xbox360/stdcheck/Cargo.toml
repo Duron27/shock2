@@ -1,0 +1,12 @@
+[package]
+name = "xenon_stdcheck"
+version = "0.1.0"
+edition = "2024"
+description = "Rust's std on the Xbox 360: xenon-forge's backend in an xsdk title"
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+xsdk_rt = { path = "../xsdk_rt", default-features = false }

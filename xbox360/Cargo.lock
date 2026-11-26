@@ -16,6 +16,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenon_stdcheck"
+version = "0.1.0"
+dependencies = [
+ "xsdk_rt",
+]
+
+[[package]]
 name = "xenon_triangle"
 version = "0.1.0"
 dependencies = [
