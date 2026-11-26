@@ -7,16 +7,18 @@ use std::time::Instant;
 use cgmath::{Vector3, vec3};
 use rodio::buffer::SamplesBuffer;
 use rodio::source::{Buffered, ChannelVolume, Source};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, SpatialSink};
+use rodio::{Decoder, Sink};
 
 /// Re-exported so a caller can ask a [`StreamingAudioSource`] about its format
 /// without taking its own rodio dependency.
 pub use rodio::source::Source as AudioSource;
 
 pub mod levels;
+mod output;
 use crate::audio_log;
 use levels::Levels;
 pub use levels::{Bus, bus_gain, set_volume_levels};
+use output::{Output, SpatialSink};
 use tracing::trace;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -311,12 +313,7 @@ where
     TCue: Clone,
     TAmbientKey: Hash + Eq + Copy,
 {
-    #[expect(
-        dead_code,
-        reason = "keeps the audio output alive until this context drops"
-    )]
-    stream: OutputStream,
-    handle: OutputStreamHandle,
+    output: Output,
     channel_to_last_handle: HashMap<String, u64>,
     handle_to_sink: HashMap<u64, SinkAdapter<TAmbientKey>>,
     handle_loops: HashMap<u64, LoopPlayback>,
@@ -355,10 +352,8 @@ where
     TCue: Clone,
 {
     pub fn new() -> AudioContext<TAmbientKey, TCue> {
-        let (stream, handle) = rodio::OutputStream::try_default().unwrap();
         AudioContext {
-            stream,
-            handle,
+            output: Output::open(),
             //spatial_sinks: vec![],
             handle_to_sink: HashMap::new(),
             handle_loops: HashMap::new(),
@@ -507,7 +502,7 @@ where
 
     pub fn set_environmental_sound(&mut self, clip: Rc<AudioClip>) {
         self.stop_environmental_sound();
-        let sink = rodio::Sink::try_new(&self.handle).unwrap();
+        let sink = self.output.sink();
         if self.scene_paused {
             sink.pause();
         }
@@ -646,13 +641,11 @@ where
         // Third pass - add any new sounds
         for (key, pos, clip) in &current_ambient_sounds {
             if !self.ambient_sounds.contains_key(key) {
-                let sink = rodio::SpatialSink::try_new(
-                    &self.handle,
+                let sink = self.output.spatial_sink(
                     to_audio_position(*pos),
                     left_ear_position,
                     right_ear_position,
-                )
-                .unwrap();
+                );
 
                 if self.scene_paused {
                     sink.pause();
@@ -685,7 +678,7 @@ where
                 .unwrap()
                 .next_clip(self.next_music_cue.clone());
             if let Some(next_song) = maybe_next {
-                let sink = rodio::Sink::try_new(&self.handle).unwrap();
+                let sink = self.output.sink();
                 next_song.add_to_sink_on(&sink, Bus::Music);
                 sink.play();
                 self.next_music_cue = None;
@@ -926,7 +919,7 @@ pub fn play_streaming_audio<TAmbientKey: Hash + Eq + Copy, TCue: Clone>(
 ) -> Vec<u64> {
     let id = handle.id;
     let preempted = prepare_audio_play(context, &handle, None);
-    let sink = rodio::Sink::try_new(&context.handle).unwrap();
+    let sink = context.output.sink();
     let settings = AudioPlaybackSettings::default();
     if context.scene_paused {
         sink.pause();
@@ -979,7 +972,7 @@ pub fn play_audio_with_settings<TAmbientKey: Hash + Eq + Copy, TCue: Clone>(
 ) -> Vec<u64> {
     let id = handle.id;
     let preempted = prepare_audio_play(context, &handle, maybe_channel);
-    let sink = rodio::Sink::try_new(&context.handle).unwrap();
+    let sink = context.output.sink();
     if context.scene_paused && settings.pause_with_scene {
         sink.pause();
     }
@@ -1114,8 +1107,9 @@ fn play_audio_core_with_loop<TAmbientKey: Hash + Eq + Copy, TCue: Clone>(
         [left_ear.x, left_ear.y, left_ear.z],
         [right_ear.x, right_ear.y, right_ear.z],
     );
-    let sink = rodio::SpatialSink::try_new(&context.handle, positions.0, positions.1, positions.2)
-        .unwrap();
+    let sink = context
+        .output
+        .spatial_sink(positions.0, positions.1, positions.2);
     if context.scene_paused {
         sink.pause();
     }

@@ -1,188 +1,303 @@
-// Symphonia
-// Copyright (c) 2019-2022 The Project Symphonia Developers.
-//
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+//! Where the mixed sound goes, and the sinks that feed it.
+//!
+//! On the desktop that is cpal's default device through rodio's
+//! `OutputStream`. The Xbox 360 has no cpal backend: there the engine runs
+//! rodio's mixer itself and a thread of its own hands the mix to xsdk's
+//! audio driver a frame at a time (xbox360/README.md).
+//!
+//! rodio only builds a `SpatialSink` from an `OutputStreamHandle`, which only
+//! cpal can make, so [`SpatialSink`] here is rodio's own, built on a plain
+//! [`Sink`] instead.
+#![cfg_attr(
+    not(target_os = "xbox360"),
+    allow(
+        dead_code,
+        reason = "the mixer target is the console's; host builds only test it"
+    )
+)]
 
-//! Platform-dependant Audio Outputs
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use std::result;
+use rodio::cpal::FromSample;
+use rodio::dynamic_mixer::DynamicMixerController;
+use rodio::source::Spatial;
+#[cfg(not(target_os = "xbox360"))]
+use rodio::{OutputStream, OutputStreamHandle};
+use rodio::{Sample, Sink, Source};
 
-use symphonia::core::audio::{AudioBufferRef, SignalSpec};
-use symphonia::core::units::Duration;
-use crate::audio_log;
+/// Channels and rate of the mix handed to xsdk; it upmixes to its six.
+pub const MIX_CHANNELS: u16 = 2;
+pub const MIX_RATE_HZ: u32 = 48_000;
 
-pub trait AudioOutput {
-    fn write(&mut self, decoded: AudioBufferRef<'_>) -> Result<()>;
-    fn flush(&mut self);
+pub struct Output {
+    target: Target,
 }
 
-#[allow(dead_code)]
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug)]
-pub enum AudioOutputError {
-    OpenStreamError,
-    PlayStreamError,
-    StreamClosedError,
+enum Target {
+    /// cpal's device; the stream plays while it is held.
+    #[cfg(not(target_os = "xbox360"))]
+    Device {
+        _stream: OutputStream,
+        handle: OutputStreamHandle,
+    },
+    /// A mixer something else drains: xsdk's feeder on the console.
+    Mixer(Arc<DynamicMixerController<f32>>),
 }
 
-pub type Result<T> = result::Result<T, AudioOutputError>;
-
-mod cpal {
-    use super::{AudioOutput, AudioOutputError, Result};
-
-    use symphonia::core::audio::{AudioBufferRef, RawSample, SampleBuffer, SignalSpec};
-    use symphonia::core::conv::ConvertibleSample;
-    use symphonia::core::units::Duration;
-
-    use cpal;
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use rb::*;
-
-    pub struct CpalAudioOutput;
-
-    trait AudioOutputSample:
-        cpal::Sample + ConvertibleSample + RawSample + std::marker::Send + 'static
-    {
-    }
-
-    impl AudioOutputSample for f32 {}
-    impl AudioOutputSample for i16 {}
-    impl AudioOutputSample for u16 {}
-
-    impl CpalAudioOutput {
-        pub fn try_open(spec: SignalSpec, duration: Duration) -> Result<Box<dyn AudioOutput>> {
-            // Get default host.
-            let host = cpal::default_host();
-
-            // Get the default audio output device.
-            let device = match host.default_output_device() {
-                Some(device) => device,
-                _ => {
-                    audio_log!(ERROR, "Failed to get default audio output device");
-                    return Err(AudioOutputError::OpenStreamError);
-                }
-            };
-
-            let config = match device.default_output_config() {
-                Ok(config) => config,
-                Err(err) => {
-                    audio_log!(ERROR, "Failed to get default audio output device config: {}", err);
-                    return Err(AudioOutputError::OpenStreamError);
-                }
-            };
-
-            // Select proper playback routine based on sample format.
-            match config.sample_format() {
-                cpal::SampleFormat::F32 => {
-                    CpalAudioOutputImpl::<f32>::try_open(spec, duration, &device)
-                }
-                cpal::SampleFormat::I16 => {
-                    CpalAudioOutputImpl::<i16>::try_open(spec, duration, &device)
-                }
-                cpal::SampleFormat::U16 => {
-                    CpalAudioOutputImpl::<u16>::try_open(spec, duration, &device)
-                }
-            }
+impl Output {
+    pub fn open() -> Output {
+        #[cfg(target_os = "xbox360")]
+        {
+            Output::mixer(xsdk::open().expect("xsdk audio did not open"))
         }
-    }
-
-    struct CpalAudioOutputImpl<T: AudioOutputSample>
-    where
-        T: AudioOutputSample,
-    {
-        ring_buf_producer: rb::Producer<T>,
-        sample_buf: SampleBuffer<T>,
-        stream: cpal::Stream,
-    }
-
-    impl<T: AudioOutputSample> CpalAudioOutputImpl<T> {
-        pub fn try_open(
-            spec: SignalSpec,
-            duration: Duration,
-            device: &cpal::Device,
-        ) -> Result<Box<dyn AudioOutput>> {
-            let num_channels = spec.channels.count();
-
-            // Output audio stream config.
-            let config = cpal::StreamConfig {
-                channels: num_channels as cpal::ChannelCount,
-                sample_rate: cpal::SampleRate(spec.rate),
-                buffer_size: cpal::BufferSize::Default,
-            };
-
-            // Create a ring buffer with a capacity for up-to 200ms of audio.
-            let ring_len = ((200 * spec.rate as usize) / 1000) * num_channels;
-
-            let ring_buf = SpscRb::new(ring_len);
-            let (ring_buf_producer, ring_buf_consumer) = (ring_buf.producer(), ring_buf.consumer());
-
-            let stream_result = device.build_output_stream(
-                &config,
-                move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                    // Write out as many samples as possible from the ring buffer to the audio
-                    // output.
-                    let written = ring_buf_consumer.read(data).unwrap_or(0);
-                    // Mute any remaining samples.
-                    data[written..].iter_mut().for_each(|s| *s = T::MID);
+        #[cfg(not(target_os = "xbox360"))]
+        {
+            let (stream, handle) = OutputStream::try_default().expect("no audio output device");
+            Output {
+                target: Target::Device {
+                    _stream: stream,
+                    handle,
                 },
-                move |err| audio_log!(ERROR, "Audio output error: {}", err),
-            );
-
-            if let Err(err) = stream_result {
-                audio_log!(ERROR, "Audio output stream open error: {}", err);
-
-                return Err(AudioOutputError::OpenStreamError);
             }
-
-            let stream = stream_result.unwrap();
-
-            // Start the output stream.
-            if let Err(err) = stream.play() {
-                audio_log!(ERROR, "Audio output stream play error: {}", err);
-
-                return Err(AudioOutputError::PlayStreamError);
-            }
-
-            let sample_buf = SampleBuffer::<T>::new(duration, spec);
-
-            Ok(Box::new(CpalAudioOutputImpl {
-                ring_buf_producer,
-                sample_buf,
-                stream,
-            }))
         }
     }
 
-    impl<T: AudioOutputSample> AudioOutput for CpalAudioOutputImpl<T> {
-        fn write(&mut self, decoded: AudioBufferRef<'_>) -> Result<()> {
-            // Do nothing if there are no audio frames.
-            if decoded.frames() == 0 {
-                return Ok(());
-            }
-
-            // Audio samples must be interleaved for cpal. Interleave the samples in the audio
-            // buffer into the sample buffer.
-            self.sample_buf.copy_interleaved_ref(decoded);
-
-            // Write all the interleaved samples to the ring buffer.
-            let mut samples = self.sample_buf.samples();
-
-            while let Some(written) = self.ring_buf_producer.write_blocking(samples) {
-                samples = &samples[written..];
-            }
-
-            Ok(())
+    /// Sinks play into `mixer`; whoever holds its other end plays the mix.
+    pub fn mixer(mixer: Arc<DynamicMixerController<f32>>) -> Output {
+        Output {
+            target: Target::Mixer(mixer),
         }
+    }
 
-        fn flush(&mut self) {
-            // Flush is best-effort, ignore the returned result.
-            let _ = self.stream.pause();
+    pub fn sink(&self) -> Sink {
+        match &self.target {
+            #[cfg(not(target_os = "xbox360"))]
+            Target::Device { handle, .. } => Sink::try_new(handle).expect("audio device gone"),
+            Target::Mixer(mixer) => {
+                // What `Sink::try_new` does with a handle's mixer.
+                let (sink, queue) = Sink::new_idle();
+                mixer.add(queue);
+                sink
+            }
+        }
+    }
+
+    pub fn spatial_sink(
+        &self,
+        emitter_position: [f32; 3],
+        left_ear: [f32; 3],
+        right_ear: [f32; 3],
+    ) -> SpatialSink {
+        SpatialSink {
+            sink: self.sink(),
+            positions: Arc::new(Mutex::new(SoundPositions {
+                emitter_position,
+                left_ear,
+                right_ear,
+            })),
         }
     }
 }
 
-pub fn try_open(spec: SignalSpec, duration: Duration) -> Result<Box<dyn AudioOutput>> {
-    cpal::CpalAudioOutput::try_open(spec, duration)
+/// rodio's `SpatialSink`: a sink whose sounds pan between two ears.
+pub struct SpatialSink {
+    sink: Sink,
+    positions: Arc<Mutex<SoundPositions>>,
+}
+
+struct SoundPositions {
+    emitter_position: [f32; 3],
+    left_ear: [f32; 3],
+    right_ear: [f32; 3],
+}
+
+impl SpatialSink {
+    pub fn set_emitter_position(&self, pos: [f32; 3]) {
+        self.positions.lock().unwrap().emitter_position = pos;
+    }
+
+    pub fn set_left_ear_position(&self, pos: [f32; 3]) {
+        self.positions.lock().unwrap().left_ear = pos;
+    }
+
+    pub fn set_right_ear_position(&self, pos: [f32; 3]) {
+        self.positions.lock().unwrap().right_ear = pos;
+    }
+
+    pub fn append<S>(&self, source: S)
+    where
+        S: Source + Send + 'static,
+        f32: FromSample<S::Item>,
+        S::Item: Sample + Send,
+    {
+        let positions = self.positions.clone();
+        let now = self.positions.lock().unwrap();
+        let source = Spatial::new(source, now.emitter_position, now.left_ear, now.right_ear)
+            .periodic_access(Duration::from_millis(10), move |spatial| {
+                let pos = positions.lock().unwrap();
+                spatial.set_positions(pos.emitter_position, pos.left_ear, pos.right_ear);
+            });
+        self.sink.append(source);
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.sink.volume()
+    }
+
+    pub fn set_volume(&self, value: f32) {
+        self.sink.set_volume(value);
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.sink.speed()
+    }
+
+    pub fn set_speed(&self, value: f32) {
+        self.sink.set_speed(value);
+    }
+
+    pub fn play(&self) {
+        self.sink.play();
+    }
+
+    pub fn pause(&self) {
+        self.sink.pause();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.sink.is_paused()
+    }
+
+    pub fn stop(&self) {
+        self.sink.stop();
+    }
+
+    pub fn empty(&self) -> bool {
+        self.sink.empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.sink.len()
+    }
+}
+
+/// xsdk's frame: `samples` of each of `channels` channels, a channel after
+/// another (xsdk `audio.h`).
+pub const XSDK_CHANNELS: usize = 6;
+pub const XSDK_FRAME_SAMPLES: usize = 256;
+
+/// Fills one xsdk frame from the interleaved stereo mix: left and right on
+/// the front pair, silence on the rest. A mixer with nothing playing runs
+/// dry; that is silence too.
+pub fn fill_frame(frame: &mut [f32], stereo: &mut impl Iterator<Item = f32>) {
+    let (front, rest) = frame.split_at_mut(2 * XSDK_FRAME_SAMPLES);
+    let (left, right) = front.split_at_mut(XSDK_FRAME_SAMPLES);
+    for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+        *l = stereo.next().unwrap_or(0.0);
+        *r = stereo.next().unwrap_or(0.0);
+    }
+    rest.fill(0.0);
+}
+
+#[cfg(target_os = "xbox360")]
+mod xsdk {
+    use std::sync::Arc;
+
+    use rodio::dynamic_mixer::{self, DynamicMixerController};
+    use tracing::{info, warn};
+
+    use super::{MIX_CHANNELS, MIX_RATE_HZ, XSDK_CHANNELS, XSDK_FRAME_SAMPLES, fill_frame};
+
+    unsafe extern "C" {
+        fn xsdk_audio_open(frames_ahead: u32) -> i32;
+        fn xsdk_audio_next_frame(timeout_ms: u32, frame: *mut *mut f32) -> i32;
+        fn xsdk_audio_queue_frame();
+    }
+
+    const STATUS_IO_TIMEOUT: i32 = 0xC000_00B5_u32 as i32;
+    /// A wait for a free slot gives up after this, to try again.
+    const WAIT_MS: u32 = 100;
+
+    /// Opens the driver and starts the thread that feeds it the mix.
+    pub fn open() -> Option<Arc<DynamicMixerController<f32>>> {
+        let status = unsafe { xsdk_audio_open(0) };
+        if status < 0 {
+            warn!("xsdk_audio_open failed: {:#010x}", status as u32);
+            return None;
+        }
+        let (controller, mut mixer) = dynamic_mixer::mixer::<f32>(MIX_CHANNELS, MIX_RATE_HZ);
+        std::thread::Builder::new()
+            .name("audio".into())
+            .spawn(move || {
+                loop {
+                    let mut frame = std::ptr::null_mut();
+                    match unsafe { xsdk_audio_next_frame(WAIT_MS, &mut frame) } {
+                        STATUS_IO_TIMEOUT => continue,
+                        status if status < 0 => {
+                            info!("audio feeder done: {:#010x}", status as u32);
+                            return;
+                        }
+                        _ => {}
+                    }
+                    let frame = unsafe {
+                        std::slice::from_raw_parts_mut(frame, XSDK_CHANNELS * XSDK_FRAME_SAMPLES)
+                    };
+                    fill_frame(frame, &mut mixer);
+                    unsafe { xsdk_audio_queue_frame() };
+                }
+            })
+            .ok()?;
+        info!("audio: xsdk, {MIX_CHANNELS} channels at {MIX_RATE_HZ} Hz");
+        Some(controller)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rodio::buffer::SamplesBuffer;
+    use rodio::dynamic_mixer;
+
+    #[test]
+    fn a_frame_takes_left_and_right_onto_the_front_pair() {
+        let mut stereo = (0..).map(|i| i as f32);
+        let mut frame = vec![9.0; XSDK_CHANNELS * XSDK_FRAME_SAMPLES];
+        fill_frame(&mut frame, &mut stereo);
+        assert_eq!(&frame[..3], &[0.0, 2.0, 4.0]);
+        assert_eq!(
+            &frame[XSDK_FRAME_SAMPLES..XSDK_FRAME_SAMPLES + 3],
+            &[1.0, 3.0, 5.0]
+        );
+        assert!(frame[2 * XSDK_FRAME_SAMPLES..].iter().all(|&s| s == 0.0));
+        assert_eq!(stereo.next(), Some(512.0));
+    }
+
+    #[test]
+    fn a_dry_mix_is_silence() {
+        let mut frame = vec![9.0; XSDK_CHANNELS * XSDK_FRAME_SAMPLES];
+        fill_frame(&mut frame, &mut std::iter::empty());
+        assert!(frame.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn mixer_sinks_play_into_the_mix_and_finish() {
+        let (controller, mut mix) = dynamic_mixer::mixer::<f32>(MIX_CHANNELS, MIX_RATE_HZ);
+        let output = Output::mixer(controller);
+        let sink = output.sink();
+        sink.append(SamplesBuffer::new(2, MIX_RATE_HZ, vec![0.5_f32; 480]));
+        let spatial = output.spatial_sink([0.0, 0.0, 1.0], [-0.1, 0.0, 0.0], [0.1, 0.0, 0.0]);
+        spatial.append(SamplesBuffer::new(1, MIX_RATE_HZ, vec![0.25_f32; 240]));
+
+        let heard: Vec<f32> = (&mut mix).take(480).collect();
+        assert!(
+            heard.iter().any(|&s| s > 0.5),
+            "both sinks mixed: {heard:?}"
+        );
+        // Drained past the end: both sinks are done, as a device's would be.
+        for _ in 0..4800 {
+            mix.next();
+        }
+        assert!(sink.empty() && spatial.empty());
+    }
 }
