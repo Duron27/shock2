@@ -154,6 +154,10 @@ impl Engine for Renderer {
 /// from: `SHOCK2_BUNDLE_ASSETS` when set (an Android host has no useful
 /// working directory), otherwise `./assets/`.
 fn bundle_root() -> &'static std::path::Path {
+    // The Xbox 360 title's folder holds `assets` beside the `.xex`.
+    if cfg!(target_os = "xbox360") {
+        return std::path::Path::new(r"game:\assets\");
+    }
     match std::env::var("SHOCK2_BUNDLE_ASSETS") {
         Ok(path) if !path.is_empty() => {
             std::path::Path::new(Box::leak(path.into_boxed_str()) as &'static str)

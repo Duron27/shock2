@@ -8,6 +8,7 @@ and xenon-forge's compiler. There's no Microsoft tooling or SDK material in any 
 xbox360/build.sh hello      # -> hello/build/rust_hello.xex: clears the screen to a colour the controller sets
 xbox360/build.sh triangle   # -> triangle/build/rust_triangle.xex: a triangle through ash on vulkan4xenon
 xbox360/build.sh stdcheck   # -> stdcheck/build/rust_stdcheck.xex: Rust's std (threads, locks, files, clocks) on the console
+xbox360/build.sh game       # -> game/build/shock2.xex: the game itself (The game, below)
 xbox360/ftp.sh push triangle; xbox360/ftp.sh log triangle
 ```
 
@@ -167,11 +168,45 @@ Also for xost, on every target:
 
 Desktop screenshots stayed within the desktop's own run-to-run noise.
 
-Not yet done:
-- a title that draws with these;
-- vertex formats vulkan4xenon lacks (SINT);
-- GPU memory in 64 KiB pieces;
-- whether xost's output draws what the desktop does.
+Not yet checked: whether xost's output draws what the desktop does (on the console, with the game below).
+
+## The game
+
+`runtimes/xbox360_runtime` is the flatscreen game for the console, the SDL runtime's loop with the pad as its only
+input. `build.sh game` builds it as a staticlib in the main workspace and links it with vulkan4xenon, xsdk and the
+shader bundle. That bundle comes from `tools/console_shaders.sh` in `game/build/shaders`, or from `SHADERS=<its out dir>`.
+If neither exists, `build.sh` makes it first, which needs the game's data and a desktop GPU.
+
+```
+xbox360/build.sh game
+xbox360/ftp.sh push game          # shock2.xex, shock2_shaders.table and the engine's assets/ (Data is ftp.sh data)
+xbox360/ftp.sh mission earth.mis  # start straight in a level (mission.txt); `ftp.sh mission` alone: the menu
+xbox360/ftp.sh log game           # shock2.log
+```
+
+- **Display:** VK_KHR_display's plane 0 at the display's mode, its size the swapchain's. Vsync is on and MSAA off: at
+  720p, 4x needs ~29 MB against 10 MB of eDRAM, and past eDRAM vulkan4xenon draws in bands of a few thousand draws.
+- **Pad:** the same layout as the PC's controller (`runtimes/gamepad`, now usable without SDL): left stick moves,
+  right stick looks, RT fires, LT uses, A jumps, B crouches, the d-pad leans and reads logs, X reloads, Y opens the
+  inventory, Back opens the map, Start pauses. In menus the left stick moves the cursor, A clicks and B right-clicks.
+  It rumbles. **Back + Start together quits** to the dashboard.
+- **Files:** the data is `game:\Data` (`shock2vr::paths::data_root`), where saves also go. The engine's own files are
+  `game:\assets`, and the shaders come from `game:\shock2_shaders.table`.
+
+What the renderer needed, all only on `target_os = "xbox360"`:
+- **Integer vertex attributes** (the skinned meshes' bone ids): vulkan4xenon has no integer vertex formats, and xost
+  holds integers as floats, so `gfx::Mesh` uploads their words as `f32` with a float format.
+- **Sampled depth** (shadow and self-depth captures): D24S8, vulkan4xenon's only depth format, in place of D32; it
+  samples as depth in red, as D32 does.
+- **GPU memory:** the engine already sub-allocates from big blocks, so small buffers share vulkan4xenon's 64 KiB
+  pages. The console's blocks are 16 MiB instead of 64, so each pool reserves less. Each new block logs a
+  `GPU memory:` line with the bytes in use.
+
+Measured on the PC with the classic data, the engine's GPU memory peaks at about 170 MiB on MedSci 1. About 128 MiB of
+that comes while loading: the 4096² lightmap atlas (64 MiB) plus its staging copy. On a console with 512 MB for
+everything, that load-time peak is the likeliest place to run out. The log's `GPU memory:` lines show it.
+
+Not yet checked: any of this on the console. It compiles and links: `shock2.xex` is 20 MB.
 
 ## Files
 
@@ -189,3 +224,4 @@ Not yet done:
 | `../tools/xbox360_datacheck` | The data check, in the main workspace |
 | `tools/shader_sweep.sh`, `tools/shader_audit.py`, `tools/shader_table.py`, `tools/console_shaders.sh` | The console's shaders (Shaders) |
 | `tools/spirv_opt.py` | SPIRV-Tools' optimizer and disassembler through their C API |
+| `../runtimes/xbox360_runtime` | The game (The game), in the main workspace |

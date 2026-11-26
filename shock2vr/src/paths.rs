@@ -59,6 +59,11 @@ pub fn data_root() -> &'static Path {
 
 #[cfg(not(target_os = "android"))]
 fn resolve_desktop_data_root() -> PathBuf {
+    // The Xbox 360 title runs from its own folder, the data copied to `Data`
+    // beside the `.xex` (xbox360/README.md); it has no environment to read.
+    if cfg!(target_os = "xbox360") {
+        return PathBuf::from(r"game:\Data");
+    }
     // Check for DARK_ASSET_PATH environment variable first
     if let Ok(env_path) = std::env::var("DARK_ASSET_PATH") {
         let path = Path::new(&env_path);

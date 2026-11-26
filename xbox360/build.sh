@@ -5,6 +5,8 @@
 #   build.sh stdcheck   -> stdcheck/build/rust_stdcheck.xex
 #   build.sh datacheck  -> datacheck/build/xbox360_datacheck.xex: the game's data parsed with the engine's own crates
 #                          (tools/xbox360_datacheck, built in the main workspace)
+#   build.sh game       -> game/build/shock2.xex: the game (runtimes/xbox360_runtime), with the engine's shaders from
+#                          tools/console_shaders.sh in game/build/shaders (made first if missing; needs a desktop GPU)
 # Environment:
 #   XENOSWORKS  the folder holding xsdk and vulkan4xenon, each built with `make` (default: openmw-xenon's)
 #   XSDK_GCC    xsdk's toolchain PREFIX (default: ~/xsdk-gcc)
@@ -13,9 +15,10 @@
 #   STD_SRC     Rust 1.98.0's library with xenon-forge's std overlay, for stdcheck (tools/std_source.sh makes it;
 #               default ~/xenon-forge-std/library)
 #   GLSLANG     glslang for the triangle's shaders (default: the one on PATH)
+#   SHADERS     console_shaders.sh's output for the game (default: game/build/shaders)
 set -euo pipefail
 
-TITLE="${1:?usage: build.sh hello|triangle|stdcheck|datacheck}"
+TITLE="${1:?usage: build.sh hello|triangle|stdcheck|datacheck|game}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 XENOSWORKS="${XENOSWORKS:-$HOME/AndroidStudioProjects/openmw-xenon/sources/xenosworks}"
 XSDK="$XENOSWORKS/xsdk"
@@ -33,6 +36,7 @@ hello) CRATE=xenon_hello ;;
 triangle) CRATE=xenon_triangle ;;
 stdcheck) CRATE=xenon_stdcheck ;;
 datacheck) CRATE=xbox360_datacheck; NAME=xbox360_datacheck ;;
+game) CRATE=xbox360_runtime; NAME=shock2 ;;
 *) echo "unknown title $TITLE" >&2; exit 1 ;;
 esac
 [ -x "$XENON_FORGE/bin/rustc" ] || { echo "no $XENON_FORGE/bin/rustc: see xbox360/README.md, 'The compiler'" >&2; exit 1; }
@@ -40,7 +44,10 @@ esac
 [ -f "$XSDK/build/libxsdk.a" ] || { echo "no $XSDK/build/libxsdk.a: run make in xsdk" >&2; exit 1; }
 mkdir -p "$OUT"
 BUILD_STD=core,alloc,compiler_builtins
-if [ "$TITLE" = stdcheck ] || [ "$TITLE" = datacheck ]; then
+# The titles built in the main workspace, with std.
+WORKSPACE=
+[ "$TITLE" = datacheck ] || [ "$TITLE" = game ] && WORKSPACE=1
+if [ "$TITLE" = stdcheck ] || [ -n "$WORKSPACE" ]; then
 	RUST_SRC="${STD_SRC:-$HOME/xenon-forge-std/library}"
 	[ -f "$RUST_SRC/std/src/sys/pal/xbox360/mod.rs" ] || { echo "no std overlay at $RUST_SRC: run tools/std_source.sh" >&2; exit 1; }
 	BUILD_STD=std,panic_abort,core,alloc,compiler_builtins
@@ -58,10 +65,21 @@ if [ "$TITLE" = triangle ]; then
 	C_OBJECTS+=("$OUT/shaders.o")
 	LIBS=("$V4X/build/libvulkan4xenon.a" -lstdc++ "$XSDK/build/libxsdk.a")
 fi
+if [ "$TITLE" = game ]; then
+	[ -f "$V4X/build/libvulkan4xenon.a" ] || { echo "no $V4X/build/libvulkan4xenon.a: run make in vulkan4xenon" >&2; exit 1; }
+	SHADERS="${SHADERS:-$OUT/shaders}"
+	[ -f "$SHADERS/shock2_shaders.c" ] || XENOSWORKS="$XENOSWORKS" "$HERE/tools/console_shaders.sh" "$SHADERS"
+	# The microcode bundle vkCreateShaderModule looks in (v4x_shader_bundle); its table goes beside the .xex.
+	"${TC}gcc" -mcpu=cell -fno-pic -O2 -I"$V4X/include" -I"$V4X/third_party/vulkan-headers/include" -I"$XSDK/include" \
+		-c "$SHADERS/shock2_shaders.c" -o "$OUT/shock2_shaders.o"
+	cp "$SHADERS/shock2_shaders.table" "$OUT/"
+	C_OBJECTS+=("$OUT/shock2_shaders.o")
+	LIBS=("$V4X/build/libvulkan4xenon.a" -lstdc++ "$XSDK/build/libxsdk.a")
+fi
 
 # 1. Rust, with xenon-forge's compiler: core, alloc and compiler-builtins from 1.98.0's source. compiler-builtins-mem
 #    gives Rust its own memcpy and friends, made local in step 2.
-if [ "$TITLE" = datacheck ]; then
+if [ -n "$WORKSPACE" ]; then
 	# The engine's crates, in the main workspace with its lock file and patches; its own target dir.
 	(cd "$HERE/.." && __CARGO_TESTS_ONLY_SRC_ROOT="$RUST_SRC" RUSTC="$XENON_FORGE/bin/rustc" RUSTC_BOOTSTRAP=1 \
 		cargo +1.98.0 build -p "$CRATE" --lib --target "$HERE/powerpc64-xsdk-ilp32.json" --target-dir "$HERE/../target/xbox360" \
@@ -84,5 +102,6 @@ python3 "$HERE/tools/rust_object.py" "$TC" "$LIB" "$OUT/rust.o" main
 
 # 4. What Xenia would skip, then the .xex.
 "${TC}objdump" -d "$OUT/$NAME.elf" | python3 "$XSDK/tools/xenia_scan.py"
-python3 "$XSDK/tools/elf2xex.py" --title-name "Shock2 Rust $TITLE" "$OUT/$NAME.elf" "$OUT/$NAME.xex"
+TITLE_NAME="Shock2 Rust $TITLE"; [ "$TITLE" = game ] && TITLE_NAME="System Shock 2"
+python3 "$XSDK/tools/elf2xex.py" --title-name "$TITLE_NAME" "$OUT/$NAME.elf" "$OUT/$NAME.xex"
 ls -l "$OUT/$NAME.xex"

@@ -40,6 +40,8 @@ members = [
 # This is a known issue with the num_derive crate and is safe to suppress
 # See: https://github.com/rust-num/num-derive/issues
 non_local_definitions = "allow"
+# The Xbox 360 target (xbox360/README.md) is a custom target JSON with its own os.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("xbox360"))'] }
 
 
 [patch.crates-io]

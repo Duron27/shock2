@@ -1,0 +1,21 @@
+[package]
+name = "xbox360_runtime"
+version = "0.1.0"
+edition = "2024"
+description = "The flatscreen game on the Xbox 360 (xbox360/README.md): vulkan4xenon, XInput, the precompiled shader table"
+
+[lints]
+workspace = true
+
+[lib]
+# staticlib for the console title (xbox360/build.sh game), whose main is the library's; rlib for the host's tests.
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+gamepad = { path = "../gamepad", default-features = false }
+engine = { path = "../../engine" }
+dark = { path = "../../dark" }
+shock2vr = { path = "../../shock2vr", default-features = false }
+cgmath = "0.18.0"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.17"

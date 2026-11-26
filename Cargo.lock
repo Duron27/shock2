@@ -4151,6 +4151,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "xbox360_runtime"
+version = "0.1.0"
+dependencies = [
+ "cgmath",
+ "dark",
+ "engine",
+ "gamepad",
+ "shock2vr",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
