@@ -636,6 +636,8 @@ unsafe fn build_pipeline(
             d.create_shader_module(&vk::ShaderModuleCreateInfo::builder().code(code), None)
                 .map_err(|e| format!("vkCreateShaderModule: {e}"))
         };
+        shader::record_module(&vertex, shader::Stage::Vertex);
+        shader::record_module(&fragment, shader::Stage::Fragment);
         let vs = module(&vertex)?;
         let fs = module(&fragment)?;
         let entry = c"main";

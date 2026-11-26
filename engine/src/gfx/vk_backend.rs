@@ -1767,6 +1767,9 @@ pub fn create_program(vertex: &str, fragment: &str) -> u32 {
             d.create_shader_module(&vk::ShaderModuleCreateInfo::builder().code(code), None)
                 .expect("vkCreateShaderModule")
         };
+        shader::record_program(vertex, fragment, &linked);
+        shader::record_module(&linked.vertex, shader::Stage::Vertex);
+        shader::record_module(&linked.fragment, shader::Stage::Fragment);
         let vertex = module(&linked.vertex);
         let fragment = module(&linked.fragment);
 

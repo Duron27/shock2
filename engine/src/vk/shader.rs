@@ -168,21 +168,52 @@ thread_local! {
 /// stay GL's, and multiplies y by the `flip_y` push constant: -1 on the
 /// swapchain (Vulkan's framebuffer y points down), +1 into render targets so
 /// their rows sit where GL put them.
+///
+/// The shader's own `main` becomes `shock_main`, writing the position into
+/// an `out` parameter that stands in for `gl_Position`, and the real `main`
+/// writes `gl_Position` once from it: never read back, since the Xbox 360's
+/// shader compiler (xost) can't read an output (xbox360/README.md, "Shaders").
 pub fn to_vulkan_glsl(source: &str, stage: Stage) -> String {
     let mut out = String::from(
         "#version 450\n#define highp\n#define mediump\n#define lowp\n#define SHOCK_VULKAN 1\n",
     );
     if stage == Stage::Vertex {
-        let renamed = rename_main(source);
-        out.push_str(&renamed);
+        // `invariant gl_Position;` keeps naming the real output, which main still writes.
+        let replaced = replace_identifier(source, "gl_Position", "shock_position")
+            .replace("invariant shock_position", "invariant gl_Position");
+        let renamed = rename_main(&replaced);
+        // `void shock_main(` -> `void shock_main(out vec4 shock_position`: main has no parameters.
+        let open = renamed
+            .find("void shock_main")
+            .and_then(|at| renamed[at..].find('(').map(|p| at + p + 1))
+            .expect("a vertex shader has a main");
+        out.push_str(&renamed[..open]);
+        out.push_str("out vec4 shock_position");
+        out.push_str(&renamed[open..]);
         out.push_str(
             "\nlayout(push_constant) uniform ShockPush { float flip_y; } shock_push;\n\
-             void main() {\n    shock_main();\n    gl_Position.y *= shock_push.flip_y;\n\
-             gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n}\n",
+             void main() {\n    vec4 shock_position;\n    shock_main(shock_position);\n\
+             gl_Position = vec4(shock_position.x, shock_position.y * shock_push.flip_y,\n\
+             (shock_position.z + shock_position.w) * 0.5, shock_position.w);\n}\n",
         );
     } else {
         out.push_str(source);
     }
+    out
+}
+
+/// `source` with each whole-word `from` replaced by `to`.
+fn replace_identifier(source: &str, from: &str, to: &str) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(i) = rest.find(from) {
+        out.push_str(&rest[..i]);
+        let whole = !out.ends_with(word) && !rest[i + from.len()..].starts_with(word);
+        out.push_str(if whole { to } else { from });
+        rest = &rest[i + from.len()..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -209,7 +240,92 @@ fn rename_main(source: &str) -> String {
     out
 }
 
+/// `SHOCK2_SHADER_DUMP=<dir>`: every shader the engine compiles and every
+/// module it creates, written there for building them ahead of time (the
+/// Xbox 360 has no runtime compiler; xbox360/README.md, "Shaders").
+/// `compile()` writes `<hash>.<stage>.glsl` with the GLSL it was given and
+/// `<hash>.<stage>.compiled.spv` with its SPIR-V; [`record_module`] writes
+/// `<hash>.<stage>.spv`, the linked SPIR-V a module is made from. Each
+/// `<hash>` is FNV-1a over the file's own content, as vulkan4xenon keys its
+/// shader bundle by the SPIR-V's.
+fn shader_dump_dir() -> Option<&'static std::path::Path> {
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::path::PathBuf::from(std::env::var_os("SHOCK2_SHADER_DUMP")?);
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    })
+    .as_deref()
+}
+
+/// FNV-1a, 64-bit, over each word's bytes low byte first: vulkan4xenon's
+/// hash of SPIR-V (its `src/shader.c`), used here for file names.
+pub fn spirv_hash(words: &[u32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in words.iter().flat_map(|w| w.to_le_bytes()) {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn stage_suffix(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Vertex => "vert",
+        Stage::Fragment => "frag",
+    }
+}
+
+fn spirv_bytes(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// Records the SPIR-V a shader module is created from, when
+/// `SHOCK2_SHADER_DUMP` is set ([`shader_dump_dir`]).
+pub fn record_module(words: &[u32], stage: Stage) {
+    if let Some(dir) = shader_dump_dir() {
+        let name = format!("{:016x}.{}.spv", spirv_hash(words), stage_suffix(stage));
+        let _ = std::fs::write(dir.join(name), spirv_bytes(words));
+    }
+}
+
+fn source_hash(source: &str) -> u64 {
+    spirv_hash(&source.bytes().map(u32::from).collect::<Vec<_>>())
+}
+
+/// Appends `<vertex module> <fragment module> <vertex GLSL> <fragment GLSL>`
+/// hashes to `programs.txt` in the dump, tying each linked program's modules
+/// to the sources they came from.
+pub fn record_program(vertex_source: &str, fragment_source: &str, linked: &Linked) {
+    if let Some(dir) = shader_dump_dir() {
+        use std::io::Write;
+        let line = format!(
+            "{:016x} {:016x} {:016x} {:016x}\n",
+            spirv_hash(&linked.vertex),
+            spirv_hash(&linked.fragment),
+            source_hash(vertex_source),
+            source_hash(fragment_source)
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("programs.txt"))
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
 pub fn compile(source: &str, stage: Stage) -> Result<Vec<u32>, String> {
+    let result = compile_uncached(source, stage);
+    if let (Some(dir), Ok(words)) = (shader_dump_dir(), &result) {
+        let base = format!("{:016x}.{}", source_hash(source), stage_suffix(stage));
+        let _ = std::fs::write(dir.join(format!("{base}.glsl")), source);
+        let _ = std::fs::write(dir.join(format!("{base}.compiled.spv")), spirv_bytes(words));
+    }
+    result
+}
+
+fn compile_uncached(source: &str, stage: Stage) -> Result<Vec<u32>, String> {
     let glsl = to_vulkan_glsl(source, stage);
     SHADERC.with(|compiler| match compiler {
         Ok(c) => c.compile(&glsl, stage).map_err(|e| {
@@ -618,6 +734,25 @@ pub fn link(mut vertex: Vec<u32>, mut fragment: Vec<u32>) -> Linked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertex_position_is_written_once_and_never_read() {
+        let src = "invariant gl_Position;\nin vec3 p;\nvoid main() { gl_Position = vec4(p, 1.0); gl_Position.x += 1.0; }";
+        let out = to_vulkan_glsl(src, Stage::Vertex);
+        assert!(out.contains("invariant gl_Position;"), "{out}");
+        assert!(out.contains("void shock_main(out vec4 shock_position)"));
+        assert!(out.contains("shock_position = vec4(p, 1.0); shock_position.x += 1.0;"));
+        assert_eq!(out.matches("gl_Position").count(), 2, "{out}");
+        assert!(!out.contains("gl_Position."), "{out}");
+    }
+
+    #[test]
+    fn identifier_replacement_is_whole_word() {
+        assert_eq!(
+            replace_identifier("gl_Position gl_PositionX xgl_Position", "gl_Position", "p"),
+            "p gl_PositionX xgl_Position"
+        );
+    }
 
     #[test]
     fn only_the_real_main_is_renamed() {
