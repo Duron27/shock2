@@ -111,7 +111,7 @@ with `ExCreateThread`. `xsdk_log_write` was, from all four workers.
 `dark`, `engine` and `shock2vr` (built `--no-default-features`, which leaves out FFmpeg) compile for the console with
 the std above. What that took, all limited to `target_os = "xbox360"` except the patched crate:
 - `engine`: `ash` without `loaded`, its `Entry` made from vulkan4xenon's linked-in `vkGetInstanceProcAddr`; no
-  `libloading`, so no runtime libshaderc (the console's shaders get compiled ahead of time); `getrandom`'s `custom`
+  `libloading`, so no runtime libshaderc (the console's shaders are compiled ahead of time: Shaders); `getrandom`'s `custom`
   backend on the kernel's `XeCryptRandom`, for `rand`. The unused `c_string` dependency is gone everywhere.
 - `shock2vr`: `zip` with deflate only, without its C-backed bzip2 and zstd.
 - `texture2ddecoder`: patched in `patches/` for its big-endian code (`patches/README.md`). One fix is a real bug the
@@ -125,6 +125,53 @@ the 23 missions parsed in 27.7 s against 1.1 s on the PC, and every line matched
 properties. Those are all object rotations a few `f32` ulps apart (at most 3.5e-7 relative): quaternions made from
 the stored angles with `sin`/`cos`, whose libm differs between the two. Everything read from the files is
 bit-identical.
+
+## Shaders
+
+The engine compiles GLSL at run time with libshaderc, which the console doesn't have, and vulkan4xenon draws only
+with microcode xost made ahead of time, which it finds by the FNV-1a hash of the SPIR-V the title passes
+`vkCreateShaderModule`. So the PC makes both:
+
+```
+xbox360/tools/console_shaders.sh <out>   # sweep, audit, table and bundle (needs the game's data and a desktop GPU)
+```
+
+- `tools/shader_sweep.sh` runs the debug runtime over six scenes (the menu, `debug_weapons`, `debug_psi`,
+  `debug_ai_ranged`, earth and medsci1) with `SHOCK2_SHADER_DUMP=<dir>`. It opens the menus and map, then fires every
+  weapon and psi power. A sweep over every mission and debug scene found the same 20 modules. The engine writes:
+  - each program as the desktop makes it;
+  - each program as the console will make it, into `<dir>/xbox360/`: its sources' SPIR-V
+    (`<source hash>.<stage>.compiled.spv`) and its linked modules (`<module hash>.<stage>.spv`).
+- `tools/shader_audit.py` lowers each module through xost, as vulkan4xenon's `build_shaders.py --optimize` does,
+  and sorts any refusals. All 20 lower (2026-11-26).
+- `tools/shader_table.py` writes the GLSL → SPIR-V table. The title hands it to `engine::vk::shader::
+  set_console_table`, and `shader::compile` looks each source up there instead of calling shaderc.
+- `build_shaders.py` writes the bundle, `shock2_shaders.{c,h}` (289 KB once compiled), for the title to link.
+
+The console variant (`shader::Target::Xbox360`) is the desktop's GLSL with `SHOCK_XBOX360` defined. It works round
+what xost reads:
+- **ints and bools in a uniform block** become floats, as D3D9 set HLSL's. The console backend writes those uniforms
+  as floats.
+- **Loops** that would unroll past 64 registers (the lights, the grade's glare) are bounded by `SHOCK_COUNT(n)`,
+  `int()` of a float uniform that's always 1. xost keeps those as hardware loops.
+- **No `texelFetch`/`textureSize`:** the shadow atlas and the colour grade sample texel centres instead. The grade's
+  frame size comes in a push constant, and its grain hash is float maths.
+- **No `gl_FragCoord.z`:** translucent actors' self-occlusion is off.
+- **256 constants a stage:** the skinned vertex shader's 80-bone palette (arachnids use all 40 joints) leaves room
+  for one matrix. So the bones come premultiplied by `world`, and `view` holds projection × view × the world wave.
+
+Also for xost, on every target:
+- each GLSL function returns once;
+- the vertex epilogue never reads `gl_Position` back;
+- loops sum into fresh locals.
+
+Desktop screenshots stayed within the desktop's own run-to-run noise.
+
+Not yet done:
+- a title that draws with these;
+- vertex formats vulkan4xenon lacks (SINT);
+- GPU memory in 64 KiB pieces;
+- whether xost's output draws what the desktop does.
 
 ## Files
 
@@ -140,3 +187,5 @@ bit-identical.
 | `ftp.sh` | Push a title to `Hdd1\Games\Shock2`, read its log, list the folder, copy the game's data to its `Data` |
 | `patches/` | Crates patched for big-endian, through the root `Cargo.toml` |
 | `../tools/xbox360_datacheck` | The data check, in the main workspace |
+| `tools/shader_sweep.sh`, `tools/shader_audit.py`, `tools/shader_table.py`, `tools/console_shaders.sh` | The console's shaders (Shaders) |
+| `tools/spirv_opt.py` | SPIRV-Tools' optimizer and disassembler through their C API |

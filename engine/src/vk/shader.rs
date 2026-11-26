@@ -458,7 +458,52 @@ pub fn compile(source: &str, stage: Stage) -> Result<Vec<u32>, String> {
     result
 }
 
+/// The console's GLSL -> SPIR-V table (xbox360/tools/shader_table.py),
+/// which the title hands over before it makes a program: the console has no
+/// shaderc.
+static CONSOLE_TABLE: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
+
+/// Give the console's [`compile`] its table. Only the first call counts.
+pub fn set_console_table(table: &'static [u8]) {
+    let _ = CONSOLE_TABLE.set(table);
+}
+
+/// `source`'s SPIR-V for `stage` in a table shader_table.py wrote.
+fn table_lookup(table: &[u8], source: &str, stage: Stage) -> Result<Vec<u32>, String> {
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(table.get(at..at + 4)?.try_into().ok()?))
+    };
+    if table.get(..4) != Some(b"S2ST".as_slice()) {
+        return Err("not a shader table (shader_table.py)".into());
+    }
+    let (want, want_stage) = (source_hash(source), stage as u32);
+    let mut at = 8;
+    for _ in 0..word(4).ok_or("a truncated shader table")? {
+        let hash = u64::from(word(at).ok_or("a truncated shader table")?)
+            | u64::from(word(at + 4).ok_or("a truncated shader table")?) << 32;
+        let entry_stage = word(at + 8).ok_or("a truncated shader table")?;
+        let count = word(at + 12).ok_or("a truncated shader table")? as usize;
+        let start = at + 16;
+        at = start + count * 4;
+        if hash == want && entry_stage == want_stage {
+            return (0..count)
+                .map(|i| word(start + i * 4).ok_or_else(|| "a truncated shader table".to_string()))
+                .collect();
+        }
+    }
+    Err(format!(
+        "GLSL {want:016x}.{} isn't in the console's shader table: sweep the shaders again (xbox360/README.md, \"Shaders\")",
+        stage_suffix(stage)
+    ))
+}
+
 fn compile_uncached(source: &str, stage: Stage, target: Target) -> Result<Vec<u32>, String> {
+    if cfg!(target_os = "xbox360") {
+        let table = CONSOLE_TABLE
+            .get()
+            .ok_or("the console's shader table isn't set (set_console_table)")?;
+        return table_lookup(table, source, stage);
+    }
     let glsl = to_vulkan_glsl_for(source, stage, target);
     SHADERC.with(|compiler| match compiler {
         Ok(c) => c.compile(&glsl, stage).map_err(|e| {
@@ -897,6 +942,36 @@ mod tests {
         let linked = link(vs, fs);
         std::fs::write(out.join("vert.spv"), spirv_bytes(&linked.vertex)).unwrap();
         std::fs::write(out.join("frag.spv"), spirv_bytes(&linked.fragment)).unwrap();
+    }
+
+    #[test]
+    fn table_lookup_finds_a_source_by_hash_and_stage() {
+        let entry = |source: &str, stage: u32, words: &[u32]| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&source_hash(source).to_le_bytes());
+            e.extend_from_slice(&stage.to_le_bytes());
+            e.extend_from_slice(&(words.len() as u32).to_le_bytes());
+            words
+                .iter()
+                .for_each(|w| e.extend_from_slice(&w.to_le_bytes()));
+            e
+        };
+        let mut table = b"S2ST".to_vec();
+        table.extend_from_slice(&3u32.to_le_bytes());
+        table.extend(entry("a", 0, &[1, 2]));
+        table.extend(entry("a", 1, &[3]));
+        table.extend(entry("b", 0, &[0x0723_0203, 5, 6]));
+        assert_eq!(table_lookup(&table, "a", Stage::Fragment), Ok(vec![3]));
+        assert_eq!(
+            table_lookup(&table, "b", Stage::Vertex),
+            Ok(vec![0x0723_0203, 5, 6])
+        );
+        assert!(
+            table_lookup(&table, "b", Stage::Fragment)
+                .unwrap_err()
+                .contains("isn't in")
+        );
+        assert!(table_lookup(&table[..20], "b", Stage::Vertex).is_err());
     }
 
     #[test]
