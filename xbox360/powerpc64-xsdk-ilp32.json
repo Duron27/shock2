@@ -1,0 +1,26 @@
+{
+  "arch": "powerpc64",
+  "llvm-target": "powerpc64-unknown-xbox360-ilp32",
+  "data-layout": "E-m:e-p:32:32-Fn32-i64:64-i128:128-n32:64",
+  "target-endian": "big",
+  "target-pointer-width": 32,
+  "target-c-int-width": 32,
+  "max-atomic-width": 64,
+  "os": "xbox360",
+  "vendor": "xsdk",
+  "cpu": "generic",
+  "features": "+hard-float,-altivec,-vmx128",
+  "panic-strategy": "abort",
+  "relocation-model": "static",
+  "code-model": "small",
+  "position-independent-executables": false,
+  "dynamic-linking": false,
+  "has-thread-local": false,
+  "eh-frame-header": false,
+  "function-sections": true,
+  "emit-debug-gdb-scripts": false,
+  "metadata": {
+    "description": "Xbox 360 titles linked with xsdk, compiled by xenon-forge's PPC64-ILP32 LLVM (the console's own calling convention, which xsdk's -mcall-xsdk also is); see xbox360/README.md",
+    "std": false
+  }
+}

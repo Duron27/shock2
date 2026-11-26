@@ -9,13 +9,5 @@ description = "A no_std Rust test title for the Xbox 360 on xsdk: clears the scr
 crate-type = ["staticlib"]
 path = "src/lib.rs"
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-opt-level = 2
-debug = true
-
-# Not part of the game's workspace: it builds only for the custom target.
-[workspace]
+[dependencies]
+xsdk_rt = { path = "../xsdk_rt" }

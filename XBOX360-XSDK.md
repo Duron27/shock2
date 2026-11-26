@@ -32,6 +32,7 @@ added.
 5. **Shaders:** SPIR-V goes through xsdk's shader compiler (`xsc.h`) on the console or on the PC; test each one.
 
 A cheaper first step: a small `no_std` Rust title on xsdk (clear the screen, read a controller) to prove the target
-and the link, before the engine. **Done (2026-11-26), not yet run on the console:** `xbox360/` (its README). It found
-that xsdk's GCC has a calling convention of its own (`-mcall-xsdk`), which LLVM can't emit, so Rust and C meet only
-through thunks; step 1 above has to plan for that boundary, not only for the target JSON.
+and the link, before the engine. **Done (2026-11-26), not yet run on the console:** `xbox360/` (its README): `rust_hello` and `rust_triangle`, a
+triangle through `ash` on vulkan4xenon. xsdk's GCC uses the console's own calling convention (`-mcall-xsdk`), which
+stock LLVM can't emit; xenon-forge's PPC64-ILP32 LLVM (the compiler openxbdm is built with) emits it, so Rust calls
+xsdk and vulkan4xenon directly. Step 1 above is that compiler plus `powerpc64-xsdk-ilp32.json`, not a target of our own.

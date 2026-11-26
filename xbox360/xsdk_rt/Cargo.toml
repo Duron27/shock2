@@ -1,0 +1,8 @@
+[package]
+name = "xsdk_rt"
+version = "0.1.0"
+edition = "2024"
+description = "The few xsdk calls the Rust test titles share: the log, checks, the controller, an allocator and the panic handler"
+
+[lib]
+path = "src/lib.rs"

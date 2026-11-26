@@ -1,84 +1,91 @@
-# Xbox 360 (xsdk): the Rust test title
+# Xbox 360 (xsdk): Rust test titles
 
-Step 1 of [`XBOX360-XSDK.md`](../XBOX360-XSDK.md): a custom Rust target for the console and a tiny `no_std` title
-on [xsdk](https://github.com/xenosworks/xsdk), packed into a `.xex` with xsdk's `tools/elf2xex.py`. It uses xsdk,
-its GCC and the open-source pieces around it only: no Microsoft tooling or SDK material.
+The first steps of [`XBOX360-XSDK.md`](../XBOX360-XSDK.md): Rust titles on [xsdk](https://github.com/xenosworks/xsdk),
+packed into `.xex` files with xsdk's `tools/elf2xex.py`. Only open-source pieces are used: xsdk, its GCC, vulkan4xenon,
+and xenon-forge's compiler. There's no Microsoft tooling or SDK material in any of them.
 
 ```
-xbox360/build.sh        # -> xbox360/hello/build/rust_hello.xex
+xbox360/build.sh hello      # -> hello/build/rust_hello.xex: clears the screen to a colour the controller sets
+xbox360/build.sh triangle   # -> triangle/build/rust_triangle.xex: a triangle through ash on vulkan4xenon
+xbox360/ftp.sh push triangle; xbox360/ftp.sh log triangle
 ```
 
-The build needs nightly Rust with `rust-src` (`rustup component add rust-src --toolchain nightly`), the xsdk
-toolchain at `~/xsdk-gcc` (`XSDK_GCC` overrides it), and a built xsdk checkout (`make` in it). The default is
-openmw-xenon's copy (`XSDK` overrides it).
+| Title | What it shows | Ends on |
+|---|---|---|
+| `rust_hello` | The screen's colour follows the sticks and triggers (xsdk's `hello`, in Rust); A rumbles | Back |
+| `rust_triangle` | A turning triangle drawn with `ash` on vulkan4xenon: the left stick moves it, RT grows it, A rumbles | Back |
 
-The title clears the screen to a colour the controller sets: left stick x sets red, right stick y green, the right
-trigger blue, and the left trigger dims all three. Holding A rumbles and Back ends the title, as xsdk's own `hello`
-sample does. Like xsdk's samples, it reports on itself in `rust_hello.log` beside the `.xex`:
+Each title writes `rust_<title>.log` beside its `.xex`, with `PASS:`/`FAIL:` lines and `checks: N passed, M failed`,
+as xsdk's samples do. On the console they live in `Hdd1\Games\Shock2`, the only folder `ftp.sh` touches. Launch them
+from Aurora's file browser. Aurora's FTP is gone while a title runs, so read the log after going back to the
+dashboard.
 
-- `PASS: rust_hello: 64-bit arithmetic`: LLVM's 64-bit integer code on 32-bit PowerPC, which goes through
-  compiler-builtins, matches a value `build.rs` computed on the PC.
-- `PASS: rust_hello: float arithmetic`.
-- `PASS: rust_hello: the CPU is big-endian`.
-- `PASS: rust_hello: the first resolved frame holds the colour it was cleared to`: the first pixel, read back from the
-  front buffer.
-- `checks: N passed, M failed`, then xsdk's `exit: status 0`.
+## What the build needs
 
-**Not yet run on the console.** It builds, links and packs, and the checks below were made on the build. Running it
-means copying `rust_hello.xex` into a folder of its own on the console, such as `Hdd1:\xsdk\rust_hello\`, with
-GETTING_STARTED.md section 6's `curl -T`, and launching it from Aurora. Then read the log, as section 7 describes.
+- **xenon-forge's compiler** at `~/xenon-forge-toolchain` (`XENON_FORGE` overrides it): its prebuilt PPC64-ILP32
+  Rust 1.98 and LLVM for Linux x86_64. The pinned archive is nightly `c9997c1d885d`:
+  `https://github.com/landaire/xenon-forge/releases/download/toolchain-nightly-c9997c1d885d/xbox360-toolchain-x86_64-unknown-linux-gnu.tar.xz`,
+  SHA-256 `720535e797486ab72dc208b65d2cc019b88fbd9d13b176f6d871481cbd73c0ae`; unpack it there. The copy on this PC
+  came from openxbdm's Buck2 cache, which had downloaded that same archive.
+- **Rust 1.98.0's library source**, for `-Zbuild-std`: `rustup toolchain install 1.98.0 --profile minimal --component
+  rust-src`. The build uses that toolchain's cargo with xenon-forge's rustc.
+- **xsdk** at `~/xsdk-gcc` (its toolchain) and **xsdk and vulkan4xenon** under `XENOSWORKS` (default: openmw-xenon's
+  `sources/xenosworks`), each built with `make`.
+- **glslang** for the triangle's shaders (the system's Khronos build is fine for GLSL; xsdk docs/GETTING_STARTED.md
+  section 4).
+
+## The calling convention
+
+xsdk's GCC uses the console's own calling convention, `-mcall-xsdk` (`tools/toolchain/gcc-xsdk.patch`):
+- arguments go in 8-byte slots, and a 64-bit integer takes one register;
+- every caller leaves a 16-byte linkage area and then a 64-byte parameter save area;
+- r14–r31 are saved whole, as 64 bits;
+- narrow values are widened by the receiver;
+- binutils marks such objects `EF_PPC_XSDK` and won't link them with others.
+
+Stock LLVM can't emit this convention: its 32-bit PowerPC is SysV. The first version of `hello` got round that with
+assembly thunks at every Rust/C crossing (commit 1e92aa77). That wouldn't have scaled to Vulkan, whose handles are
+64-bit and which `ash` reaches through function pointers.
+
+**xenon-forge's LLVM** ([landaire/xenon-forge](https://github.com/landaire/xenon-forge), MIT/Apache, the compiler
+openxbdm is built with) adds a PPC64-ILP32 target for the console's convention: 64-bit registers, 32-bit pointers,
+ELF32 output. Its `docs/llvm-xbox360-abi-evidence.md` records how its authors derived it. Compiling the same functions
+with both compilers and comparing the code gave:
+
+| | xsdk GCC | xenon-forge Rust |
+|---|---|---|
+| `u64` argument and result | one register (`sldi 3,3,1`) | one register (`sldi r3,r3,1`) |
+| r14–r31 saves | `std`/`ld` | `std`/`ld` |
+| A caller's frame | 16 linkage + 64 parameter bytes | 16 + 64, in 96-byte frames |
+| Narrow results | widened by the caller | left unwidened (`addi r3,r3,1` for a `u8`) |
+
+So Rust and xsdk's C call each other directly. `main` is Rust's, and xsdk's start-up calls it. `ash` calls
+vulkan4xenon through `vkGetInstanceProcAddr`'s pointers. `tools/rust_object.py` still does two things:
+- It links the Rust archive into one object whose only global is `main`, so compiler-builtins' `memcpy` can't replace
+  newlib's.
+- It sets `EF_PPC_XSDK`, since LLVM doesn't know the flag.
+
+The target is `powerpc64-xsdk-ilp32.json`, xenon-forge's own `powerpc64-unknown-xbox360-ilp32` with two changes. It
+leaves out VMX128, so these titles never touch vector registers. And it uses xsdk's newlib start-up instead of
+xenon-forge's runtime.
+
+Checked on these builds: neither Rust object uses r2 or r13 (r13 is the console's thread pointer, which xsdk's TLS
+reads) or any vector instruction, and both are flagged `xsdk call`.
+
+**Not yet checked on the console:**
+- whether the two conventions really agree on vector registers, which these titles leave out;
+- whether they agree on aggregates returned by value, which the titles don't use: `ash` returns `VkResult`, and its
+  structs go through pointers;
+- floats loaded from unaligned addresses, which fault on the console. xsdk's GCC avoids them, and xenon-forge's LLVM
+  may not.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `powerpc-xsdk-none.json` | The target: 32-bit big-endian PowerPC, `os` none, static, `panic` = abort, AltiVec off, LLVM CPU `ppc` |
-| `hello/src/lib.rs` | The title, a `no_std` `staticlib` |
-| `hello/bridge.c` | The C side: `main`, the thunks both ways, and three helpers |
-| `tools/rust_object.py` | Turns the Rust archive into one object that xsdk's linker takes |
-| `build.sh` | cargo with `-Zbuild-std`, then `rust_object.py`, then xsdk's GCC link, `xenia_scan`, and `elf2xex.py` |
-
-## The calling convention boundary
-
-This is the finding that shapes the whole port. xsdk's GCC does not use the PowerPC SysV ABI. Its default,
-`-mcall-xsdk`, is the console's own compiler's convention (`tools/toolchain/gcc-xsdk.patch`, `rs6000.h`):
-
-- arguments go in 8-byte slots, AIX-style, and a 64-bit integer takes one register;
-- every caller leaves a 64-byte parameter save area at 16(r1), after a 16-byte fixed area;
-- r14–r31 are callee-saved **whole, 64 bits** (`std`/`ld`); v14–v31 are kept;
-- the receiver widens narrow values, rather than the caller;
-- binutils marks such objects `EF_PPC_XSDK` (0x100) and refuses to link them with any others.
-
-LLVM can't emit this convention. Its 32-bit PowerPC is SysV: 64-bit integers in register pairs, an 8-byte frame
-header, and r14–r31 saved with `stw` and restored with `lwz`, which zeroes the high words xsdk's code keeps there.
-Titles run in 32-bit mode (MSR.SF clear, docs/HARDWARE.md), so addresses ignore high words. That's why SysV code can
-run here at all; but the two conventions can't call each other directly. So the boundary is explicit:
-
-1. **One way in.** `bridge.c`'s `main` calls `rust_title_main` through `enter_rust`, an assembly thunk that saves
-   r14–r31 as 64-bit around the call.
-2. **Only thunked ways out.** `rust_object.py` links the Rust archive into one relocatable object (`ld -r`, garbage
-   collected from the entry). It makes every global but the entry local, so Rust's own `memcpy`/`memset` from
-   compiler-builtins can't stand in for newlib's. It then renames every remaining undefined symbol `X` to `__rs2c_X`.
-   `bridge.c` defines `__rs2c_X` only for the calls it allows. Each one calls `X` from an xsdk-shaped frame (16
-   fixed bytes plus the 64-byte parameter save area), so a varargs or address-taking callee spills into the thunk's
-   frame, not Rust's locals.
-3. **The flag.** The object then gets `EF_PPC_XSDK`. That flag describes the object's interface, which steps 1 and 2
-   make true. The code inside is still SysV.
-4. **Types across it:** `i32`, `u32`, pointers and doubles only. No 64-bit integers, which go in different registers,
-   and no `u8`/`u16`/`bool` results, because xsdk leaves them unwidened where LLVM assumes they're widened. That's why
-   `XamInputSetState`'s struct of two `u16`s and xsdk's varargs log are wrapped in `bridge.c`.
-
-Checked on this build:
-- A Rust call with no thunk fails the link (`undefined reference to '__rs2c_xsdk_gpu_close'`, tried by removing that
-  one thunk).
-- `readelf` shows `xsdk call` on both `rust.o` and the `.elf`.
-- In the Rust object's disassembly there is no r2 and no r13: LLVM's SVR4 reserves both, and on the console r13 is
-  the thread's pointer, which xsdk's TLS and `errno` read. There are also no VMX instructions and no 64-bit
-  instructions.
-- `rust.o` defines `memcpy` and `memset` only as locals, and `rust_title_main` is its only global.
-- `xenia_scan` flags one `mcrf` in `core::fmt`'s integer formatting, which Xenia skips and the console runs.
-
-What remains unchecked until it runs on the console: CR fields 2–4, which SysV keeps callee-saved and xsdk's GCC never
-allocates (`-ffixed-cr2`…`cr7`), so C can't disturb Rust's; f14–f31, which both conventions keep; and a float load at
-an unaligned address. xsdk's GCC moves such floats through integer registers, but LLVM doesn't know to. Rust only
-loads floats through aligned references, but `read_unaligned` of an `f32` is a risk to check.
+| `powerpc64-xsdk-ilp32.json` | The target |
+| `xsdk_rt/` | What the titles share: the log, checks, controller and rumble, a heap over newlib's `memalign`, the panic handler |
+| `hello/`, `triangle/` | The titles, `no_std` `staticlib`s; the triangle's GLSL is in `triangle/shaders/` |
+| `tools/rust_object.py` | The archive into one object for xsdk's linker |
+| `build.sh` | Shaders (the triangle), cargo with xenon-forge's rustc, `rust_object.py`, xsdk's GCC link, `xenia_scan`, `elf2xex.py` |
+| `ftp.sh` | Push a title to `Hdd1\Games\Shock2`, read its log, list the folder |

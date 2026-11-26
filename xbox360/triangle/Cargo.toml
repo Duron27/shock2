@@ -1,0 +1,15 @@
+[package]
+name = "xenon_triangle"
+version = "0.1.0"
+edition = "2024"
+description = "A no_std Rust title for the Xbox 360: a triangle drawn through ash on vulkan4xenon, moved by the controller"
+
+[lib]
+# Linked by xsdk's GCC, not by rustc: see xbox360/build.sh.
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+xsdk_rt = { path = "../xsdk_rt" }
+# no_std: ash's own loader is off, and the entry points come from libvulkan4xenon.a (Entry::from_static_fn).
+ash = { version = "0.38", default-features = false }

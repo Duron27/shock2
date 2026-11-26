@@ -1,0 +1,13 @@
+# The Xbox 360 test titles: their own workspace, as they build only for powerpc64-xsdk-ilp32.json with xenon-forge's
+# compiler (build.sh), never with the game's.
+[workspace]
+members = ["hello", "triangle", "xsdk_rt"]
+resolver = "3"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = true
+
+[profile.dev]
+panic = "abort"
