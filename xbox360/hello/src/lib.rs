@@ -28,6 +28,8 @@ unsafe extern "C" {
     fn xsdk_present_pixels(address: u32) -> *mut u32;
     fn xsdk_present_end();
     fn xsdk_present_close();
+    fn xsdk_gpu_fence() -> u32;
+    fn xsdk_gpu_wait(fence: u32, timeout_ms: u32) -> NtStatus;
 }
 
 /// `XsdkDisplayMode`'s `XSDK_DISPLAY_720P` (xsdk `include/xsdk/display.h`):
@@ -37,6 +39,7 @@ const SPLASH_MS: u32 = 2000;
 /// The Guide's first opening held a frame up 2.7 s (xsdk docs/HARDWARE.md).
 const BEGIN_TIMEOUT_MS: u32 = 5000;
 const RUMBLE_SPEED: u16 = 0x8000;
+const FENCE_TIMEOUT_MS: u32 = 1000;
 
 /// The clear colour for a controller state, as xsdk's `hello` computes it.
 fn colour_of(pad: &Gamepad) -> u32 {
@@ -82,15 +85,14 @@ fn run(width: u32, height: u32, checks: &mut Checks) {
         }
         last_result = result;
         if pad.buttons & xsdk_rt::BUTTON_BACK != 0 {
+            log!("rust_hello: Back pressed after {} frames", frame);
             break;
         }
         let a = pad.buttons & xsdk_rt::BUTTON_A != 0;
         if a != rumbling {
             let speed = if a { RUMBLE_SPEED } else { 0 };
             let r = xsdk_rt::rumble(0, speed, speed);
-            if r != xsdk_rt::ERROR_SUCCESS {
-                log!("rust_hello: XamInputSetState failed: 0x{:08X}", r);
-            }
+            log!("rust_hello: A {}: XamInputSetState({:#06X}) returned 0x{:08X}", if a { "down" } else { "up" }, speed, r);
         }
         rumbling = a;
 
@@ -104,6 +106,11 @@ fn run(width: u32, height: u32, checks: &mut Checks) {
         unsafe { xsdk_gpu_resolve(address, width, height, argb) };
         // A resolve copies eDRAM, then clears it: frame 1 shows frame 0's clear.
         if frame == 1 {
+            // The resolve is queued GPU work: wait for it before reading what it wrote, as xsdk's hello does.
+            let status = unsafe { xsdk_gpu_wait(xsdk_gpu_fence(), FENCE_TIMEOUT_MS) };
+            if status < 0 {
+                log!("rust_hello: xsdk_gpu_wait failed: 0x{:08X}", status as u32);
+            }
             // The first pixel of the first tile, where untiling can't move it.
             // Each pixel's bytes are B, G, R, A (xsdk docs/HARDWARE.md).
             let got = unsafe { xsdk_present_pixels(address).read_volatile() }.swap_bytes();
@@ -145,10 +152,11 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     log!("rust_hello: the display is {}x{}", width, height);
     run(width, height, &mut checks);
     unsafe { xsdk_present_close() };
+    log!("rust_hello: display closed");
     let status = unsafe { xsdk_gpu_close() };
     if status < 0 {
         log!("rust_hello: xsdk_gpu_close failed: 0x{:08X}", status as u32);
     }
-    log!("rust_hello: Back pressed, done");
+    log!("rust_hello: done");
     checks.finish()
 }

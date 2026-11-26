@@ -558,12 +558,14 @@ fn run(gpu: &Gpu, checks: &mut Checks) {
         }
         last_result = result;
         if pad.buttons & xsdk_rt::BUTTON_BACK != 0 {
+            log!("rust_triangle: Back pressed after {} frames", frames);
             break;
         }
         let a = pad.buttons & xsdk_rt::BUTTON_A != 0;
         if a != rumbling {
             let speed = if a { RUMBLE_SPEED } else { 0 };
-            xsdk_rt::rumble(0, speed, speed);
+            let r = xsdk_rt::rumble(0, speed, speed);
+            log!("rust_triangle: A {}: XamInputSetState({:#06X}) returned 0x{:08X}", if a { "down" } else { "up" }, speed, r);
         }
         rumbling = a;
 
@@ -597,7 +599,6 @@ fn run(gpu: &Gpu, checks: &mut Checks) {
     if rumbling {
         xsdk_rt::rumble(0, 0, 0);
     }
-    log!("rust_triangle: {} frames", frames);
 }
 
 #[unsafe(no_mangle)]
@@ -613,11 +614,11 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         return checks.finish();
     };
     run(&gpu, &mut checks);
-    unsafe {
-        let _ = gpu.device.device_wait_idle();
-        gpu.swapchain_fn.destroy_swapchain(gpu.swapchain, None);
-    }
+    let idle = unsafe { gpu.device.device_wait_idle() };
+    log!("rust_triangle: vkDeviceWaitIdle returned {:?}", idle);
+    unsafe { gpu.swapchain_fn.destroy_swapchain(gpu.swapchain, None) };
+    log!("rust_triangle: swapchain destroyed");
     let _ = &gpu.instance;
-    log!("rust_triangle: Back pressed, done");
+    log!("rust_triangle: done");
     checks.finish()
 }
