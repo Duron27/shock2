@@ -99,8 +99,12 @@ The PPC64-ILP32 LLVM emits atomics in the protected-reservation form the kernel 
 processor block's address, has the interrupt-enable bit clear) before each `lwarx`, and the saved MSR restored after
 `stwcx.`. That form only reads r13, which nothing writes.
 
-Not yet known: whether xsdk's C (newlib's per-thread state, its pthreads) is safe to call from a thread std started
-with `ExCreateThread`. `rust_stdcheck`'s workers call `xsdk_log_write`, which is a first test of that.
+On the console (2026-11-26) all 16 checks passed in 341 ms and the title exited with status 0: 4 threads summed 400000
+locked additions in 109 ms, 1000 Condvar round trips took 6.6 ms, `sleep(100 ms)` took 100.08 ms, 64 MiB was allocated
+and touched in 71 ms, and files were written, read, sought and listed in `game:\rust_stdcheck`.
+
+Still open: whether all of xsdk's C (newlib's per-thread state, its pthreads) is safe to call from a thread std started
+with `ExCreateThread`. `xsdk_log_write` was, from all four workers.
 
 ## Files
 
