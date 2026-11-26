@@ -57,6 +57,9 @@ pub struct VkRenderer {
     grade: gamma::Grade,
     /// Built on first use for the current swapchain.
     gamma_target: Option<gamma::GammaTarget>,
+    /// Presenting failed with SURFACE_LOST; the runtime must hand over a new
+    /// surface ([`VkRenderer::recreate_surface`]).
+    surface_lost: bool,
     pub ctx: VkContext,
 }
 
@@ -96,6 +99,7 @@ impl VkRenderer {
             captured: None,
             grade: gamma::Grade::NEUTRAL,
             gamma_target: None,
+            surface_lost: false,
             ctx,
         };
         crate::gfx::vk_backend::install(&renderer.ctx);
@@ -132,6 +136,52 @@ impl VkRenderer {
 
     pub fn swapchain(&self) -> Option<&VkSwapchain> {
         self.swapchain.as_ref()
+    }
+
+    /// Drop the swapchain and the window surface it presents to. Android
+    /// destroys an app's native window whenever it goes to the background,
+    /// and a swapchain must not outlive its window; nothing is drawn until
+    /// [`VkRenderer::recreate_surface`].
+    pub fn release_surface(&mut self) {
+        unsafe {
+            let _ = self.ctx.device.device_wait_idle();
+        }
+        if let Some(mut target) = self.gamma_target.take() {
+            target.destroy(&self.ctx.device);
+        }
+        if let Some(mut old) = self.swapchain.take() {
+            old.destroy(&self.ctx);
+        }
+        if self.ctx.surface != vk::SurfaceKHR::null() {
+            unsafe {
+                self.ctx
+                    .surface_loader
+                    .destroy_surface(self.ctx.surface, None)
+            };
+            self.ctx.surface = vk::SurfaceKHR::null();
+        }
+        self.rebuild = true;
+    }
+
+    /// Presenting found the window surface gone: call
+    /// [`VkRenderer::recreate_surface`] once the window is back.
+    pub fn surface_lost(&self) -> bool {
+        self.surface_lost
+    }
+
+    /// Present to a new window surface (Android: the window the app got back
+    /// on returning to the foreground). The swapchain is rebuilt before the
+    /// next frame.
+    pub fn recreate_surface(
+        &mut self,
+        create_surface: impl FnOnce(vk::Instance) -> Result<vk::SurfaceKHR, vk::Result>,
+    ) -> Result<(), String> {
+        self.release_surface();
+        self.ctx.surface = create_surface(self.ctx.instance.handle())
+            .map_err(|e| format!("window surface: {e}"))?;
+        self.surface_lost = false;
+        self.rebuild = true;
+        Ok(())
     }
 
     /// The window's framebuffer changed size; the swapchain follows before
@@ -203,8 +253,9 @@ impl VkRenderer {
         for semaphore in self.render_finished.drain(..) {
             unsafe { self.ctx.device.destroy_semaphore(semaphore, None) };
         }
-        // A minimised window has no drawable area; try again once it has one.
-        if self.size.0 == 0 || self.size.1 == 0 {
+        // A minimised window has no drawable area, and a released surface
+        // (Android background) has no window; try again once it has one.
+        if self.size.0 == 0 || self.size.1 == 0 || self.ctx.surface == vk::SurfaceKHR::null() {
             return;
         }
         let samples = swapchain::supported_samples(&self.ctx, self.msaa);
@@ -234,6 +285,9 @@ impl VkRenderer {
     /// Start a frame cleared to `clear` (RGBA). `None` when there is nothing
     /// to draw into this frame (minimised, or the swapchain was just rebuilt).
     pub fn begin_frame(&mut self, clear: [f32; 4]) -> Option<Frame> {
+        if self.surface_lost {
+            return None;
+        }
         if self.rebuild {
             self.rebuild_swapchain();
         }
@@ -268,11 +322,17 @@ impl VkRenderer {
             )
         } {
             Ok((index, suboptimal)) => {
-                self.rebuild |= suboptimal;
+                self.rebuild |= suboptimal && !swapchain.compositor_rotates;
                 index
             }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.rebuild = true;
+                return None;
+            }
+            // The window went away under us (Android backgrounding before the
+            // runtime released the surface): draw nothing until it returns.
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
+                self.surface_lost = true;
                 return None;
             }
             Err(e) => panic!("vkAcquireNextImageKHR: {e}"),
@@ -462,8 +522,9 @@ impl VkRenderer {
                     .swapchains(&swapchains)
                     .image_indices(&indices),
             ) {
-                Ok(suboptimal) => self.rebuild |= suboptimal,
+                Ok(suboptimal) => self.rebuild |= suboptimal && !swapchain.compositor_rotates,
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.rebuild = true,
+                Err(vk::Result::ERROR_SURFACE_LOST_KHR) => self.surface_lost = true,
                 Err(e) => panic!("vkQueuePresentKHR: {e}"),
             }
             if let Some((buffer, memory, size)) = readback {

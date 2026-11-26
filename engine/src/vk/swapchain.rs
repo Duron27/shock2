@@ -43,6 +43,10 @@ pub struct VkSwapchain {
     pub framebuffers: Vec<vk::Framebuffer>,
     /// The images can be copied from (screenshots).
     pub transfer_src: bool,
+    /// Presented unrotated to a rotated display, for the compositor to turn.
+    /// Android then reports every acquire and present as SUBOPTIMAL, which
+    /// is expected and must not rebuild the swapchain.
+    pub compositor_rotates: bool,
 }
 
 impl VkSwapchain {
@@ -78,8 +82,33 @@ impl VkSwapchain {
                 .find(|m| modes.contains(m))
                 .unwrap_or(vk::PresentModeKHR::FIFO)
         };
+        // A phone held in landscape reports its surface in the display's
+        // native (portrait) orientation with a 90/270 degree transform. Nothing
+        // here rotates the frame itself, so present it IDENTITY and let the
+        // compositor turn it, which means the swapchain takes the window's own
+        // (landscape) shape: the native extent swapped.
+        let rotated = caps.current_transform.intersects(
+            vk::SurfaceTransformFlagsKHR::ROTATE_90 | vk::SurfaceTransformFlagsKHR::ROTATE_270,
+        );
+        let (pre_transform, swap_axes) = if !rotated {
+            (caps.current_transform, false)
+        } else if caps
+            .supported_transforms
+            .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+        {
+            (vk::SurfaceTransformFlagsKHR::IDENTITY, true)
+        } else {
+            (caps.current_transform, false)
+        };
         let extent = if caps.current_extent.width != u32::MAX {
-            caps.current_extent
+            if swap_axes {
+                vk::Extent2D {
+                    width: caps.current_extent.height,
+                    height: caps.current_extent.width,
+                }
+            } else {
+                caps.current_extent
+            }
         } else {
             vk::Extent2D {
                 width: size
@@ -121,7 +150,7 @@ impl VkSwapchain {
                     .image_array_layers(1)
                     .image_usage(usage)
                     .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .pre_transform(caps.current_transform)
+                    .pre_transform(pre_transform)
                     .composite_alpha(composite)
                     .present_mode(present_mode)
                     .clipped(true),
@@ -197,6 +226,7 @@ impl VkSwapchain {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(VkSwapchain {
+            compositor_rotates: swap_axes,
             handle,
             format: surface_format.format,
             depth_format,

@@ -174,6 +174,7 @@ This is a Rust-based VR port of System Shock 2. Key components:
   - `pathfinding/` - A* pathfinding service and path visualization
 - `runtimes/` - Platform-specific runtime implementations
   - `desktop_runtime/` - Desktop version
+  - `sdl_runtime/` - SDL2 flatscreen runtime: `shock2_sdl` on desktop, `libshock2.so` for alpha3 on Android (see its README)
   - `oculus_runtime/` - Oculus Quest VR version
   - `debug_runtime/` - HTTP-controlled runtime for automation and testing
 - `tools/` - Development tools

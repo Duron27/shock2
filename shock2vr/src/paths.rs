@@ -4,9 +4,17 @@ use std::sync::OnceLock;
 #[cfg(not(target_os = "android"))]
 use tracing::warn;
 
+/// The game's folder on Android: `DARK_ASSET_PATH` when the host sets it
+/// before loading the library (a launcher keeping each game in its own
+/// folder), otherwise alpha3's `/storage/emulated/0/Alpha3/shock2`.
 #[cfg(target_os = "android")]
 pub fn data_root() -> &'static Path {
-    Path::new("/sdcard/shock2quest")
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| match std::env::var("DARK_ASSET_PATH") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        _ => PathBuf::from("/storage/emulated/0/Alpha3/shock2"),
+    })
+    .as_path()
 }
 
 #[cfg(target_os = "android")]

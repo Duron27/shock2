@@ -1,0 +1,33 @@
+[package]
+name = "sdl_runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Flatscreen runtime on SDL2: a Linux binary, and libshock2.so for alpha3's SDLActivity on Android"
+
+[lib]
+# `libshock2.so`: alpha3's SDLActivity loads it and calls `SDL_main`.
+name = "shock2"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "shock2_sdl"
+path = "src/main.rs"
+
+[dependencies]
+sdl2 = "0.37"
+gamepad = { path = "../gamepad" }
+engine = { path = "../../engine" }
+dark = { path = "../../dark" }
+cgmath = "0.18.0"
+image = "0.24"
+clap = { version = "4.3.5", features = ["derive"] }
+tracing = "0.1.37"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+shock2vr = { path = "../../shock2vr" }
+
+# No FFmpeg on Android yet (cutscenes are skipped): it has no NDK build here.
+[target.'cfg(target_os = "android")'.dependencies]
+shock2vr = { path = "../../shock2vr", default-features = false }
+jni-sys = "0.3"
+ndk-context = "0.1.1"

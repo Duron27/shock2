@@ -103,8 +103,9 @@ impl VkContext {
             .map(|name| CString::new(name.as_str()).unwrap())
             .chain(validation.then(|| DebugUtils::name().to_owned()))
             .collect();
-        let extension_ptrs: Vec<*const i8> = extension_names.iter().map(|n| n.as_ptr()).collect();
-        let layer_ptrs: Vec<*const i8> = if validation {
+        let extension_ptrs: Vec<*const std::ffi::c_char> =
+            extension_names.iter().map(|n| n.as_ptr()).collect();
+        let layer_ptrs: Vec<*const std::ffi::c_char> = if validation {
             vec![VALIDATION_LAYER.as_ptr()]
         } else {
             vec![]

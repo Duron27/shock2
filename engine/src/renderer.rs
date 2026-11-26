@@ -150,9 +150,21 @@ impl Engine for Renderer {
     }
 }
 
+/// Where the engine's own bundled files (`assets/` in the repo) are read
+/// from: `SHOCK2_BUNDLE_ASSETS` when set (an Android host has no useful
+/// working directory), otherwise `./assets/`.
+fn bundle_root() -> &'static std::path::Path {
+    match std::env::var("SHOCK2_BUNDLE_ASSETS") {
+        Ok(path) if !path.is_empty() => {
+            std::path::Path::new(Box::leak(path.into_boxed_str()) as &'static str)
+        }
+        _ => std::path::Path::new("./assets/"),
+    }
+}
+
 pub fn init() -> Renderer {
     let bundle_file_system = Box::new(crate::file_system::DefaultFileSystem {
-        root_path: Box::new(std::path::Path::new("./assets/")),
+        root_path: Box::new(bundle_root()),
     });
     init_with(false, crate::file_system::storage::init(bundle_file_system))
 }
