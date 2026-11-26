@@ -1,0 +1,22 @@
+[package]
+name = "xbox360_datacheck"
+version = "0.1.0"
+edition = "2024"
+description = "Parses the game data and fingerprints it, on the PC and on the Xbox 360, to compare the two (xbox360/README.md)"
+
+[lib]
+# rlib for the PC's binary; staticlib for the console title, whose main is the library's.
+crate-type = ["rlib", "staticlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "xbox360_datacheck"
+path = "src/main.rs"
+
+[dependencies]
+dark = { path = "../../dark" }
+engine = { path = "../../engine" }
+shock2vr = { path = "../../shock2vr", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("xbox360"))'] }

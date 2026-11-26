@@ -450,15 +450,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "c_string"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5950a6452ef676c0ae607bb61f91cd7f938b3d8def225a560372ca01bf1616b8"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "cc"
 version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -945,10 +936,10 @@ name = "engine"
 version = "0.1.0"
 dependencies = [
  "ash",
- "c_string",
  "cgmath",
  "collision",
  "fbxcel-dom",
+ "getrandom 0.2.10",
  "glfw",
  "image 0.24.7",
  "jni 0.19.0",
@@ -3415,8 +3406,6 @@ dependencies = [
 [[package]]
 name = "texture2ddecoder"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "427ae8ec7f2f0fdd3146b77cfa44bea880caf066f7e55398a8467afe2645c832"
 dependencies = [
  "paste",
 ]
@@ -4151,6 +4140,15 @@ name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
+
+[[package]]
+name = "xbox360_datacheck"
+version = "0.1.0"
+dependencies = [
+ "dark",
+ "engine",
+ "shock2vr",
+]
 
 [[package]]
 name = "zerocopy"

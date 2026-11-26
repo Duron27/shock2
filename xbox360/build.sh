@@ -3,6 +3,8 @@
 #   build.sh hello      -> hello/build/rust_hello.xex
 #   build.sh triangle   -> triangle/build/rust_triangle.xex
 #   build.sh stdcheck   -> stdcheck/build/rust_stdcheck.xex
+#   build.sh datacheck  -> datacheck/build/xbox360_datacheck.xex: the game's data parsed with the engine's own crates
+#                          (tools/xbox360_datacheck, built in the main workspace)
 # Environment:
 #   XENOSWORKS  the folder holding xsdk and vulkan4xenon, each built with `make` (default: openmw-xenon's)
 #   XSDK_GCC    xsdk's toolchain PREFIX (default: ~/xsdk-gcc)
@@ -13,7 +15,7 @@
 #   GLSLANG     glslang for the triangle's shaders (default: the one on PATH)
 set -euo pipefail
 
-TITLE="${1:?usage: build.sh hello|triangle|stdcheck}"
+TITLE="${1:?usage: build.sh hello|triangle|stdcheck|datacheck}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 XENOSWORKS="${XENOSWORKS:-$HOME/AndroidStudioProjects/openmw-xenon/sources/xenosworks}"
 XSDK="$XENOSWORKS/xsdk"
@@ -30,6 +32,7 @@ case "$TITLE" in
 hello) CRATE=xenon_hello ;;
 triangle) CRATE=xenon_triangle ;;
 stdcheck) CRATE=xenon_stdcheck ;;
+datacheck) CRATE=xbox360_datacheck; NAME=xbox360_datacheck ;;
 *) echo "unknown title $TITLE" >&2; exit 1 ;;
 esac
 [ -x "$XENON_FORGE/bin/rustc" ] || { echo "no $XENON_FORGE/bin/rustc: see xbox360/README.md, 'The compiler'" >&2; exit 1; }
@@ -37,7 +40,7 @@ esac
 [ -f "$XSDK/build/libxsdk.a" ] || { echo "no $XSDK/build/libxsdk.a: run make in xsdk" >&2; exit 1; }
 mkdir -p "$OUT"
 BUILD_STD=core,alloc,compiler_builtins
-if [ "$TITLE" = stdcheck ]; then
+if [ "$TITLE" = stdcheck ] || [ "$TITLE" = datacheck ]; then
 	RUST_SRC="${STD_SRC:-$HOME/xenon-forge-std/library}"
 	[ -f "$RUST_SRC/std/src/sys/pal/xbox360/mod.rs" ] || { echo "no std overlay at $RUST_SRC: run tools/std_source.sh" >&2; exit 1; }
 	BUILD_STD=std,panic_abort,core,alloc,compiler_builtins
@@ -58,10 +61,18 @@ fi
 
 # 1. Rust, with xenon-forge's compiler: core, alloc and compiler-builtins from 1.98.0's source. compiler-builtins-mem
 #    gives Rust its own memcpy and friends, made local in step 2.
-(cd "$HERE" && __CARGO_TESTS_ONLY_SRC_ROOT="$RUST_SRC" RUSTC="$XENON_FORGE/bin/rustc" RUSTC_BOOTSTRAP=1 \
-	cargo +1.98.0 build --release -p "$CRATE" --target "$HERE/powerpc64-xsdk-ilp32.json" \
-	-Zbuild-std=$BUILD_STD -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec)
-LIB="$HERE/target/powerpc64-xsdk-ilp32/release/lib$CRATE.a"
+if [ "$TITLE" = datacheck ]; then
+	# The engine's crates, in the main workspace with its lock file and patches; its own target dir.
+	(cd "$HERE/.." && __CARGO_TESTS_ONLY_SRC_ROOT="$RUST_SRC" RUSTC="$XENON_FORGE/bin/rustc" RUSTC_BOOTSTRAP=1 \
+		cargo +1.98.0 build -p "$CRATE" --lib --target "$HERE/powerpc64-xsdk-ilp32.json" --target-dir "$HERE/../target/xbox360" \
+		-Zbuild-std=$BUILD_STD -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec)
+	LIB="$HERE/../target/xbox360/powerpc64-xsdk-ilp32/debug/lib$CRATE.a"
+else
+	(cd "$HERE" && __CARGO_TESTS_ONLY_SRC_ROOT="$RUST_SRC" RUSTC="$XENON_FORGE/bin/rustc" RUSTC_BOOTSTRAP=1 \
+		cargo +1.98.0 build --release -p "$CRATE" --target "$HERE/powerpc64-xsdk-ilp32.json" \
+		-Zbuild-std=$BUILD_STD -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec)
+	LIB="$HERE/target/powerpc64-xsdk-ilp32/release/lib$CRATE.a"
+fi
 
 # 2. One object: Rust's main, calling C directly.
 python3 "$HERE/tools/rust_object.py" "$TC" "$LIB" "$OUT/rust.o" main

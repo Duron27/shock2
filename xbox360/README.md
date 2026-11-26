@@ -106,6 +106,26 @@ and touched in 71 ms, and files were written, read, sought and listed in `game:\
 Still open: whether all of xsdk's C (newlib's per-thread state, its pthreads) is safe to call from a thread std started
 with `ExCreateThread`. `xsdk_log_write` was, from all four workers.
 
+## The engine's crates
+
+`dark`, `engine` and `shock2vr` (built `--no-default-features`, which leaves out FFmpeg) compile for the console with
+the std above. What that took, all limited to `target_os = "xbox360"` except the patched crate:
+- `engine`: `ash` without `loaded`, its `Entry` made from vulkan4xenon's linked-in `vkGetInstanceProcAddr`; no
+  `libloading`, so no runtime libshaderc (the console's shaders get compiled ahead of time); `getrandom`'s `custom`
+  backend on the kernel's `XeCryptRandom`, for `rand`. The unused `c_string` dependency is gone everywhere.
+- `shock2vr`: `zip` with deflate only, without its C-backed bzip2 and zstd.
+- `texture2ddecoder`: patched in `patches/` for its big-endian code (`patches/README.md`). One fix is a real bug the
+  console would have shown: BC2/BC3 alpha would have gone into blue.
+
+`tools/xbox360_datacheck` (`build.sh datacheck`; `cargo run -p xbox360_datacheck -- Data` on the PC) parses
+`shock2.gam`, `motiondb.bin` and every mission with these crates, as the game does (`dark::mission::read`), and
+fingerprints the result. That covers counts, FNV-1a hashes of every world vertex, normal, cell and AI path vertex,
+and every property's and link's `Debug` text. On the console (2026-11-26, all data in `Hdd1\Games\Shock2\Data`)
+the 23 missions parsed in 27.7 s against 1.1 s on the PC, and every line matched the PC's except 117 of about 92,000
+properties. Those are all object rotations a few `f32` ulps apart (at most 3.5e-7 relative): quaternions made from
+the stored angles with `sin`/`cos`, whose libm differs between the two. Everything read from the files is
+bit-identical.
+
 ## Files
 
 | File | What it is |
@@ -117,4 +137,6 @@ with `ExCreateThread`. `xsdk_log_write` was, from all four workers.
 | `tools/std_source.sh` | xenon-forge's std overlay over Rust's library source |
 | `tools/rust_object.py` | The archive into one object for xsdk's linker, std's kernel imports in xsdk's form |
 | `build.sh` | Shaders (the triangle), cargo with xenon-forge's rustc, `rust_object.py`, xsdk's GCC link, `xenia_scan`, `elf2xex.py` |
-| `ftp.sh` | Push a title to `Hdd1\Games\Shock2`, read its log, list the folder |
+| `ftp.sh` | Push a title to `Hdd1\Games\Shock2`, read its log, list the folder, copy the game's data to its `Data` |
+| `patches/` | Crates patched for big-endian, through the root `Cargo.toml` |
+| `../tools/xbox360_datacheck` | The data check, in the main workspace |
