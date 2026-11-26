@@ -2,15 +2,21 @@
 name = "gamepad"
 version = "0.1.0"
 edition = "2024"
-description = "SDL2 game controller input and rumble shared by the flatscreen runtimes"
+description = "Game controller input and rumble shared by the flatscreen runtimes"
+
+[features]
+default = ["sdl"]
+# SDL2's GameController API: Gamepads and PadState::read. Without it (the Xbox 360) the host fills PadState itself.
+sdl = ["dep:sdl2", "dep:tracing"]
 
 [dependencies]
-sdl2 = "0.37"
+sdl2 = { version = "0.37", optional = true }
 cgmath = "0.18.0"
-tracing = "0.1.37"
+tracing = { version = "0.1.37", optional = true }
 
-[target.'cfg(not(any(target_os = "android", windows)))'.dependencies]
+[target.'cfg(not(any(target_os = "android", windows, target_os = "xbox360")))'.dependencies]
 shock2vr = { path = "../../shock2vr" }
 
-[target.'cfg(any(target_os = "android", windows))'.dependencies]
+[target.'cfg(any(target_os = "android", windows, target_os = "xbox360"))'.dependencies]
 shock2vr = { path = "../../shock2vr", default-features = false }
+

@@ -12,17 +12,42 @@
 //! Y use mode (inventory cursor), LB cycle ammo, RB gun setting, Back map,
 //! Start pause. While a cursor UI is up the left stick moves the cursor,
 //! A clicks and B right-clicks.
+//!
+//! [`PadState`], its actions and [`Rumble`] don't need SDL: the Xbox 360
+//! runtime fills a `PadState` from XInput (`default-features = false`, no
+//! `sdl` feature) so its pad plays the same.
 
 use std::time::{Duration, Instant};
 
 use cgmath::prelude::*;
 use cgmath::{Vector2, vec2};
+#[cfg(feature = "sdl")]
 use sdl2::GameControllerSubsystem;
-use sdl2::controller::{Axis, Button, GameController};
+#[cfg(feature = "sdl")]
+use sdl2::controller::{Axis, GameController};
+#[cfg(feature = "sdl")]
 use sdl2::event::Event;
 use shock2vr::haptics::HapticPulse;
 use shock2vr::input::{InputAction, InputActionState};
+#[cfg(feature = "sdl")]
 use tracing::{info, warn};
+
+/// A controller's buttons, by their Xbox names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    A,
+    B,
+    X,
+    Y,
+    Back,
+    Start,
+    LeftShoulder,
+    RightShoulder,
+    DPadUp,
+    DPadDown,
+    DPadLeft,
+    DPadRight,
+}
 
 /// Right-stick look speed at full deflection and sensitivity 1x.
 pub const PAD_LOOK_DEGREES_PER_SECOND: f32 = 180.0;
@@ -42,20 +67,39 @@ const PAD_ACTIONS: [(Button, InputAction); 7] = [
     (Button::DPadUp, InputAction::ReadLastUnreadLog),
 ];
 
-const READ_BUTTONS: [Button; 12] = [
-    Button::A,
-    Button::B,
-    Button::X,
-    Button::Y,
-    Button::Back,
-    Button::Start,
-    Button::LeftShoulder,
-    Button::RightShoulder,
-    Button::DPadUp,
-    Button::DPadDown,
-    Button::DPadLeft,
-    Button::DPadRight,
-];
+#[cfg(feature = "sdl")]
+const READ_BUTTONS: [(sdl2::controller::Button, Button); 12] = {
+    use sdl2::controller::Button as Sdl;
+    [
+        (Sdl::A, Button::A),
+        (Sdl::B, Button::B),
+        (Sdl::X, Button::X),
+        (Sdl::Y, Button::Y),
+        (Sdl::Back, Button::Back),
+        (Sdl::Start, Button::Start),
+        (Sdl::LeftShoulder, Button::LeftShoulder),
+        (Sdl::RightShoulder, Button::RightShoulder),
+        (Sdl::DPadUp, Button::DPadUp),
+        (Sdl::DPadDown, Button::DPadDown),
+        (Sdl::DPadLeft, Button::DPadLeft),
+        (Sdl::DPadRight, Button::DPadRight),
+    ]
+};
+
+/// A stick's axes, -1..1 with +y forward, through the deadzone.
+pub fn stick(x: f32, y: f32) -> Vector2<f32> {
+    let v = vec2(x, y);
+    if v.magnitude() < STICK_DEADZONE {
+        Vector2::zero()
+    } else {
+        v
+    }
+}
+
+/// Whether a trigger, 0..1, counts as pulled.
+pub fn trigger(value: f32) -> bool {
+    value > TRIGGER_THRESHOLD
+}
 
 /// One frame of a game controller.
 #[derive(Clone, Debug)]
@@ -81,26 +125,24 @@ impl Default for PadState {
 }
 
 impl PadState {
+    #[cfg(feature = "sdl")]
     pub fn read(controller: Option<&GameController>) -> PadState {
         let Some(c) = controller else {
             return PadState::default();
         };
         let axis = |a: Axis| f32::from(c.axis(a)) / 32767.0;
-        let stick = |x: Axis, y: Axis| {
-            // SDL's +y is down; the game's sticks read +y as forward.
-            let v = vec2(axis(x), -axis(y));
-            if v.magnitude() < STICK_DEADZONE {
-                Vector2::zero()
-            } else {
-                v
-            }
-        };
+        // SDL's +y is down; the game's sticks read +y as forward.
+        let sdl_stick = |x: Axis, y: Axis| stick(axis(x), -axis(y));
         PadState {
-            left_stick: stick(Axis::LeftX, Axis::LeftY),
-            right_stick: stick(Axis::RightX, Axis::RightY),
-            left_trigger: axis(Axis::TriggerLeft) > TRIGGER_THRESHOLD,
-            right_trigger: axis(Axis::TriggerRight) > TRIGGER_THRESHOLD,
-            buttons: READ_BUTTONS.into_iter().filter(|&b| c.button(b)).collect(),
+            left_stick: sdl_stick(Axis::LeftX, Axis::LeftY),
+            right_stick: sdl_stick(Axis::RightX, Axis::RightY),
+            left_trigger: trigger(axis(Axis::TriggerLeft)),
+            right_trigger: trigger(axis(Axis::TriggerRight)),
+            buttons: READ_BUTTONS
+                .into_iter()
+                .filter(|&(sdl, _)| c.button(sdl))
+                .map(|(_, b)| b)
+                .collect(),
         }
     }
 
@@ -210,7 +252,7 @@ impl Rumble {
     }
 
     /// The command to send the pad this frame, if its motors changed.
-    fn command(&mut self, now: Instant) -> Option<(u16, u16, u32)> {
+    pub fn command(&mut self, now: Instant) -> Option<(u16, u16, u32)> {
         let (low, high, remaining) = self.output(now);
         if (low, high) == self.sent {
             return None;
@@ -220,13 +262,14 @@ impl Rumble {
     }
 
     /// Silence the motors; the next [`Rumble::command`] sends the stop.
-    fn stop(&mut self) {
+    pub fn stop(&mut self) {
         self.motors = Default::default();
     }
 }
 
 /// The connected pads. The first one connected plays; the rest stay open so
 /// unplugging it hands control to the next.
+#[cfg(feature = "sdl")]
 pub struct Gamepads {
     subsystem: Option<GameControllerSubsystem>,
     pads: Vec<GameController>,
@@ -234,6 +277,7 @@ pub struct Gamepads {
     rumble: Rumble,
 }
 
+#[cfg(feature = "sdl")]
 impl Gamepads {
     pub fn new(sdl: &sdl2::Sdl) -> Gamepads {
         let subsystem = match sdl.game_controller() {
