@@ -25,7 +25,9 @@ use glfw::MouseButton;
 use shock2vr::input::InputActionState;
 use shock2vr::input_context::InputContext;
 
+mod controllers;
 mod input_mapper;
+use gamepad::PadState;
 use input_mapper::DesktopInputMapper;
 use shock2vr::time::Time;
 use std::collections::HashSet;
@@ -432,6 +434,9 @@ pub fn main() {
     let mut action_state = InputActionState::new();
     // The Options menu's fullscreen / vsync, as last applied to the window.
     let mut applied_display: Option<(bool, bool)> = None;
+    // Game controllers come through SDL (no SDL window: GLFW keeps the
+    // window), the same pad code and rumble the SDL runtime uses.
+    let mut controllers = controllers::Controllers::new();
 
     let _mode = Mode::Gameplay;
     // render loop
@@ -473,8 +478,10 @@ pub fn main() {
             cursor_visible = wants_pointer;
         }
 
+        let pad = controllers.poll(wants_pointer, &mut action_state);
         let mut input_context = process_events(
             &mut window,
+            &pad,
             &mut camera_context,
             &mut hand_context,
             &events,
@@ -513,6 +520,16 @@ pub fn main() {
                         0.0
                     };
             }
+            // Pad triggers: RT fires, LT uses (not while a cursor UI is up,
+            // where A/B are the cursor's buttons).
+            if !wants_pointer {
+                if pad.right_trigger {
+                    input_context.right_hand.trigger_value = 1.0;
+                }
+                if pad.left_trigger {
+                    input_context.right_hand.squeeze_value = 1.0;
+                }
+            }
         }
 
         let time = Time {
@@ -524,6 +541,7 @@ pub fn main() {
             "game.update",
             game.update(&time, &input_context, &mut action_state)
         );
+        controllers.rumble(game.take_haptics());
 
         // A scene may request quitting (e.g. the main menu's Quit item).
         if game.should_quit() {
@@ -675,6 +693,7 @@ fn parse_mission(mission: &str) -> (String, SpawnLocation) {
 fn process_events(
     //audio: &mut AudioContext,
     window: &mut glfw::Window,
+    pad: &PadState,
     camera_context: &mut CameraContext,
     hand_context: &mut HandContext,
     events: &GlfwReceiver<(f64, glfw::WindowEvent)>,
@@ -732,6 +751,13 @@ fn process_events(
     let look_scale = MOUSE_DEGREES_PER_PIXEL * pc.mouse_sensitivity;
     rot_yaw *= look_scale;
     rot_pitch *= look_scale * if pc.invert_mouse_y { -1.0 } else { 1.0 };
+    if !wants_pointer {
+        // Right stick look: degrees per second, so it is frame-rate
+        // independent like the mouse. Stick +y is up, pitch is positive down.
+        let pad_scale = gamepad::PAD_LOOK_DEGREES_PER_SECOND * pc.mouse_sensitivity * delta_time;
+        rot_yaw += pad.right_stick.x * pad_scale;
+        rot_pitch -= pad.right_stick.y * pad_scale * if pc.invert_mouse_y { -1.0 } else { 1.0 };
+    }
 
     let mouse_pressed = |button| window.get_mouse_button(button) == Action::Press;
     let look_target = mouse_look_target(
@@ -841,11 +867,16 @@ fn process_events(
         left_thumbstick_value *= 2.0;
         right_thumbstick_value *= 2.0;
     }
+    if !wants_pointer {
+        right_thumbstick_value += pad.left_stick;
+    }
 
     let mut input_context = InputContext::default();
     if presentation == shock2vr::PresentationMode::Flat && !wants_pointer && !is_alt_pressed {
-        input_context.lean = f32_from_bool(window.get_key(Key::E) == Action::Press)
-            - f32_from_bool(window.get_key(Key::Q) == Action::Press);
+        input_context.lean = (f32_from_bool(window.get_key(Key::E) == Action::Press)
+            - f32_from_bool(window.get_key(Key::Q) == Action::Press)
+            + pad.lean())
+        .clamp(-1.0, 1.0);
     }
     let head_rotation = camera_rotation(camera_context);
     input_context.head.rotation = head_rotation;
@@ -874,6 +905,18 @@ fn process_events(
 
     // Flatscreen UI (menus) reads an absolute 2D pointer rather than the VR
     // hands. The cursor is in Normal mode here, so positions are window coords.
+    if wants_pointer && pad.left_stick != vec2(0.0, 0.0) {
+        // The left stick nudges the OS cursor, so a pad alone can work menus.
+        // Moving the real cursor keeps the mouse and the pad in agreement.
+        if let Some(position) = camera_context.mouse_position.as_mut() {
+            let (w, h) = window.get_size();
+            let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+            let speed = gamepad::PAD_POINTER_SPEED * delta_time;
+            position.x = (position.x + pad.left_stick.x * speed * w).clamp(0.0, w);
+            position.y = (position.y - pad.left_stick.y * speed * h).clamp(0.0, h);
+            window.set_cursor_pos(position.x as f64, position.y as f64);
+        }
+    }
     if wants_pointer {
         if let Some(MousePosition { x, y }) = &camera_context.mouse_position {
             input_context.pointer = Some(shock2vr::input_context::Pointer2D {
@@ -881,14 +924,18 @@ fn process_events(
                     let (w, h) = window.get_size();
                     vec2(x / w.max(1) as f32, y / h.max(1) as f32)
                 },
-                secondary: window.get_mouse_button(MouseButton::Button2) == Action::Press,
-                pressed: window.get_mouse_button(MouseButton::Button1) == Action::Press,
+                secondary: window.get_mouse_button(MouseButton::Button2) == Action::Press
+                    || pad.pointer_secondary(),
+                pressed: window.get_mouse_button(MouseButton::Button1) == Action::Press
+                    || pad.pointer_pressed(),
             });
         }
     }
 
-    input_context.crouch = window.get_key(Key::LeftControl) == Action::Press;
-    input_context.jump = window.get_key(Key::Space) == Action::Press;
+    let pad_body = !wants_pointer;
+    input_context.crouch =
+        window.get_key(Key::LeftControl) == Action::Press || (pad_body && pad.crouch());
+    input_context.jump = window.get_key(Key::Space) == Action::Press || (pad_body && pad.jump());
 
     // Discrete actions (spawn, save/load, inventory, pathfinding test) are
     // handled by the mapper, which edge-detects key presses.

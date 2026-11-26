@@ -227,6 +227,27 @@ lean including roll. The maximum roll remains 7 degrees. Like other developer
 parameters, the value resets when the app restarts. The debug API can set it via
 `POST /v1/dev-params` with `{"key":"flat_lean_distance","value":2.0}`.
 
+### Gamepad and rumble
+
+Both flatscreen runtimes (`desktop_runtime` and `sdl_runtime`) read game
+controllers through SDL2's GameController API, from the shared
+`runtimes/gamepad` crate, so the layout and rumble match. The GLFW desktop
+runtime starts SDL without video purely for this; if SDL cannot start, the game
+runs on mouse and keyboard as before. The first connected pad plays, and pads
+can be plugged in or out at any time.
+
+Left stick moves, right stick looks (scaled by mouse sensitivity and invert),
+RT fires, LT uses, A jumps, B crouches, X reloads, Y toggles use mode, Start
+pauses, Back opens the map, LB/RB cycle ammo and fire mode, D-pad left/right
+leans and D-pad up reads the last unread log. While a cursor UI is up, the left
+stick moves the cursor, A clicks and B right-clicks.
+
+Rumble plays the game's per-hand `HapticPulse`s (`App::take_haptics`): the left
+hand drives the low-frequency motor, the right hand the high-frequency one.
+Flat play pulses the right hand on every shot and both hands when the player is
+hurt, scaled by the damage actually taken. Turn it off with **Options →
+Controls → Gamepad rumble** (`pc.gamepad_rumble` in `user-settings.json`).
+
 ### Roomscale VR
 
 **Options → Comfort → Roomscale** (`Auto` / `On` / `Off`, saved as
