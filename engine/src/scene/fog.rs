@@ -14,10 +14,14 @@ use crate::gfx;
 /// Fragment-side helper; materials multiply their lit colour by it.
 pub const GLSL: &str = r#"
 uniform highp vec4 fogEyeDensity;
+// One return: the Xbox 360's shader compiler inlines only single-exit functions.
 highp float fogFactor(highp vec3 worldPos) {
-    if (fogEyeDensity.w <= 0.0) return 1.0;
-    highp float d = distance(worldPos, fogEyeDensity.xyz);
-    return max(exp(-fogEyeDensity.w * d), 0.12);
+    highp float fog = 1.0;
+    if (fogEyeDensity.w > 0.0) {
+        highp float d = distance(worldPos, fogEyeDensity.xyz);
+        fog = max(exp(-fogEyeDensity.w * d), 0.12);
+    }
+    return fog;
 }
 "#;
 

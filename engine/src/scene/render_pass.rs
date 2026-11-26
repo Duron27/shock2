@@ -115,18 +115,22 @@ vec4 sampleMaterialPass(sampler2D tex, vec2 uv, vec3 position, vec3 normal) {
     if (materialPassEnabled && materialPassForceOpaque) pixel.a = 1.0;
     return pixel;
 }
+// One return: the Xbox 360's shader compiler inlines only single-exit functions.
 vec4 applyMaterialPass(vec4 lit, vec4 texel, vec3 position, vec3 normal) {
-    if (!materialPassEnabled) return lit;
-    float alpha = materialPassAlpha;
-    if (materialPassIncidence) {
-        vec3 ray = materialPassEye - position;
-        // 25AE's shipped DarkMaterial.inc uses inverse incidence angle and red LUT channel.
-        float angle = acos(clamp(dot(normalize(normal), normalize(ray)), -1.0, 1.0));
-        vec2 uv = vec2(1.0 - angle / 1.57079632679, length(ray) / materialPassMaxDistance);
-        alpha *= texture(materialPassRamp, clamp(uv, 0.0, 1.0)).r;
+    vec4 passColor = lit;
+    if (materialPassEnabled) {
+        float alpha = materialPassAlpha;
+        if (materialPassIncidence) {
+            vec3 ray = materialPassEye - position;
+            // 25AE's shipped DarkMaterial.inc uses inverse incidence angle and red LUT channel.
+            float angle = acos(clamp(dot(normalize(normal), normalize(ray)), -1.0, 1.0));
+            vec2 uv = vec2(1.0 - angle / 1.57079632679, length(ray) / materialPassMaxDistance);
+            alpha *= texture(materialPassRamp, clamp(uv, 0.0, 1.0)).r;
+        }
+        passColor = vec4((materialPassShaded && !materialPassCubeEnabled ? lit.rgb : texel.rgb) * materialPassColor,
+            texel.a * alpha);
     }
-    return vec4((materialPassShaded && !materialPassCubeEnabled ? lit.rgb : texel.rgb) * materialPassColor,
-        texel.a * alpha);
+    return passColor;
 }
 "#;
 

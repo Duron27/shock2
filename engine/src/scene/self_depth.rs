@@ -31,16 +31,20 @@ uniform highp sampler2DArray selfDepthTexture;
 uniform highp sampler2D selfDepthTexture;
 #endif
 uniform ivec2 selfDepthOrigin;
+// One return: the Xbox 360's shader compiler inlines only single-exit functions.
 bool hiddenBySelfDepth() {
-    if (!selfDepthEnabled) return false;
-    ivec2 texel = ivec2(gl_FragCoord.xy) - selfDepthOrigin;
+    bool hidden = false;
+    if (selfDepthEnabled) {
+        ivec2 texel = ivec2(gl_FragCoord.xy) - selfDepthOrigin;
 #ifdef MULTIVIEW
-    highp float nearest = texelFetch(selfDepthTexture, ivec3(texel, int(gl_ViewID_OVR)), 0).r;
+        highp float nearest = texelFetch(selfDepthTexture, ivec3(texel, int(gl_ViewID_OVR)), 0).r;
 #else
-    highp float nearest = texelFetch(selfDepthTexture, texel, 0).r;
+        highp float nearest = texelFetch(selfDepthTexture, texel, 0).r;
 #endif
-    // One depth24 quantization step, plus rounding between the two draws.
-    return gl_FragCoord.z > nearest + 0.00000012;
+        // One depth24 quantization step, plus rounding between the two draws.
+        hidden = gl_FragCoord.z > nearest + 0.00000012;
+    }
+    return hidden;
 }
 "#;
 

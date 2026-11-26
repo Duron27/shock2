@@ -22,12 +22,16 @@ uniform vec3 incidenceEye;
 uniform vec3 incidenceTint;
 uniform bool incidenceUnlit;
 uniform bool incidenceGeometricNormal;
+// One return: the Xbox 360's shader compiler inlines only single-exit functions.
 vec4 applyIncidence(vec4 lit, vec4 texel, vec3 position, vec3 normal) {
-    if (!incidenceEnabled) return lit;
-    vec3 surfaceNormal = incidenceGeometricNormal ? cross(dFdx(position), dFdy(position)) : normal;
-    float facing = clamp(abs(dot(normalize(surfaceNormal), normalize(incidenceEye - position))), 0.0, 1.0);
-    float alpha = texture(incidenceRamp, vec2(facing, 0.5)).r;
-    return vec4((incidenceUnlit ? texel.rgb : lit.rgb) * incidenceTint, lit.a * alpha);
+    vec4 result = lit;
+    if (incidenceEnabled) {
+        vec3 surfaceNormal = incidenceGeometricNormal ? cross(dFdx(position), dFdy(position)) : normal;
+        float facing = clamp(abs(dot(normalize(surfaceNormal), normalize(incidenceEye - position))), 0.0, 1.0);
+        float alpha = texture(incidenceRamp, vec2(facing, 0.5)).r;
+        result = vec4((incidenceUnlit ? texel.rgb : lit.rgb) * incidenceTint, lit.a * alpha);
+    }
+    return result;
 }
 "#;
 

@@ -126,53 +126,59 @@ vec3 shineHighlight(vec3 radiance, vec3 lightDir, vec3 normal, vec3 position, fl
 }
 
 // `specular` is the summed highlight of every light.
+// One return: the Xbox 360's shader compiler inlines only single-exit functions.
 vec4 applyShine(vec4 base, vec3 light, vec3 specular, float opacity, vec2 uv, vec3 position, vec3 normal) {
-    if (!shineEnabled) return base;
-    vec4 mask = texture(shineMask, uv);
-    // A separate pass would alpha-test its own bitmap.
-    if (mask.a < 0.1 && !shineHighlights() && shineReflection <= 0.0) return base;
-    vec3 toEye = normalize(shineEye - position);
-    float facing = clamp(abs(dot(normal, toEye)), 0.0, 1.0);
-    float alpha = mask.a < 0.1 ? 0.0 : mask.a * opacity * texture(shineRamp, vec2(facing, 0.5)).r;
-    vec3 shine = min((shineUnlit ? mask.rgb : mask.rgb * light) * shineTint, vec3(1.0));
-    // The whole surface is wet, in the mask's colour; its sparse alpha marks
-    // the glossiest glints. The ramp only shapes the authored sheen.
-    float gloss = mix(SHINE_BASE_GLOSS, 1.0, mask.a) * opacity;
-    vec3 highlight = mask.rgb * gloss * specular * shineSpecular;
-    // Uniform per draw: surfaces without veins skip the extra sample.
-    vec3 veins = vec3(1.0);
-    if (shineVeinStrength > 0.0) {
-        float vein = texture(shineVeins, uv * shineVeinScale).r;
-        // Sharpening thresholds the soft ridge into a thin, hard-edged line.
-        float edge = mix(0.35, 0.04, shineVeinSharpness);
-        vein = mix(vein, smoothstep(0.55 - edge, 0.55 + edge, vein), shineVeinSharpness);
-        // Tint the ridge toward the surface's own hue so it reads wet, not white.
-        vec3 hue = mask.rgb / max(max(mask.r, max(mask.g, mask.b)), 1e-3);
-        vec3 ridge = (SHINE_VEIN_BASE + vein * SHINE_VEIN_GAIN) * mix(vec3(1.0), hue, 0.35);
-        veins = mix(vec3(1.0), ridge, min(shineVeinStrength, 1.0));
-        highlight *= veins;
+    vec4 shaded = base;
+    if (shineEnabled) {
+        vec4 mask = texture(shineMask, uv);
+        // A separate pass would alpha-test its own bitmap.
+        if (!(mask.a < 0.1 && !shineHighlights() && shineReflection <= 0.0)) {
+            vec3 toEye = normalize(shineEye - position);
+            float facing = clamp(abs(dot(normal, toEye)), 0.0, 1.0);
+            float alpha = mask.a < 0.1 ? 0.0 : mask.a * opacity * texture(shineRamp, vec2(facing, 0.5)).r;
+            vec3 shine = min((shineUnlit ? mask.rgb : mask.rgb * light) * shineTint, vec3(1.0));
+            // The whole surface is wet, in the mask's colour; its sparse alpha marks
+            // the glossiest glints. The ramp only shapes the authored sheen.
+            float gloss = mix(SHINE_BASE_GLOSS, 1.0, mask.a) * opacity;
+            vec3 highlight = mask.rgb * gloss * specular * shineSpecular;
+            // Uniform per draw: surfaces without veins skip the extra sample.
+            vec3 veins = vec3(1.0);
+            if (shineVeinStrength > 0.0) {
+                float vein = texture(shineVeins, uv * shineVeinScale).r;
+                // Sharpening thresholds the soft ridge into a thin, hard-edged line.
+                float edge = mix(0.35, 0.04, shineVeinSharpness);
+                vein = mix(vein, smoothstep(0.55 - edge, 0.55 + edge, vein), shineVeinSharpness);
+                // Tint the ridge toward the surface's own hue so it reads wet, not white.
+                vec3 hue = mask.rgb / max(max(mask.r, max(mask.g, mask.b)), 1e-3);
+                vec3 ridge = (SHINE_VEIN_BASE + vein * SHINE_VEIN_GAIN) * mix(vec3(1.0), hue, 0.35);
+                veins = mix(vec3(1.0), ridge, min(shineVeinStrength, 1.0));
+                highlight *= veins;
+            }
+            if (shineReflection > 0.0) {
+                vec3 mirrored = reflect(-toEye, normal);
+                vec3 seen = textureLod(shineEnvironment, environmentDirection(mirrored), REFLECTION_LOD).rgb;
+                float fresnel = mix(REFLECTION_F0, 1.0, pow(1.0 - facing, 5.0));
+                // The capture is a lit photograph of the deck; the light that actually
+                // reaches this surface keeps a dark room from reflecting a bright one.
+                highlight += seen * mask.rgb * min(light, vec3(1.0)) * fresnel * gloss * shineReflection
+                    * mix(vec3(1.0), veins, SHINE_VEIN_REFLECTION);
+            }
+            // Each stacked pass blended onto a clamped framebuffer.
+            vec3 color = min(base.rgb, vec3(1.0));
+            if (shineAlphaBlend) {
+                float covered = 1.0 - pow(1.0 - alpha, shinePasses);
+                float outAlpha = base.a * (1.0 - covered) + covered;
+                vec3 blended = color * base.a * (1.0 - covered) + shine * covered + highlight;
+                shaded = vec4(blended / max(outAlpha, 1.0 / 255.0), outAlpha);
+            } else {
+                float coverage = max(base.a, 1.0 / 255.0);
+                // The blend scales colour by the base's coverage; an additive pass does
+                // not. Exact until a faded base's pre-divided colour saturates.
+                shaded = vec4(color + (shinePasses * shine * alpha + highlight) / coverage, base.a);
+            }
+        }
     }
-    if (shineReflection > 0.0) {
-        vec3 mirrored = reflect(-toEye, normal);
-        vec3 seen = textureLod(shineEnvironment, environmentDirection(mirrored), REFLECTION_LOD).rgb;
-        float fresnel = mix(REFLECTION_F0, 1.0, pow(1.0 - facing, 5.0));
-        // The capture is a lit photograph of the deck; the light that actually
-        // reaches this surface keeps a dark room from reflecting a bright one.
-        highlight += seen * mask.rgb * min(light, vec3(1.0)) * fresnel * gloss * shineReflection
-            * mix(vec3(1.0), veins, SHINE_VEIN_REFLECTION);
-    }
-    // Each stacked pass blended onto a clamped framebuffer.
-    vec3 color = min(base.rgb, vec3(1.0));
-    if (shineAlphaBlend) {
-        float covered = 1.0 - pow(1.0 - alpha, shinePasses);
-        float outAlpha = base.a * (1.0 - covered) + covered;
-        vec3 blended = color * base.a * (1.0 - covered) + shine * covered + highlight;
-        return vec4(blended / max(outAlpha, 1.0 / 255.0), outAlpha);
-    }
-    float coverage = max(base.a, 1.0 / 255.0);
-    // The blend scales colour by the base's coverage; an additive pass does
-    // not. Exact until a faded base's pre-divided colour saturates.
-    return vec4(color + (shinePasses * shine * alpha + highlight) / coverage, base.a);
+    return shaded;
 }
 "#;
 

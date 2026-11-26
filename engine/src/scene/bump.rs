@@ -19,23 +19,28 @@ float bumpHeight(sampler2D tex, vec2 uv) {
     return dot(texture(tex, uv).rgb, vec3(0.299, 0.587, 0.114));
 }
 // `depth` is how deep, in world units, full black sits below full white.
+// One return: the Xbox 360's shader compiler inlines only single-exit functions.
 vec3 bumpNormal(sampler2D tex, vec2 uv, highp vec3 pos, vec3 n, float depth) {
-    if (bumpStrength <= 0.0) return n;
-    vec2 duvdx = dFdx(uv);
-    vec2 duvdy = dFdy(uv);
-    highp vec3 dpdx = dFdx(pos);
-    highp vec3 dpdy = dFdy(pos);
-    // Height change across one pixel, sampled per pixel (not per 2x2 quad,
-    // which would show as blocks).
-    float h = bumpHeight(tex, uv);
-    float dhdx = (bumpHeight(tex, uv + duvdx) - h) * depth * bumpStrength;
-    float dhdy = (bumpHeight(tex, uv + duvdy) - h) * depth * bumpStrength;
-    highp vec3 r1 = cross(dpdy, n);
-    highp vec3 r2 = cross(n, dpdx);
-    highp float det = dot(dpdx, r1);
-    if (abs(det) < 1e-12) return n;
-    highp vec3 grad = sign(det) * (dhdx * r1 + dhdy * r2);
-    return normalize(abs(det) * n - grad);
+    vec3 bumped = n;
+    if (bumpStrength > 0.0) {
+        vec2 duvdx = dFdx(uv);
+        vec2 duvdy = dFdy(uv);
+        highp vec3 dpdx = dFdx(pos);
+        highp vec3 dpdy = dFdy(pos);
+        // Height change across one pixel, sampled per pixel (not per 2x2 quad,
+        // which would show as blocks).
+        float h = bumpHeight(tex, uv);
+        float dhdx = (bumpHeight(tex, uv + duvdx) - h) * depth * bumpStrength;
+        float dhdy = (bumpHeight(tex, uv + duvdy) - h) * depth * bumpStrength;
+        highp vec3 r1 = cross(dpdy, n);
+        highp vec3 r2 = cross(n, dpdx);
+        highp float det = dot(dpdx, r1);
+        if (abs(det) >= 1e-12) {
+            highp vec3 grad = sign(det) * (dhdx * r1 + dhdy * r2);
+            bumped = normalize(abs(det) * n - grad);
+        }
+    }
+    return bumped;
 }
 "#;
 

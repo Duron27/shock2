@@ -131,63 +131,59 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
         const float SOURCE_RADIUS = 0.8;
 
         // Calculate spotlight contribution
+        // One return: the Xbox 360's shader compiler inlines only single-exit
+        // functions. Each early-out is a branch around the rest instead.
         vec3 calculateSpotlight(int i, highp vec3 worldPos, vec3 normal, vec3 texColor, inout vec3 specular, float power) {
-            // Skip if light has zero intensity
-            if (spotlightColorIntensity[i].w <= 0.0) {
-                return vec3(0.0);
-            }
-
+            vec3 lit = vec3(0.0);
             highp vec3 lightVec = spotlightPos[i] - worldPos;
             highp float distance = length(lightVec);
+            // Skip a light with zero intensity, or out of range.
+            if (spotlightColorIntensity[i].w > 0.0 && !(distance > spotlightRange[i])) {
+                highp vec3 lightDir = lightVec / max(distance, 0.00001);
 
-            // Range check
-            if (distance > spotlightRange[i]) {
-                return vec3(0.0);
-            }
+                // Cone attenuation. A negative inner angle marks a point light -
+                // it has no cone, so it lights every direction equally.
+                highp float coneAttenuation = 1.0;
+                bool inCone = true;
+                if (spotlightInnerAngle[i] >= 0.0) {
+                    highp float cosOuterCone = cos(spotlightOuterAngle[i]);
+                    highp float cosInnerCone = cos(spotlightInnerAngle[i]);
+                    highp float spotFactor = dot(-lightDir, normalize(spotlightDirection[i]));
 
-            highp vec3 lightDir = lightVec / max(distance, 0.00001);
-
-            // Cone attenuation. A negative inner angle marks a point light -
-            // it has no cone, so it lights every direction equally.
-            highp float coneAttenuation = 1.0;
-            if (spotlightInnerAngle[i] >= 0.0) {
-                highp float cosOuterCone = cos(spotlightOuterAngle[i]);
-                highp float cosInnerCone = cos(spotlightInnerAngle[i]);
-                highp float spotFactor = dot(-lightDir, normalize(spotlightDirection[i]));
-
-                if (spotFactor < cosOuterCone) {
-                    return vec3(0.0);
+                    inCone = !(spotFactor < cosOuterCone);
+                    if (lightFalloffMode[i] == 0) {
+                        coneAttenuation = flashlightCone(spotFactor, cosInnerCone, cosOuterCone);
+                    } else if (spotFactor < cosInnerCone) {
+                        // Preserve the mission's authored spotlight profile.
+                        coneAttenuation = (spotFactor - cosOuterCone) / (cosInnerCone - cosOuterCone);
+                    }
                 }
 
-                if (lightFalloffMode[i] == 0) {
-                    coneAttenuation = flashlightCone(spotFactor, cosInnerCone, cosOuterCone);
-                } else if (spotFactor < cosInnerCone) {
-                    // Preserve the mission's authored spotlight profile.
-                    coneAttenuation = (spotFactor - cosOuterCone) / (cosInnerCone - cosOuterCone);
+                if (inCone) {
+                    // Distance attenuation
+                    highp float distanceAttenuation;
+                    if (lightFalloffMode[i] == 1) {
+                        distanceAttenuation = 1.0 / max(distance, SOURCE_RADIUS);
+                    } else {
+                        distanceAttenuation = flashlightDistance(distance, spotlightRange[i]);
+                    }
+
+                    // Diffuse lighting, optionally wrapped past the terminator so a
+                    // surface facing away is lifted rather than black.
+                    float ndl = dot(normal, lightDir);
+                    float wrap = lightFalloffMode[i] == 1 ? lambertWrap : 0.0;
+                    float lambertian = max((ndl + wrap) / (1.0 + wrap), 0.0);
+
+                    vec3 radiance = spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
+                                    * coneAttenuation * distanceAttenuation
+                                    * pointShadowVisibility(lightShadowSlot[i], 0, worldPos, normal);
+                    if (shineHighlights()) {
+                        specular += shineHighlight(radiance, lightDir, normal, worldPos, power);
+                    }
+                    lit = texColor * radiance * lambertian;
                 }
             }
-
-            // Distance attenuation
-            highp float distanceAttenuation;
-            if (lightFalloffMode[i] == 1) {
-                distanceAttenuation = 1.0 / max(distance, SOURCE_RADIUS);
-            } else {
-                distanceAttenuation = flashlightDistance(distance, spotlightRange[i]);
-            }
-
-            // Diffuse lighting, optionally wrapped past the terminator so a
-            // surface facing away is lifted rather than black.
-            float ndl = dot(normal, lightDir);
-            float wrap = lightFalloffMode[i] == 1 ? lambertWrap : 0.0;
-            float lambertian = max((ndl + wrap) / (1.0 + wrap), 0.0);
-
-            vec3 radiance = spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
-                            * coneAttenuation * distanceAttenuation
-                            * pointShadowVisibility(lightShadowSlot[i], 0, worldPos, normal);
-            if (shineHighlights()) {
-                specular += shineHighlight(radiance, lightDir, normal, worldPos, power);
-            }
-            return texColor * radiance * lambertian;
+            return lit;
         }
 
         uniform float heldReflection;

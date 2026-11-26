@@ -79,44 +79,40 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
         uniform highp float spotlightRange[6];
 
         // Calculate spotlight contribution
+        // One return: the Xbox 360's shader compiler inlines only single-exit
+        // functions. Each early-out is a branch around the rest instead.
         vec3 calculateSpotlight(int i, highp vec3 worldPos, vec3 normal, vec3 texColor, inout vec3 specular, float power) {
-            // Skip if light has zero intensity
-            if (spotlightColorIntensity[i].w <= 0.0) {
-                return vec3(0.0);
-            }
-
+            vec3 lit = vec3(0.0);
             highp vec3 lightVec = spotlightPos[i] - worldPos;
             highp float distance = length(lightVec);
+            // Skip a light with zero intensity, or out of range.
+            if (spotlightColorIntensity[i].w > 0.0 && !(distance > spotlightRange[i])) {
+                highp vec3 lightDir = lightVec / max(distance, 0.00001);
 
-            // Range check
-            if (distance > spotlightRange[i]) {
-                return vec3(0.0);
+                // Cone attenuation. A negative inner angle marks a point light -
+                // it has no cone, so it lights every direction equally.
+                highp float coneAttenuation = 1.0;
+                if (spotlightInnerAngle[i] >= 0.0) {
+                    highp float spotFactor = dot(-lightDir, normalize(spotlightDirection[i]));
+                    coneAttenuation = flashlightCone(spotFactor, cos(spotlightInnerAngle[i]), cos(spotlightOuterAngle[i]));
+                }
+
+                // Distance attenuation
+                highp float distanceAttenuation = flashlightDistance(distance, spotlightRange[i]);
+
+                // Diffuse lighting
+                float lambertian = max(dot(normal, lightDir), 0.0);
+
+                if (shineHighlights()) {
+                    vec3 radiance = spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
+                        * coneAttenuation * distanceAttenuation;
+                    specular += shineHighlight(radiance, lightDir, normal, worldPos, power);
+                }
+                // Combine all factors
+                lit = texColor * spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
+                       * lambertian * coneAttenuation * distanceAttenuation;
             }
-
-            highp vec3 lightDir = lightVec / max(distance, 0.00001);
-
-            // Cone attenuation. A negative inner angle marks a point light -
-            // it has no cone, so it lights every direction equally.
-            highp float coneAttenuation = 1.0;
-            if (spotlightInnerAngle[i] >= 0.0) {
-                highp float spotFactor = dot(-lightDir, normalize(spotlightDirection[i]));
-                coneAttenuation = flashlightCone(spotFactor, cos(spotlightInnerAngle[i]), cos(spotlightOuterAngle[i]));
-            }
-
-            // Distance attenuation
-            highp float distanceAttenuation = flashlightDistance(distance, spotlightRange[i]);
-
-            // Diffuse lighting
-            float lambertian = max(dot(normal, lightDir), 0.0);
-
-            if (shineHighlights()) {
-                vec3 radiance = spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
-                    * coneAttenuation * distanceAttenuation;
-                specular += shineHighlight(radiance, lightDir, normal, worldPos, power);
-            }
-            // Combine all factors
-            return texColor * spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
-                   * lambertian * coneAttenuation * distanceAttenuation;
+            return lit;
         }
 
         void main() {
