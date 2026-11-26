@@ -1,0 +1,27 @@
+{
+  "arch": "powerpc",
+  "llvm-target": "powerpc-unknown-none",
+  "data-layout": "E-m:e-p:32:32-Fn32-i64:64-n32",
+  "target-endian": "big",
+  "target-pointer-width": 32,
+  "target-c-int-width": 32,
+  "max-atomic-width": 32,
+  "os": "none",
+  "vendor": "xsdk",
+  "cpu": "ppc",
+  "features": "-altivec,-vsx,-spe",
+  "panic-strategy": "abort",
+  "relocation-model": "static",
+  "position-independent-executables": false,
+  "dynamic-linking": false,
+  "has-thread-local": false,
+  "disable-redzone": true,
+  "function-sections": true,
+  "emit-debug-gdb-scripts": false,
+  "linker-flavor": "gnu-cc",
+  "linker": "powerpc-xsdk-elf-gcc",
+  "metadata": {
+    "description": "Xbox 360 (Xenon) titles linked with xsdk; LLVM's 32-bit SysV PowerPC code behind an explicit -mcall-xsdk boundary (xbox360/README.md)",
+    "std": false
+  }
+}
