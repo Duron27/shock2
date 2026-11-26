@@ -54,6 +54,10 @@ def main():
     import spirv_opt
     # --opt lowers each module after spirv_opt.XOST_PASSES. Tried on 2026-11-26: xost refuses the early return
     # merge-return leaves in an inlined function, so the engine's GLSL keeps one return per function instead.
+    # xost's own optimiser, as build_shaders.py --optimize runs it; --no-optimize leaves it off.
+    optimize = "--no-optimize" not in sys.argv
+    if not optimize:
+        sys.argv.remove("--no-optimize")
     raw = "--opt" not in sys.argv
     if not raw:
         sys.argv.remove("--opt")
@@ -72,7 +76,7 @@ def main():
         entry = {"name": path.name, "stage": stage, "bytes": len(spirv)}
         try:
             for instanced in (False, True):
-                _, literals, resources, clips = bs.lower(xost, spirv, path, instanced=instanced)
+                _, literals, resources, clips = bs.lower(xost, spirv, path, optimize, instanced=instanced)
                 entry.setdefault("resources", len(resources))
                 if stage != "vert" or any(r[0] == "instance" for r in resources):
                     break

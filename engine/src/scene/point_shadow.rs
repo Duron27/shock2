@@ -310,22 +310,29 @@ uniform float pointShadowStrength;
 const highp float POINT_SHADOW_NEAR = 0.5;
 const int POINT_SHADOW_FACE = 512;
 const int POINT_SHADOW_MAX = 4;
+// The atlas: six faces across, a row per set and light.
+const highp vec2 POINT_SHADOW_ATLAS = vec2(6 * POINT_SHADOW_FACE, 2 * POINT_SHADOW_MAX * POINT_SHADOW_FACE);
 
 // Mirrors engine::scene::point_shadow::FACES. One return per function here:
 // the Xbox 360's shader compiler inlines only single-exit functions.
-int pointShadowFace(highp vec3 d, out highp vec3 forward, out highp vec3 up) {
+// The face index is a float: the Xenos ALU has no integer select.
+highp float pointShadowFace(highp vec3 d, out highp vec3 forward, out highp vec3 up) {
     highp vec3 a = abs(d);
-    int face;
+    // Everything starts at face 5's values: xost doesn't follow a value set
+    // only in the arms of nested ifs.
+    highp float face = 5.0;
+    forward = vec3(0.0, 0.0, -1.0);
     up = vec3(0.0, 1.0, 0.0);
     if (a.x >= a.y && a.x >= a.z) {
-        if (d.x >= 0.0) { forward = vec3(1.0, 0.0, 0.0); face = 0; }
-        else { forward = vec3(-1.0, 0.0, 0.0); face = 1; }
+        face = d.x >= 0.0 ? 0.0 : 1.0;
+        forward = vec3(d.x >= 0.0 ? 1.0 : -1.0, 0.0, 0.0);
     } else if (a.y >= a.z) {
-        if (d.y >= 0.0) { forward = vec3(0.0, 1.0, 0.0); up = vec3(0.0, 0.0, 1.0); face = 2; }
-        else { forward = vec3(0.0, -1.0, 0.0); up = vec3(0.0, 0.0, -1.0); face = 3; }
-    } else {
-        if (d.z >= 0.0) { forward = vec3(0.0, 0.0, 1.0); face = 4; }
-        else { forward = vec3(0.0, 0.0, -1.0); face = 5; }
+        face = d.y >= 0.0 ? 2.0 : 3.0;
+        forward = vec3(0.0, d.y >= 0.0 ? 1.0 : -1.0, 0.0);
+        up = vec3(0.0, 0.0, d.y >= 0.0 ? 1.0 : -1.0);
+    } else if (d.z >= 0.0) {
+        face = 4.0;
+        forward = vec3(0.0, 0.0, 1.0);
     }
     return face;
 }
@@ -346,13 +353,13 @@ highp float pointShadowVisibility(int light, int set, highp vec3 worldPos, vec3 
             d += n * (3.0 * dist / float(POINT_SHADOW_FACE));
             highp vec3 forward;
             highp vec3 up;
-            int face = pointShadowFace(d, forward, up);
+            highp float face = pointShadowFace(d, forward, up);
             highp float m = dot(d, forward);
             if (m > POINT_SHADOW_NEAR) {
                 highp vec3 right = cross(forward, up);
                 highp vec2 uv = vec2(dot(d, right), dot(d, up)) / m * 0.5 + 0.5;
                 highp float size = float(POINT_SHADOW_FACE);
-                highp vec2 tile = vec2(float(face), float(set * POINT_SHADOW_MAX + light)) * size;
+                highp vec2 tile = vec2(face, float(set * POINT_SHADOW_MAX + light)) * size;
                 highp vec2 texel = tile + vec2(uv.x, 1.0 - uv.y) * size;
                 highp float n2 = POINT_SHADOW_NEAR;
                 highp float bias = 0.03 + 0.004 * m;
@@ -360,7 +367,12 @@ highp float pointShadowVisibility(int light, int set, highp vec3 worldPos, vec3 
                 for (int dy = -1; dy <= 1; dy++) {
                     for (int dx = -1; dx <= 1; dx++) {
                         highp vec2 t = clamp(texel + vec2(float(dx), float(dy)), tile + 0.5, tile + size - 0.5);
+#ifdef SHOCK_XBOX360
+                        // xost has no texelFetch: the same texel, sampled at its centre.
+                        highp float z = textureLod(pointShadowAtlas, (floor(t) + 0.5) / POINT_SHADOW_ATLAS, 0.0).r * 2.0 - 1.0;
+#else
                         highp float z = texelFetch(pointShadowAtlas, ivec2(t), 0).r * 2.0 - 1.0;
+#endif
                         // The occluder's distance along the face axis.
                         highp float occluder = 2.0 * far * n2 / ((far + n2) - z * (far - n2));
                         lit += m - bias > occluder ? 0.0 : 1.0;

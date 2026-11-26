@@ -144,7 +144,10 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             // casters are not in this set: the lightmap holds their shadows.
             if (!unlit) {
                 highp float baked = max(dot(finalColor, vec3(0.299, 0.587, 0.114)), 0.001);
-                for (int k = 0; k < POINT_SHADOW_MAX; k++) {
+                // Each loop here sums into a local of its own: xost can't carry
+                // into a hardware loop a value an if on a uniform changed.
+                highp float kept = 1.0;
+                for (int k = 0; k < SHOCK_COUNT(POINT_SHADOW_MAX); k++) {
                     highp vec4 lamp = pointShadowLights[k];
                     if (lamp.w <= 0.0) continue;
                     highp vec3 toLamp = lamp.xyz - worldPos;
@@ -160,9 +163,9 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                     // light it stands for; doubling the ratio lets a shadow
                     // take back what a player expects (a dark, readable shape).
                     highp float share = clamp(2.0 * dot(lampLight, vec3(0.299, 0.587, 0.114)) / baked, 0.0, 1.0);
-                    finalColor *= 1.0 - pointShadowStrength * shadow * share;
+                    kept *= 1.0 - pointShadowStrength * shadow * share;
                 }
-                finalColor = max(finalColor, ambientColor);
+                finalColor = max(finalColor * kept, ambientColor);
             }
 
             // The lightmap was baked for the flat face; relight the relief
@@ -172,7 +175,7 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             if (!unlit && bumpStrength > 0.0) {
                 highp vec3 toEyeDir = normalize(fogEyeDensity.xyz - worldPos);
                 vec3 lightDir = toEyeDir * 0.35;
-                for (int k = 0; k < POINT_SHADOW_MAX; k++) {
+                for (int k = 0; k < SHOCK_COUNT(POINT_SHADOW_MAX); k++) {
                     highp vec4 lamp = pointShadowLights[k];
                     if (lamp.w <= 0.0) continue;
                     highp vec3 toLamp = lamp.xyz - worldPos;
@@ -206,7 +209,8 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                     reflected += textureLod(shineEnvironment, environmentDirection(mirrored), 1.2).rgb
                         * fresnel * lit;
                 }
-                for (int k = 0; k < POINT_SHADOW_MAX; k++) {
+                vec3 lampGloss = vec3(0.0);
+                for (int k = 0; k < SHOCK_COUNT(POINT_SHADOW_MAX); k++) {
                     highp vec4 lamp = pointShadowLights[k];
                     if (lamp.w <= 0.0) continue;
                     highp vec3 toLamp = lamp.xyz - worldPos;
@@ -216,18 +220,21 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                     float ndl = max(dot(bumped, l), 0.0);
                     float spec = pow(max(dot(bumped, normalize(l + toEye)), 0.0), 72.0) * ndl;
                     float falloff = 1.0 - distance / lamp.w;
-                    reflected += pointShadowColor[k].rgb * pointShadowColor[k].w
+                    lampGloss += pointShadowColor[k].rgb * pointShadowColor[k].w
                         * spec * falloff * (0.6 + 2.0 * fresnel);
                 }
+                reflected += lampGloss;
                 finalColor += reflected * gloss;
             }
 
             // Add dynamic spotlight contributions on top of baked lighting
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
-            for (int i = 0; i < 6; i++) {
-                finalColor += calculateSpotlight(i, worldPos, bumped, diffuseColor.rgb, specular, power);
+            vec3 spotlights = vec3(0.0);
+            for (int i = 0; i < SHOCK_COUNT(6); i++) {
+                spotlights += calculateSpotlight(i, worldPos, bumped, diffuseColor.rgb, specular, power);
             }
+            finalColor += spotlights;
 
             vec4 base = vec4((unlit ? diffuseColor.rgb : finalColor) * layerColorAlpha.rgb,
                 layerEnabled ? diffuseColor.a * layerColorAlpha.a : 1.0);

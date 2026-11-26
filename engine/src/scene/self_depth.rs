@@ -34,6 +34,8 @@ uniform ivec2 selfDepthOrigin;
 // One return: the Xbox 360's shader compiler inlines only single-exit functions.
 bool hiddenBySelfDepth() {
     bool hidden = false;
+#ifndef SHOCK_XBOX360
+    // Off on the Xbox 360: its pixel shaders get no gl_FragCoord.z.
     if (selfDepthEnabled) {
         ivec2 texel = ivec2(gl_FragCoord.xy) - selfDepthOrigin;
 #ifdef MULTIVIEW
@@ -44,6 +46,7 @@ bool hiddenBySelfDepth() {
         // One depth24 quantization step, plus rounding between the two draws.
         hidden = gl_FragCoord.z > nearest + 0.00000012;
     }
+#endif
     return hidden;
 }
 "#;

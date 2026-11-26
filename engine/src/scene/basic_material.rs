@@ -115,12 +115,9 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 
                 if (inCone) {
                     // Distance attenuation
-                    highp float distanceAttenuation;
-                    if (lightFalloffMode[i] == 1) {
-                        distanceAttenuation = 1.0 / max(distance, SOURCE_RADIUS);
-                    } else {
-                        distanceAttenuation = flashlightDistance(distance, spotlightRange[i]);
-                    }
+                    highp float distanceAttenuation = lightFalloffMode[i] == 1
+                        ? 1.0 / max(distance, SOURCE_RADIUS)
+                        : flashlightDistance(distance, spotlightRange[i]);
 
                     // Diffuse lighting, optionally wrapped past the terminator so a
                     // surface facing away is lifted rather than black.
@@ -130,7 +127,7 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 
                     vec3 radiance = spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
                                     * coneAttenuation * distanceAttenuation
-                                    * pointShadowVisibility(lightShadowSlot[i], 0, worldPos, normal);
+                                    * pointShadowVisibility(int(lightShadowSlot[i]), 0, worldPos, normal);
                     if (shineHighlights()) {
                         specular += shineHighlight(radiance, lightDir, normal, worldPos, power);
                     }
@@ -174,7 +171,7 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             vec3 light = ambientLight * ambientIntensity;
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
-            for (int i = 0; i < 6; i++) {
+            for (int i = 0; i < SHOCK_COUNT(6); i++) {
                 light += calculateSpotlight(i, worldPos, normal, vec3(1.0), specular, power);
             }
             finalColor += texColor.rgb * light * litScale;

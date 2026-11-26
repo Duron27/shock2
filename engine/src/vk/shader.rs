@@ -174,9 +174,55 @@ thread_local! {
 /// writes `gl_Position` once from it: never read back, since the Xbox 360's
 /// shader compiler (xost) can't read an output (xbox360/README.md, "Shaders").
 pub fn to_vulkan_glsl(source: &str, stage: Stage) -> String {
+    to_vulkan_glsl_for(source, stage, Target::HOST)
+}
+
+/// The float uniform the console's `SHOCK_COUNT(n)` loop bounds scale by,
+/// always 1.
+pub const LOOP_SCALE: &str = "shockLoopScale";
+
+/// Which GPU a shader is compiled for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Desktop,
+    /// The Xbox 360, through vulkan4xenon and xost: `SHOCK_XBOX360` is
+    /// defined, and bool and int uniforms are floats ([`console_uniforms`]).
+    Xbox360,
+}
+
+impl Target {
+    pub const HOST: Target = if cfg!(target_os = "xbox360") {
+        Target::Xbox360
+    } else {
+        Target::Desktop
+    };
+}
+
+/// [`to_vulkan_glsl`] for `target`.
+pub fn to_vulkan_glsl_for(source: &str, stage: Stage, target: Target) -> String {
     let mut out = String::from(
         "#version 450\n#define highp\n#define mediump\n#define lowp\n#define SHOCK_VULKAN 1\n",
     );
+    let console;
+    let source = if target == Target::Xbox360 {
+        // xost unrolls a loop of constant count, which the lit shaders' light
+        // loops overflow 64 registers with, and keeps one bounded by int() of
+        // a float uniform as a hardware loop: SHOCK_COUNT(n) is such a bound,
+        // its scale 1 (vk_backend::create_program).
+        out.push_str("#define SHOCK_XBOX360 1\n");
+        // Declared only where used: a program without a uniform block (the
+        // colour grade) has nowhere to put it.
+        if source.contains("SHOCK_COUNT(") {
+            out.push_str(&format!(
+                "uniform float {LOOP_SCALE};\n#define SHOCK_COUNT(n) int({LOOP_SCALE} * float(n))\n"
+            ));
+        }
+        console = console_uniforms(source);
+        console.as_str()
+    } else {
+        out.push_str("#define SHOCK_COUNT(n) (n)\n");
+        source
+    };
     if stage == Stage::Vertex {
         // `invariant gl_Position;` keeps naming the real output, which main still writes.
         let replaced = replace_identifier(source, "gl_Position", "shock_position")
@@ -198,6 +244,46 @@ pub fn to_vulkan_glsl(source: &str, stage: Stage) -> String {
         );
     } else {
         out.push_str(source);
+    }
+    out
+}
+
+/// The console's uniforms: xost reads a block's int or bool only as D3D9 set
+/// HLSL's, a float in its constant register, so each `uniform bool x;`
+/// becomes `uniform float x;` read through `#define x (x != 0.0)`, and each
+/// `uniform int`/`ivecN` a `float`/`vecN`; sources convert an int uniform
+/// with `int()` where they need one. The console backend writes these
+/// uniforms as floats (`vk_backend::set_ints`). One declaration per line.
+fn console_uniforms(source: &str) -> String {
+    let mut out = String::with_capacity(source.len() + 256);
+    for line in source.split_inclusive('\n') {
+        let decl = line.trim();
+        let words: Vec<&str> = decl.trim_end_matches(';').split_whitespace().collect();
+        let (ty, name) = match words.as_slice() {
+            ["uniform", ty, name] if decl.ends_with(';') => (*ty, *name),
+            ["uniform", "highp" | "mediump" | "lowp", ty, name] if decl.ends_with(';') => {
+                (*ty, *name)
+            }
+            _ => {
+                out.push_str(line);
+                continue;
+            }
+        };
+        let float = match ty {
+            "bool" => "float",
+            "int" => "float",
+            "ivec2" => "vec2",
+            "ivec3" => "vec3",
+            "ivec4" => "vec4",
+            _ => {
+                out.push_str(line);
+                continue;
+            }
+        };
+        out.push_str(&format!("uniform {float} {name};\n"));
+        if ty == "bool" && !name.contains('[') {
+            out.push_str(&format!("#define {name} ({name} != 0.0)\n"));
+        }
     }
     out
 }
@@ -315,8 +401,55 @@ pub fn record_program(vertex_source: &str, fragment_source: &str, linked: &Linke
     }
 }
 
+/// With a dump, also compiles the program as the Xbox 360 will and writes
+/// what the console needs into `<dump>/xbox360/`: each source's SPIR-V
+/// (`<source hash>.<stage>.compiled.spv`, the table the console looks its
+/// GLSL up in, having no shaderc) and each module it will hand
+/// vkCreateShaderModule (`<module hash>.<stage>.spv`, which vulkan4xenon
+/// looks its microcode up by), linked unless the program builds its own
+/// layout (`linked` false, the colour grade).
+pub fn record_console_program(vertex_source: &str, fragment_source: &str, linked: bool) {
+    let Some(dir) = shader_dump_dir() else {
+        return;
+    };
+    let dir = dir.join("xbox360");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut modules = Vec::new();
+    for (source, stage) in [
+        (vertex_source, Stage::Vertex),
+        (fragment_source, Stage::Fragment),
+    ] {
+        let base = format!("{:016x}.{}", source_hash(source), stage_suffix(stage));
+        match compile_uncached(source, stage, Target::Xbox360) {
+            Ok(words) => {
+                let _ = std::fs::write(
+                    dir.join(format!("{base}.compiled.spv")),
+                    spirv_bytes(&words),
+                );
+                modules.push(words);
+            }
+            Err(e) => {
+                let _ = std::fs::write(dir.join(format!("{base}.error.txt")), e);
+                return;
+            }
+        }
+    }
+    let fragment = modules.pop().unwrap();
+    let vertex = modules.pop().unwrap();
+    let (vertex, fragment) = if linked {
+        let l = link(vertex, fragment);
+        (l.vertex, l.fragment)
+    } else {
+        (vertex, fragment)
+    };
+    for (words, stage) in [(vertex, Stage::Vertex), (fragment, Stage::Fragment)] {
+        let name = format!("{:016x}.{}.spv", spirv_hash(&words), stage_suffix(stage));
+        let _ = std::fs::write(dir.join(name), spirv_bytes(&words));
+    }
+}
+
 pub fn compile(source: &str, stage: Stage) -> Result<Vec<u32>, String> {
-    let result = compile_uncached(source, stage);
+    let result = compile_uncached(source, stage, Target::HOST);
     if let (Some(dir), Ok(words)) = (shader_dump_dir(), &result) {
         let base = format!("{:016x}.{}", source_hash(source), stage_suffix(stage));
         let _ = std::fs::write(dir.join(format!("{base}.glsl")), source);
@@ -325,8 +458,8 @@ pub fn compile(source: &str, stage: Stage) -> Result<Vec<u32>, String> {
     result
 }
 
-fn compile_uncached(source: &str, stage: Stage) -> Result<Vec<u32>, String> {
-    let glsl = to_vulkan_glsl(source, stage);
+fn compile_uncached(source: &str, stage: Stage, target: Target) -> Result<Vec<u32>, String> {
+    let glsl = to_vulkan_glsl_for(source, stage, target);
     SHADERC.with(|compiler| match compiler {
         Ok(c) => c.compile(&glsl, stage).map_err(|e| {
             let numbered: String = glsl
@@ -744,6 +877,42 @@ mod tests {
         assert!(out.contains("shock_position = vec4(p, 1.0); shock_position.x += 1.0;"));
         assert_eq!(out.matches("gl_Position").count(), 2, "{out}");
         assert!(!out.contains("gl_Position."), "{out}");
+    }
+
+    /// `SHOCK2_CONSOLE_VS=<a.glsl> SHOCK2_CONSOLE_FS=<b.glsl> SHOCK2_CONSOLE_OUT=<dir>
+    /// cargo test -p engine --lib console_link_files -- --ignored`: links a
+    /// dumped program as the Xbox 360 will, into `<dir>/{vert,frag}.spv`, to
+    /// try a source change through xost without running the game.
+    #[test]
+    #[ignore]
+    fn console_link_files() {
+        let read = |k: &str| std::fs::read_to_string(std::env::var(k).expect(k)).expect(k);
+        let out = std::path::PathBuf::from(
+            std::env::var("SHOCK2_CONSOLE_OUT").expect("SHOCK2_CONSOLE_OUT"),
+        );
+        let vs =
+            compile_uncached(&read("SHOCK2_CONSOLE_VS"), Stage::Vertex, Target::Xbox360).unwrap();
+        let fs =
+            compile_uncached(&read("SHOCK2_CONSOLE_FS"), Stage::Fragment, Target::Xbox360).unwrap();
+        let linked = link(vs, fs);
+        std::fs::write(out.join("vert.spv"), spirv_bytes(&linked.vertex)).unwrap();
+        std::fs::write(out.join("frag.spv"), spirv_bytes(&linked.fragment)).unwrap();
+    }
+
+    #[test]
+    fn console_bool_and_int_uniforms_are_floats() {
+        let src = "uniform bool lit;\n  uniform highp int modes[6];\nuniform ivec2 origin;\nuniform float k;\nvoid main() { if (lit) {} }\n";
+        let out = console_uniforms(src);
+        assert!(
+            out.contains("uniform float lit;\n#define lit (lit != 0.0)\n"),
+            "{out}"
+        );
+        assert!(out.contains("uniform float modes[6];\n"), "{out}");
+        assert!(out.contains("uniform vec2 origin;\n"), "{out}");
+        assert!(out.contains("uniform float k;\n"), "{out}");
+        assert!(out.contains("if (lit)"), "{out}");
+        let desktop = to_vulkan_glsl_for(src, Stage::Fragment, Target::Desktop);
+        assert!(desktop.contains("uniform bool lit;") && !desktop.contains("SHOCK_XBOX360"));
     }
 
     #[test]

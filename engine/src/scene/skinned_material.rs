@@ -25,10 +25,16 @@ const UNIFIED_VERTEX_SHADER_SOURCE: &str = r#"
         layout (location = 3) in vec4 bone_weights;
         layout (location = 4) in vec3 inNormal;
 
+#ifndef SHOCK_XBOX360
+        // The Xbox 360 addresses 256 constants a stage, which the palette
+        // (240), these and worldWave overflow, so there the palette comes
+        // premultiplied by world, normals are only renormalized, and `view`
+        // holds projection * view * the world wave (SHOCK_WAVE_IN_VIEW).
         uniform highp mat4 world;
-        uniform highp mat4 view;
-        uniform highp mat4 projection;
         uniform mat3 normalMatrix;
+        uniform highp mat4 projection;
+#endif
+        uniform highp mat4 view;
         // Affine bones packed as 3 vec4 rows each (the mat3x4's columns hold
         // the matrix rows), so the 80-slot palette costs 240 uniform vectors
         // and fits the GLES 3.0 guaranteed vertex budget (256); a mat4 array
@@ -74,13 +80,27 @@ const UNIFIED_VERTEX_SHADER_SOURCE: &str = r#"
             vec3 mod_normal = (length(skinnedNormal) > 0.0) ? normalize(skinnedNormal) : inNormal;
 
             // Transform to world space
+#ifdef SHOCK_XBOX360
+            highp vec4 worldPosition = mod_position;
+            worldNormal = normalize(mod_normal);
+#else
             highp vec4 worldPosition = world * mod_position;
-            worldPos = worldPosition.xyz;
             worldNormal = normalize(normalMatrix * mod_normal);
+#endif
+            worldPos = worldPosition.xyz;
 
+#ifdef SHOCK_XBOX360
+            gl_Position = view * waveWorldPosition(worldPosition);
+#else
             gl_Position = projection * view * waveWorldPosition(worldPosition);
+#endif
         }
 "#;
+
+/// The console's skinned vertex shader takes the world wave in its view
+/// matrix: 256 constants hold the palette and one matrix besides.
+const WAVE_IN_VIEW_ON_CONSOLE: &str =
+    "#ifdef SHOCK_XBOX360\n#define SHOCK_WAVE_IN_VIEW 1\n#endif\n";
 
 pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
         out vec4 fragColor;
@@ -161,12 +181,9 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 
                 if (inCone) {
                     // Distance attenuation
-                    highp float distanceAttenuation;
-                    if (lightFalloffMode[i] == 1) {
-                        distanceAttenuation = 1.0 / max(distance, SOURCE_RADIUS);
-                    } else {
-                        distanceAttenuation = flashlightDistance(distance, spotlightRange[i]);
-                    }
+                    highp float distanceAttenuation = lightFalloffMode[i] == 1
+                        ? 1.0 / max(distance, SOURCE_RADIUS)
+                        : flashlightDistance(distance, spotlightRange[i]);
 
                     // Diffuse lighting, optionally wrapped past the terminator so a
                     // surface facing away is lifted rather than black.
@@ -176,7 +193,7 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 
                     vec3 radiance = spotlightColorIntensity[i].rgb * spotlightColorIntensity[i].w
                                     * coneAttenuation * distanceAttenuation
-                                    * pointShadowVisibility(lightShadowSlot[i], 0, worldPos, normal);
+                                    * pointShadowVisibility(int(lightShadowSlot[i]), 0, worldPos, normal);
                     if (shineHighlights()) {
                         specular += shineHighlight(radiance, lightDir, normal, worldPos, power);
                     }
@@ -220,7 +237,7 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             vec3 light = ambientLight * ambientIntensity;
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
-            for (int i = 0; i < 6; i++) {
+            for (int i = 0; i < SHOCK_COUNT(6); i++) {
                 light += calculateSpotlight(i, worldPos, normal, vec3(1.0), specular, power);
             }
             finalColor += texColor.rgb * light * litScale;
@@ -405,7 +422,15 @@ impl SkinnedMaterial {
 
         // Set basic transformation matrices
         gfx::set_mat4(uniforms.world_loc, &world_matrix);
+        #[cfg(not(target_os = "xbox360"))]
         gfx::set_mat4(uniforms.view_loc, &view_matrix);
+        // The console's shader has no `projection` or `worldWave` (its
+        // constant budget).
+        #[cfg(target_os = "xbox360")]
+        gfx::set_mat4(
+            uniforms.view_loc,
+            &(projection * view_matrix * render_context.world_wave.matrix()),
+        );
         gfx::set_mat4(uniforms.projection_loc, &projection);
         let normal_matrix = crate::scene::material::normal_matrix(world_matrix);
         gfx::set_mat3(uniforms.normal_matrix_loc, &normal_matrix);
@@ -460,6 +485,10 @@ impl SkinnedMaterial {
             .enumerate()
             .take(crate::scene::SKINNING_PALETTE_SIZE)
         {
+            // The console's shader has no `world` (its constant budget):
+            // the bones carry it.
+            #[cfg(target_os = "xbox360")]
+            let mat = &(world_matrix * mat);
             let base = bone * 12;
             for row in 0..3 {
                 packed[base + row * 4] = mat.x[row];
@@ -578,8 +607,12 @@ impl Material for SkinnedMaterial {
     fn initialize(&mut self, _is_opengl_es: bool) {
         let build = |capture| {
             // Build and compile unified shader program with 6-spotlight support for skinned meshes
-            let vertex_shader =
-                &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
+            let vertex_shader = &[
+                WAVE_IN_VIEW_ON_CONSOLE,
+                crate::scene::world_wave::GLSL,
+                UNIFIED_VERTEX_SHADER_SOURCE,
+            ]
+            .concat();
 
             let fragment_shader = &format!(
                 "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",

@@ -1768,6 +1768,7 @@ pub fn create_program(vertex: &str, fragment: &str) -> u32 {
                 .expect("vkCreateShaderModule")
         };
         shader::record_program(vertex, fragment, &linked);
+        shader::record_console_program(vertex, fragment, true);
         shader::record_module(&linked.vertex, shader::Stage::Vertex);
         shader::record_module(&linked.fragment, shader::Stage::Fragment);
         let vertex = module(&linked.vertex);
@@ -1792,6 +1793,13 @@ pub fn create_program(vertex: &str, fragment: &str) -> u32 {
             {
                 blocks[index] = vec![0; *size as usize];
                 for (name, member) in members {
+                    // SHOCK_COUNT's scale, which stays 1 (shader::to_vulkan_glsl_for).
+                    if name == shader::LOOP_SCALE
+                        && let Some(dst) = blocks[index]
+                            .get_mut(member.offset as usize..member.offset as usize + 4)
+                    {
+                        dst.copy_from_slice(&1.0f32.to_ne_bytes());
+                    }
                     let i = slot_for(name, &mut slots);
                     slots[i].members.push((index, *member));
                 }
@@ -1940,8 +1948,18 @@ pub fn set_matrices(uniform: u32, values: &[f32], size: usize) {
     write_uniform(uniform, &bits(values), size, size);
 }
 
+/// An int or bool uniform's word. On the Xbox 360 its shaders declare these
+/// as floats (`shader::Target::Xbox360`), so the value goes in as one.
+fn int_word(i: i32) -> u32 {
+    if cfg!(target_os = "xbox360") {
+        (i as f32).to_bits()
+    } else {
+        i as u32
+    }
+}
+
 pub fn set_ivec(uniform: u32, values: &[i32], components: usize) {
-    let words: Vec<u32> = values.iter().map(|&i| i as u32).collect();
+    let words: Vec<u32> = values.iter().map(|&i| int_word(i)).collect();
     write_uniform(uniform, &words, components, 1);
 }
 
@@ -1963,7 +1981,7 @@ pub fn set_ints(uniform: u32, values: &[i32]) {
     })
     .flatten();
     if sampler.is_none() {
-        let words: Vec<u32> = values.iter().map(|&i| i as u32).collect();
+        let words: Vec<u32> = values.iter().map(|&i| int_word(i)).collect();
         write_uniform(uniform, &words, 1, 1);
     }
 }

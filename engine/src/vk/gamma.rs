@@ -37,9 +37,27 @@ layout(push_constant) uniform GammaPush {
     float danger;
     float bloom;
     float streak;
+#ifdef SHOCK_XBOX360
+    // xost has no textureSize: the frame's size, which the copy is 1:1 with.
+    vec2 frameSize;
+    // 1, scaling GRADE_COUNT's bounds so xost keeps the loops as hardware
+    // loops instead of unrolling them past 64 registers (shader::LOOP_SCALE).
+    float loopScale;
+#endif
 } grade;
+#ifdef SHOCK_XBOX360
+#define GRADE_COUNT(n) int(grade.loopScale * float(n))
+#else
+#define GRADE_COUNT(n) (n)
+#endif
 layout(location = 0) out vec4 fragColor;
 
+#ifdef SHOCK_XBOX360
+// The Xenos ALU has no integer or bit operations: a float hash instead.
+float pixelHash(vec2 p, float salt) {
+    return fract(sin(dot(vec3(floor(p), salt), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+#else
 // Integer hash: stable per pixel and frame, no texture.
 float hash(uvec3 v) {
     v = v * 1664525u + 1013904223u;
@@ -48,6 +66,10 @@ float hash(uvec3 v) {
     v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
     return float(v.x & 0xffffu) / 65535.0;
 }
+float pixelHash(vec2 p, float salt) {
+    return hash(uvec3(uvec2(p), uint(salt)));
+}
+#endif
 
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 // The frame is display-referred (8-bit), so "bright" means near white:
@@ -80,8 +102,8 @@ vec3 glare(vec2 size) {
         // noise (hidden under the grain) instead of visible rings.
         // White noise: fine speckle the film grain hides (a structured
         // pattern such as interleaved gradient noise shows as hatching).
-        float spin = hash(uvec3(uvec2(gl_FragCoord.xy), 7u)) * 6.28318;
-        for (int i = 0; i < 40; i++) {
+        float spin = pixelHash(gl_FragCoord.xy, 7.0) * 6.28318;
+        for (int i = 0; i < GRADE_COUNT(40); i++) {
             float t = (float(i) + 0.5) / 40.0;
             float a = float(i) * 2.39996 + spin;
             vec2 offset = vec2(cos(a), sin(a)) * sqrt(t) * radius;
@@ -96,8 +118,8 @@ vec3 glare(vec2 size) {
         float reach = size.x * 0.12;
         // Jitter the tap spacing per pixel so the taps blur into a smooth
         // line instead of stepping.
-        float jitter = hash(uvec3(uvec2(gl_FragCoord.xy), 11u));
-        for (int i = 0; i < 16; i++) {
+        float jitter = pixelHash(gl_FragCoord.xy, 11.0);
+        for (int i = 0; i < GRADE_COUNT(16); i++) {
             float t = (float(i) + jitter) / 16.0;
             float w = exp(-3.0 * t) * 0.6;
             vec2 offset = vec2(t * reach, 0.0);
@@ -111,9 +133,14 @@ vec3 glare(vec2 size) {
 }
 
 void main() {
-    ivec2 pixel = ivec2(gl_FragCoord.xy);
+#ifdef SHOCK_XBOX360
+    // gl_FragCoord is the texel's centre, so this reads it exactly, as texelFetch would.
+    vec2 size = grade.frameSize;
+    vec3 c = textureLod(frame, gl_FragCoord.xy / size, 0.0).rgb + glare(size);
+#else
     vec2 size = vec2(textureSize(frame, 0));
-    vec3 c = texelFetch(frame, pixel, 0).rgb + glare(size);
+    vec3 c = texelFetch(frame, ivec2(gl_FragCoord.xy), 0).rgb + glare(size);
+#endif
     c = pow(max(c, vec3(0.0)), vec3(grade.invGamma));
 
     float luma = dot(c, vec3(0.299, 0.587, 0.114));
@@ -136,7 +163,7 @@ void main() {
     c = mix(c, c * vec3(1.35, 0.35, 0.3), grade.danger * edge * (0.5 + 0.5 * beat));
 
     // Grain shows most in the dark, as film and sensor noise do.
-    float n = hash(uvec3(uvec2(pixel), uint(grade.time * 60.0))) - 0.5;
+    float n = pixelHash(gl_FragCoord.xy, grade.time * 60.0) - 0.5;
     c += grade.grain * n * (1.0 - 0.6 * min(luma, 1.0));
 
     fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
@@ -393,7 +420,9 @@ impl GammaTarget {
             let push = [vk::PushConstantRange {
                 stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 offset: 0,
-                size: 40,
+                // The last three floats, the frame's size and a 1, only the
+                // console's shader reads (`frameSize`, `loopScale`).
+                size: 52,
             }];
             let layout = d
                 .create_pipeline_layout(
@@ -561,6 +590,9 @@ impl GammaTarget {
             grade.danger,
             grade.bloom,
             grade.streak,
+            extent.width as f32,
+            extent.height as f32,
+            1.0,
         ];
         let bytes: Vec<u8> = push.iter().flat_map(|f| f.to_ne_bytes()).collect();
         unsafe {
@@ -638,6 +670,7 @@ unsafe fn build_pipeline(
         };
         shader::record_module(&vertex, shader::Stage::Vertex);
         shader::record_module(&fragment, shader::Stage::Fragment);
+        shader::record_console_program(VERTEX, FRAGMENT, false);
         let vs = module(&vertex)?;
         let fs = module(&fragment)?;
         let entry = c"main";
