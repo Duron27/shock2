@@ -257,6 +257,56 @@ pub struct Mesh {
 unsafe impl Send for Mesh {}
 unsafe impl Sync for Mesh {}
 
+/// The Xbox 360's GPU fetches no integer vertex formats (vulkan4xenon has
+/// none) and its shaders hold integers as floats, so there an integer
+/// attribute's 32-bit words go up as `f32`s and the layout calls it `Float`.
+/// `None` when the layout has no integer attribute.
+fn ints_as_floats(bytes: &[u8], layout: &VertexLayout) -> Option<(Vec<u8>, VertexLayout)> {
+    if !layout
+        .attributes
+        .iter()
+        .any(|a| a.kind == AttributeKind::Int)
+    {
+        return None;
+    }
+    let mut out = bytes.to_vec();
+    let stride = layout.stride as usize;
+    for a in layout
+        .attributes
+        .iter()
+        .filter(|a| a.kind == AttributeKind::Int)
+    {
+        for vertex in out.chunks_exact_mut(stride) {
+            for c in 0..a.components as usize {
+                let at = a.offset as usize + c * 4;
+                let word: [u8; 4] = vertex[at..at + 4].try_into().unwrap();
+                let value = i32::from_ne_bytes(word) as f32;
+                vertex[at..at + 4].copy_from_slice(&value.to_ne_bytes());
+            }
+        }
+    }
+    let mut layout = layout.clone();
+    for a in &mut layout.attributes {
+        if a.kind == AttributeKind::Int {
+            a.kind = AttributeKind::Float;
+        }
+    }
+    Some((out, layout))
+}
+
+/// The bytes and layout as this target's GPU fetches them.
+fn for_target<'a>(
+    bytes: &'a [u8],
+    layout: &VertexLayout,
+) -> (std::borrow::Cow<'a, [u8]>, VertexLayout) {
+    if cfg!(target_os = "xbox360") {
+        if let Some((bytes, layout)) = ints_as_floats(bytes, layout) {
+            return (std::borrow::Cow::Owned(bytes), layout);
+        }
+    }
+    (std::borrow::Cow::Borrowed(bytes), layout.clone())
+}
+
 impl Mesh {
     pub fn new<T: crate::scene::Vertex>(vertices: &[T], indices: Option<&[u32]>) -> Mesh {
         let layout = VertexLayout::of::<T>();
@@ -266,8 +316,9 @@ impl Mesh {
                 vertices.len() * layout.stride as usize,
             )
         };
+        let (bytes, layout) = for_target(bytes, &layout);
         Mesh {
-            inner: vk_backend::VkMesh::new(bytes, &layout, indices),
+            inner: vk_backend::VkMesh::new(&bytes, &layout, indices),
             vertex_count: vertices.len() as u32,
             index_count: indices.map(|i| i.len() as u32),
         }
@@ -285,7 +336,8 @@ impl Mesh {
                 std::mem::size_of_val(vertices),
             )
         };
-        self.inner.update_vertices(bytes)
+        let (bytes, _) = for_target(bytes, &VertexLayout::of::<T>());
+        self.inner.update_vertices(&bytes)
     }
 
     /// Draw every vertex (or index) with the current program and state.
@@ -396,5 +448,61 @@ impl TextureCube {
     /// Bind to unit `unit`'s cube slot (a unit holds a 2D and a cube texture).
     pub fn bind(&self, unit: u32) {
         self.inner.bind(unit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_attributes_go_up_as_floats() {
+        let layout = VertexLayout {
+            stride: 12,
+            attributes: vec![
+                Attribute {
+                    kind: AttributeKind::Float,
+                    components: 1,
+                    offset: 0,
+                },
+                Attribute {
+                    kind: AttributeKind::Int,
+                    components: 2,
+                    offset: 4,
+                },
+            ],
+        };
+        let mut bytes = Vec::new();
+        for (f, a, b) in [(0.5f32, 3u32, 39u32), (2.0, 0, 79)] {
+            bytes.extend(f.to_ne_bytes());
+            bytes.extend(a.to_ne_bytes());
+            bytes.extend(b.to_ne_bytes());
+        }
+        let (out, converted) = ints_as_floats(&bytes, &layout).unwrap();
+        let words: Vec<f32> = out
+            .chunks_exact(4)
+            .map(|w| f32::from_ne_bytes(w.try_into().unwrap()))
+            .collect();
+        assert_eq!(words, [0.5, 3.0, 39.0, 2.0, 0.0, 79.0]);
+        assert!(
+            converted
+                .attributes
+                .iter()
+                .all(|a| a.kind == AttributeKind::Float)
+        );
+        assert_eq!(converted.stride, 12);
+    }
+
+    #[test]
+    fn a_float_layout_is_left_alone() {
+        let layout = VertexLayout {
+            stride: 4,
+            attributes: vec![Attribute {
+                kind: AttributeKind::Float,
+                components: 1,
+                offset: 0,
+            }],
+        };
+        assert!(ints_as_floats(&[0; 8], &layout).is_none());
     }
 }

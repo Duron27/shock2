@@ -65,8 +65,10 @@ pub struct VkRenderer {
 
 /// 4x MSAA: smooths the geometry edges the 1999 art is full of (grates,
 /// railings, pipes) at a cost desktop GPUs absorb. `SHOCK2_MSAA` overrides it
-/// (1 disables) for comparing captures.
-const DEFAULT_MSAA: u32 = 4;
+/// (1 disables) for comparing captures. Not on the Xbox 360: 720p at 4x is
+/// ~29 MB against 10 MB of eDRAM, and past eDRAM vulkan4xenon draws in bands
+/// that hold only a few thousand draws (its docs/SUPPORT.md, "Render passes").
+const DEFAULT_MSAA: u32 = if cfg!(target_os = "xbox360") { 1 } else { 4 };
 
 /// A presented frame read back: tightly packed RGBA8, top row first.
 pub struct Capture {

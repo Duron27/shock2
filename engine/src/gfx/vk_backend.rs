@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use ash::vk;
+use tracing::info;
 
 use super::{
     BlendFactor, Cap, DepthFunc, Filter, FrontFace, PixelFormat, Sampling, Topology, VertexLayout,
@@ -22,7 +23,15 @@ use super::{
 use crate::vk::shader::{self, Member};
 
 const FRAMES: usize = 2;
-const BLOCK_SIZE: u64 = 64 << 20;
+/// Sub-allocated, so on the Xbox 360 (where vulkan4xenon rounds every
+/// allocation up to a 64 KiB page) small buffers still share pages. The
+/// console's 512 MB is shared with the CPU, so its blocks are smaller: each
+/// pool holds at most one block's slack.
+const BLOCK_SIZE: u64 = if cfg!(target_os = "xbox360") {
+    16 << 20
+} else {
+    64 << 20
+};
 const UBO_CHUNK: u64 = 4 << 20;
 const POOL_SETS: u32 = 1024;
 const MAX_UNITS: usize = 16;
@@ -57,6 +66,8 @@ struct Allocation {
 #[derive(Default)]
 struct Allocator {
     pools: Vec<Pool>,
+    /// Bytes handed out and not freed, for the log when a block is added.
+    used: u64,
 }
 
 impl Allocator {
@@ -86,6 +97,7 @@ impl Allocator {
             }
         };
         let align = req.alignment.max(1);
+        self.used += req.size;
         let p = &mut self.pools[pool];
         for (b, block) in p.blocks.iter_mut().enumerate() {
             if let Some(offset) = take(&mut block.free, req.size, align) {
@@ -125,6 +137,13 @@ impl Allocator {
         };
         let offset = take(&mut block.free, req.size, align).unwrap();
         p.blocks.push(block);
+        let blocks: u64 = self.pools.iter().flat_map(|p| &p.blocks).count() as u64;
+        info!(
+            "GPU memory: block {blocks} ({} MiB, memory type {type_index}); {} MiB in use",
+            size >> 20,
+            self.used >> 20
+        );
+        let p = &mut self.pools[pool];
         Allocation {
             pool,
             block: p.blocks.len() - 1,
@@ -136,6 +155,7 @@ impl Allocator {
     }
 
     fn free(&mut self, a: Allocation) {
+        self.used -= a.size;
         let free = &mut self.pools[a.pool].blocks[a.block].free;
         free.push((a.offset, a.size));
         free.sort_unstable();
@@ -415,8 +435,13 @@ const SELF_DEPTH_TARGET: usize = 0;
 const SHADOW_TARGET: usize = 1;
 
 /// Sampled depth: D32_SFLOAT supports sampling and depth attachment on
-/// every desktop driver.
-const CAPTURE_DEPTH: vk::Format = vk::Format::D32_SFLOAT;
+/// every desktop driver. vulkan4xenon's only depth format is D24S8, which
+/// samples as depth in red as D32 does (its docs/SUPPORT.md, "Images").
+const CAPTURE_DEPTH: vk::Format = if cfg!(target_os = "xbox360") {
+    vk::Format::D24_UNORM_S8_UINT
+} else {
+    vk::Format::D32_SFLOAT
+};
 
 /// Per-second counters, printed with `SHOCK2_VK_STATS=1`.
 #[derive(Default)]
@@ -1670,6 +1695,9 @@ fn to_rgba(format: PixelFormat, pixels: &[u8]) -> Vec<u8> {
 }
 
 fn attribute_format(int: bool, components: u32) -> vk::Format {
+    // The Xbox 360 fetches no integer formats; its integers are floats
+    // (`gfx::ints_as_floats`).
+    let int = int && !cfg!(target_os = "xbox360");
     match (int, components) {
         (false, 1) => vk::Format::R32_SFLOAT,
         (false, 2) => vk::Format::R32G32_SFLOAT,
