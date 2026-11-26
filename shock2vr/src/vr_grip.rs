@@ -1,8 +1,6 @@
 //! Deterministic pickup fitting against visible triangles. All outputs are
 //! hand-local; tracked motion never re-runs the search or changes item scale.
-use cgmath::{
-    Matrix4, Vector3,
-};
+use cgmath::{Matrix4, Vector3};
 
 use crate::vr_config::Handedness;
 
@@ -17,11 +15,6 @@ pub struct GripKinematics {
     pub palm: Vector3<f32>,
     pub normal: Vector3<f32>,
 }
-
-
-
-
-
 
 /// A posed finger as `GripSurface::tighten` tests it: per phalanx, from its
 /// base to its tip, `PHALANX_SAMPLES` spheres it fills, swept between
@@ -61,19 +54,12 @@ impl FingerChain {
     }
 }
 
-
-
 /// Shared boundary conversion for both the rendered glove and fitting samples.
 pub fn glove_to_hand(hand: Handedness) -> Matrix4<f32> {
     hand.mirror()
         * Matrix4::from_angle_y(cgmath::Deg(180.0))
         * Matrix4::from_scale(crate::hand_glove::GLOVE_SCALE)
 }
-
-
-
-
-
 
 /// Stable hashes invalidate a bake when either the visible mesh or glove's
 /// sampled pose arcs change. Quantize below visible precision (0.076 mm) so

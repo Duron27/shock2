@@ -9,7 +9,6 @@ pub struct HandAnticipation {
 }
 
 impl HandAnticipation {
-
     pub(crate) fn pose(
         &self,
         open: &Pose,

@@ -29,7 +29,13 @@ thread_local! {
 }
 
 pub fn set_world_gloss(strength: f32) {
-    GLOSS.with(|g| g.set(if strength.is_finite() { strength.max(0.0) } else { 0.0 }));
+    GLOSS.with(|g| {
+        g.set(if strength.is_finite() {
+            strength.max(0.0)
+        } else {
+            0.0
+        })
+    });
 }
 
 /// Set this frame's eye (from the view matrix) and density.

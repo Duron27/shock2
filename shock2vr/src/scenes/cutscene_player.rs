@@ -21,9 +21,7 @@ use crate::{
     quest_info::QuestInfo,
     scripts::{Effect, GlobalEffect},
     time::Time,
-    ui::{
-        FRONTEND_PANEL_SIZE, FrontendPanelAnchor, WorldPanel, frontend_panel_distance,
-    },
+    ui::{FRONTEND_PANEL_SIZE, FrontendPanelAnchor, WorldPanel, frontend_panel_distance},
 };
 
 use super::cutscene_skip::SkipPress;

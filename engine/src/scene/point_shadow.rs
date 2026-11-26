@@ -269,7 +269,9 @@ pub(crate) fn render_atlas(
             let Some(light) = light else { continue };
             let near: Vec<_> = movers
                 .iter()
-                .filter(|o| (o.get_world_position() - light.position).magnitude() < light.far() + 8.0)
+                .filter(|o| {
+                    (o.get_world_position() - light.position).magnitude() < light.far() + 8.0
+                })
                 .copied()
                 .collect();
             if !near.is_empty() {
@@ -477,8 +479,7 @@ mod tests {
         ] {
             let (face, x, y, z) = analytic(d, far);
             let p = light + d;
-            let clip: Vector4<f32> =
-                projection * face_view(light, face) * vec4(p.x, p.y, p.z, 1.0);
+            let clip: Vector4<f32> = projection * face_view(light, face) * vec4(p.x, p.y, p.z, 1.0);
             let ndc = clip.truncate() / clip.w;
             assert!((ndc.x - x).abs() < 1e-4, "face {face} x {} vs {x}", ndc.x);
             assert!((ndc.y - y).abs() < 1e-4, "face {face} y {} vs {y}", ndc.y);
@@ -511,7 +512,10 @@ mod tests {
     fn faces_are_proper_rotations() {
         for face in 0..6 {
             let (f, u, r) = face_basis(face);
-            assert!((r.cross(u) - (-f)).magnitude() < 1e-6, "right-handed face {face}");
+            assert!(
+                (r.cross(u) - (-f)).magnitude() < 1e-6,
+                "right-handed face {face}"
+            );
         }
     }
 

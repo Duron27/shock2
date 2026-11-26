@@ -31,5 +31,3 @@
 //! common-cuff trim built on this landmark cut into the wrist on the worst
 //! case. A per-pose wrist offset alongside `roll`, tuned in the harness, is
 //! the intended fix.
-
-

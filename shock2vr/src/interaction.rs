@@ -55,8 +55,12 @@ pub trait PlayerInteraction {
     fn viewmodel_entity(&self) -> Option<EntityId>;
 
     /// Wield `entity_id`. Returns any effects.
-    fn grab(&mut self, world: &World, entity_id: EntityId, hand: Handedness)
-    -> Vec<VirtualHandEffect>;
+    fn grab(
+        &mut self,
+        world: &World,
+        entity_id: EntityId,
+        hand: Handedness,
+    ) -> Vec<VirtualHandEffect>;
 
     /// A held entity was recreated as `new`; track the new id.
     fn replace_entity(&mut self, old: EntityId, new: EntityId, rigid_body: RigidBodyHandle);

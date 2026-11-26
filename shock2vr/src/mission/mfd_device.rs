@@ -12,8 +12,6 @@ pub(super) const PANEL_RANGE: f32 = 8.0 / crate::METERS_PER_WORLD_UNIT;
 pub const SIZE: Vector2<f32> = Vector2::new(268.0, 376.0);
 pub const SCREEN: Rect = Rect::new(8.0, 8.0, 252.0, 296.0);
 
-
-
 fn grip_margin() -> f32 {
     crate::dev_params::get(crate::dev_params::VR_MFD_GRIP_MARGIN)
         / crate::world_scale::meters_per_world_unit()

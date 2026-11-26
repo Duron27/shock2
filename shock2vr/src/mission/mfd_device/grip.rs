@@ -63,7 +63,4 @@ pub(super) fn margin(hand: usize) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
-    
-    
-}
+mod tests {}

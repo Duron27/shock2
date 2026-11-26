@@ -3942,12 +3942,20 @@ mod tests {
             press_edge(&mut host, &world, (on.x, on.y));
             // The mission reports the wield back as the flat hand's item.
             host.hand_items[1] = Some(make_cursor_item(&world, wrench));
-            assert_eq!(host.arm_item(arm).map(|i| i.entity), Some(wrench), "arm {arm}");
+            assert_eq!(
+                host.arm_item(arm).map(|i| i.entity),
+                Some(wrench),
+                "arm {arm}"
+            );
             assert!(host.arm_item(1 - arm).is_none(), "only one arm shows it");
 
             assert!(press_edge(&mut host, &world, (other.x, other.y)).is_empty());
             let actions = press_edge(&mut host, &world, (on.x, on.y));
-            assert_eq!(actions, vec![FlatUiDragAction::Unwield(wrench)], "arm {arm}");
+            assert_eq!(
+                actions,
+                vec![FlatUiDragAction::Unwield(wrench)],
+                "arm {arm}"
+            );
         }
     }
 
@@ -4215,7 +4223,10 @@ mod tests {
         let at = host
             .strip_cell_at(vec2(400.0, 60.0), &world)
             .map(|cell| (_inv, cell));
-        assert_eq!(actions, vec![FlatUiDragAction::Place { entity: wrench, at }]);
+        assert_eq!(
+            actions,
+            vec![FlatUiDragAction::Place { entity: wrench, at }]
+        );
         assert!(host.cursor_debug().is_none(), "placing clears the cursor");
         // The item is visible in the strip again.
         assert_eq!(host.strip_item_at(vec2(23.5, 34.0)), Some(wrench));

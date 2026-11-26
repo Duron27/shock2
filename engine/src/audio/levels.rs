@@ -125,8 +125,11 @@ mod tests {
         assert_eq!(bus_gain(Bus::Music), 0.25);
         assert_eq!(bus_gain(Bus::Effects), 0.5);
         assert_eq!(bus_gain(Bus::Master), 0.5);
-        let out: Vec<f32> =
-            Levels::new(SamplesBuffer::new(1, 44_100, vec![1.0f32, -1.0]), Bus::Effects).collect();
+        let out: Vec<f32> = Levels::new(
+            SamplesBuffer::new(1, 44_100, vec![1.0f32, -1.0]),
+            Bus::Effects,
+        )
+        .collect();
         assert_eq!(out, vec![0.5, -0.5]);
         set_volume_levels(1.0, 1.0, 1.0);
     }

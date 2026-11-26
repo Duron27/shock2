@@ -457,8 +457,14 @@ impl GammaTarget {
                     .build()],
             );
         };
-        let transfer = (vk::PipelineStageFlags::TRANSFER, vk::AccessFlags::TRANSFER_WRITE);
-        let read = (vk::PipelineStageFlags::TRANSFER, vk::AccessFlags::TRANSFER_READ);
+        let transfer = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+        let read = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_READ,
+        );
         barrier(
             0,
             1,
@@ -483,7 +489,10 @@ impl GammaTarget {
                 1,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty()),
+                (
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::AccessFlags::empty(),
+                ),
                 transfer,
             );
             let [sw, sh] = size(level - 1);
@@ -525,7 +534,10 @@ impl GammaTarget {
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             read,
-            (vk::PipelineStageFlags::FRAGMENT_SHADER, vk::AccessFlags::SHADER_READ),
+            (
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::SHADER_READ,
+            ),
         );
     }
 

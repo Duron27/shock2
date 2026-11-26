@@ -3,9 +3,7 @@
 use cgmath::{Quaternion, Rotation, Vector3, vec3};
 use dark::{
     SCALE_FACTOR,
-    properties::{
-        FrobFlag, PropFrobInfo,
-    },
+    properties::{FrobFlag, PropFrobInfo},
 };
 
 use shipyard::{EntityId, Get, UniqueView, View, World};
@@ -30,7 +28,6 @@ pub fn hand_world_position(
 /// original `PickSetFocus` treats that as squared SS2 units, while this engine
 /// divides authored world geometry by [`SCALE_FACTOR`].
 pub(crate) const FROB_REACH: f32 = 7.071_068 / SCALE_FACTOR;
-
 
 #[derive(Debug)]
 pub enum VirtualHandEffect {
@@ -80,9 +77,6 @@ pub enum VirtualHandEffect {
         entity_id: EntityId,
     },
 }
-
-
-
 
 pub(crate) fn can_grab_item(world: &World, entity_id: EntityId) -> bool {
     let v_prop_frobinfo = world.borrow::<View<PropFrobInfo>>().unwrap();
@@ -189,10 +183,9 @@ pub(crate) fn carried_weapon_by_class(world: &World, class_template_id: i32) -> 
 
 #[cfg(test)]
 mod tests {
-    
-    
+
     use super::*;
-    
+
     use dark::properties::{PropFrobInfo, PropPlayerGun};
 
     fn scripted_inventory_use() -> PropFrobInfo {
@@ -254,5 +247,4 @@ mod tests {
         assert!(shows_hand_visual(&world, None));
         assert!(shows_hand_visual(&world, Some(consumable)));
     }
-
 }

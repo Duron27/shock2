@@ -27,7 +27,6 @@ pub struct MuzzleFallback {
 }
 
 impl MuzzleFallback {
-
     /// Unit right/up/forward frame at this attachment. Item scaling affects the
     /// attachment position, never launched projectile size or velocity.
     pub(crate) fn shot_frame(self, transform: Matrix4<f32>) -> Matrix4<f32> {
@@ -144,7 +143,6 @@ fn muzzle_point(vhots: &[Vhot], fallback: Option<Point3<f32>>) -> Point3<f32> {
         .or(authored.map(|(_, point)| point))
         .unwrap_or_else(|| point3(0.0, 0.0, 0.0))
 }
-
 
 /// The controller's aim in its own frame: play's hand ray, and the way a gun
 /// held with an aligned grip fires.

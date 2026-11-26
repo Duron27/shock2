@@ -1,10 +1,6 @@
 //! Rigid two-anchor posing. Geometry, scale and ownership stay with the primary hand.
-use cgmath::{
-    Quaternion, Rotation,
-    Vector3,
-};
+use cgmath::{Quaternion, Rotation, Vector3};
 use serde::Serialize;
-
 
 /// Authored support sockets and regions currently enabled in gameplay.
 /// Keep the Explorer eligibility notice and runtime policy together.
@@ -41,4 +37,3 @@ impl GripPose {
             && crate::util::tracked_rotation(self.rotation).is_some()
     }
 }
-

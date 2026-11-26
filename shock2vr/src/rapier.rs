@@ -78,7 +78,6 @@ impl RapierFeedback {
     pub fn take_handles(&mut self) -> Vec<AudioHandle> {
         self.0.drain().filter_map(|(_, s)| s.hum).collect()
     }
-
 }
 
 #[cfg(test)]

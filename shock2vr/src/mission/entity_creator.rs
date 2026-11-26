@@ -1384,7 +1384,6 @@ fn create_physics_representation_unfiltered(
         DynamicPhysicsOptions::default()
     };
 
-
     // A restored generated death pose is a completed, resting corpse. Its
     // serialized P$Position is already the live Rapier body position:
     // applying the normal creature spawn lift again would raise it by

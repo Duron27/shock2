@@ -11,13 +11,7 @@
 //! opposition twist is the glove's own.
 use cgmath::Vector3;
 
-
 pub const HAND_JOINT_COUNT: usize = 26;
 
 /// OpenXR joint positions, indexed like `XrHandJointEXT`.
 pub type HandJoints = [Vector3<f32>; HAND_JOINT_COUNT];
-
-
-
-
-
