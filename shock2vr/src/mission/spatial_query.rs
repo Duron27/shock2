@@ -3,7 +3,8 @@ use dark::mission::{BspTree, Cell, LightTable, SystemShock2Level};
 
 /// Spatial query interface for level data
 /// Provides position-based lookups without requiring the full SystemShock2Level
-pub trait SpatialQueryEngine {
+/// Shared with the visibility worker (portal_visibility_engine), so thread-safe.
+pub trait SpatialQueryEngine: Send + Sync {
     /// Get the cell index from a world position using BSP tree traversal
     fn get_cell_idx_from_position(&self, position: Vector3<f32>) -> Option<u32>;
 

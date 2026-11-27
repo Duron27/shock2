@@ -83,6 +83,7 @@ impl AsyncPathfinding {
         std::thread::Builder::new()
             .name("ai-pathfinding".to_string())
             .spawn(move || {
+                engine::hardware_threads::place_current(engine::hardware_threads::PATHFINDING);
                 while let Ok(request) = rx.recv() {
                     let mut outcome = AiPathOutcome::Full;
                     // Crossings THIS AI's steering reported as physically

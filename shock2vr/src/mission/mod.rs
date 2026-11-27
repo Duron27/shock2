@@ -128,7 +128,7 @@ impl Mission {
             room_db,
             map_params,
             physics_geometry,
-            spatial_data: Some(Box::new(spatial_data)),
+            spatial_data: Some(std::sync::Arc::new(spatial_data)),
             entity_info: level.entity_info,
             obj_map,
             visibility_engine: Box::new(PortalVisibilityEngine::new()),

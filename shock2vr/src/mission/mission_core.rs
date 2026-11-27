@@ -2985,7 +2985,7 @@ pub struct MissionCore {
     pub world: World,
     pub player_handle: PlayerHandle,
     backpack_width: usize,
-    pub spatial_data: Option<Box<dyn SpatialQueryEngine>>,
+    pub spatial_data: Option<std::sync::Arc<dyn SpatialQueryEngine>>,
     /// Host template -> the particle-group archetypes authored to ride it
     /// (reverse of the archetype `ParticleAttachement` links). Runtime entity
     /// creation instantiates these attached (projectile trails, psi bolt
@@ -3225,7 +3225,7 @@ pub struct AbstractMission {
     pub room_db: RoomDatabase,
     pub map_params: dark::mission::MapParams,
     pub physics_geometry: Option<crate::physics::LevelGeometry>,
-    pub spatial_data: Option<Box<dyn SpatialQueryEngine>>,
+    pub spatial_data: Option<std::sync::Arc<dyn SpatialQueryEngine>>,
     pub entity_info: SystemShock2EntityInfo,
     pub obj_map: HashMap<i32, String>,
     pub visibility_engine: Box<dyn VisibilityEngine>,
@@ -15300,7 +15300,7 @@ impl MissionCore {
         profile!(
             scope: "render", level: DEBUG, "visibility_engine.prepare",
             self.visibility_engine
-                .prepare(self.spatial_data.as_deref(), &self.world, &culling_info)
+                .prepare(self.spatial_data.as_ref(), &culling_info)
         );
     }
 
@@ -15383,10 +15383,15 @@ impl MissionCore {
         asset_cache: &mut AssetCache,
         options: &GameOptions,
     ) -> (Vec<SceneObject>, Vector3<f32>, Quaternion<f32>) {
+        // What last frame's camera sees, placing the entities where they are now.
+        self.visibility_engine
+            .resolve(self.spatial_data.as_deref(), &self.world);
         let _v_position = self.world.borrow::<View<PropPosition>>().unwrap();
         let v_transform = self.world.borrow::<View<RuntimePropTransform>>().unwrap();
         let v_frame_state = self.world.borrow::<View<PropFrameAnimState>>().unwrap();
         let v_render_type = self.world.borrow::<View<PropRenderType>>().unwrap();
+        // Borrowed once, not once an entity in the models loop.
+        let v_creature = self.world.borrow::<View<PropCreature>>().ok();
         let v_render_alpha = self
             .world
             .borrow::<View<dark::properties::PropRenderAlpha>>()
@@ -15639,10 +15644,7 @@ impl MissionCore {
             if let Ok(xform) = v_transform.get(*entity_id).map(|p| p.0) {
                 let held = self.interaction.is_holding(*entity_id);
                 let is_creature = is_animated_model
-                    && self
-                        .world
-                        .borrow::<View<PropCreature>>()
-                        .is_ok_and(|v| v.contains(*entity_id));
+                    && v_creature.as_ref().is_some_and(|v| v.contains(*entity_id));
                 let visual_xform = xform;
                 // One light set per entity, resolved at its origin and shared by
                 // its sub-objects - the lights that reach the room it stands in.

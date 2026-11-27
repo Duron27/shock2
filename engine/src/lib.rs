@@ -6,6 +6,7 @@ mod engine;
 pub mod file_system;
 mod font;
 pub mod gfx;
+pub mod hardware_threads;
 pub mod importers;
 pub mod logging;
 pub mod macros;

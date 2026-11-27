@@ -1330,6 +1330,7 @@ impl Game {
         let global_context = Arc::clone(&self.global_context);
         let parse_name = level_name.clone();
         let parse_handle = thread::spawn(move || {
+            engine::hardware_threads::place_current(engine::hardware_threads::LOADING);
             Mission::parse(&**asset_paths, &base_path, &parse_name, &global_context)
         });
 
@@ -2622,6 +2623,7 @@ impl Game {
         let context = Arc::clone(&self.global_context);
         let worker_path = path.clone();
         let worker = thread::spawn(move || {
+            engine::hardware_threads::place_current(engine::hardware_threads::LOADING);
             parse_saved_mission(Path::new(&worker_path), &**assets, &base_path, &context)
         });
         throwing::cancel_tracking(self.active_game_scene.world());

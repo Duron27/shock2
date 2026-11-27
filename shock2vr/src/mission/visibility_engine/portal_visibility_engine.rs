@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use engine::render_log;
 
@@ -27,7 +28,50 @@ pub struct PortalDebugInfo {
     is_visible: bool,
 }
 
+/// The cells a camera sees through the portals, and the portals it tested.
+struct PortalFlood {
+    visible_cells: HashSet<u32>,
+    debug_portals: Vec<PortalDebugInfo>,
+}
+
+type FloodJob = (Arc<dyn SpatialQueryEngine>, CullingInfo);
+
+/// A thread of the engine's own for the portal flood, which reads only the
+/// level's cells: it runs while the frame is drawn and the next one updated,
+/// and the next render collects it. `None` back for a camera outside the
+/// level, as the flood itself returns.
+struct FloodWorker {
+    jobs: std::sync::mpsc::Sender<FloodJob>,
+    floods: std::sync::mpsc::Receiver<Option<PortalFlood>>,
+}
+
+impl FloodWorker {
+    fn spawn() -> Option<Self> {
+        let (jobs, job_rx) = std::sync::mpsc::channel::<FloodJob>();
+        let (flood_tx, floods) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("visibility".into())
+            .spawn(move || {
+                engine::hardware_threads::place_current(engine::hardware_threads::VISIBILITY);
+                // Ends when the engine (and its sender) goes with its mission.
+                for (spatial_data, culling_info) in job_rx {
+                    let flood = PortalVisibilityEngine::flood(spatial_data.as_ref(), &culling_info);
+                    if flood_tx.send(flood).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { jobs, floods })
+    }
+}
+
 pub struct PortalVisibilityEngine {
+    worker: Option<FloodWorker>,
+    /// Floods sent to the worker and not yet collected.
+    in_flight: u32,
+    /// A flood worked out here, without the worker.
+    ready: Option<Option<PortalFlood>>,
     // Mission-scoped: Mission::load creates this alongside immutable spatial data.
     // Cache cell membership, never camera-dependent visibility.
     entity_cell_cache: HashMap<EntityId, EntityCells>,
@@ -100,12 +144,82 @@ const MAX_DEPTH: u32 = 128;
 impl PortalVisibilityEngine {
     pub fn new() -> Self {
         PortalVisibilityEngine {
+            worker: FloodWorker::spawn(),
+            in_flight: 0,
+            ready: None,
             entity_cell_cache: HashMap::new(),
             is_visible: HashMap::new(),
             debug_portals: Vec::new(),
             is_debug: false,
         }
     }
+    /// What a camera sees through the portals: the level's cells alone, so
+    /// any thread can work it out. `None` for a camera outside the level.
+    fn flood(
+        spatial_data: &dyn SpatialQueryEngine,
+        culling_info: &CullingInfo,
+    ) -> Option<PortalFlood> {
+        let camera_position = camera_position_from_view_matrix(culling_info.view);
+
+        let maybe_camera_cell_idx = spatial_data.get_cell_idx_from_position(camera_position);
+        let maybe_camera_cell =
+            maybe_camera_cell_idx.and_then(|index| spatial_data.get_cell_by_index(index as usize));
+
+        render_log!(
+            DEBUG,
+            "visibility engine - starting from cell: {:?}",
+            maybe_camera_cell_idx
+        );
+
+        if maybe_camera_cell.is_none() {
+            return None;
+        }
+
+        let projection_view = culling_info.projection * culling_info.view;
+        let maybe_frustum = Frustum::from_matrix4(projection_view);
+
+        if maybe_frustum.is_none() {
+            return None;
+        }
+
+        let frustum = maybe_frustum.unwrap();
+
+        let mut visible_cells = HashSet::new();
+        let mut visited_cells = HashMap::new();
+        let mut debug_portals = Vec::new();
+
+        let camera_cell = maybe_camera_cell.unwrap();
+        let screen_portal = Aabb2::new(
+            point2(0.0, 0.0),
+            point2(culling_info.screen_size.x, culling_info.screen_size.y),
+        );
+        Self::check_cell_recursive(
+            spatial_data,
+            screen_portal,
+            culling_info.screen_size.x,
+            culling_info.screen_size.y,
+            projection_view,
+            &frustum,
+            &mut visible_cells,
+            &mut visited_cells,
+            &mut debug_portals,
+            camera_cell,
+            0,
+        );
+
+        render_log!(
+            DEBUG,
+            "total cells: {} | visible cells: {}",
+            spatial_data.get_cell_count(),
+            visible_cells.len()
+        );
+
+        Some(PortalFlood {
+            visible_cells,
+            debug_portals,
+        })
+    }
+
     fn check_cell_recursive(
         spatial_data: &dyn SpatialQueryEngine,
         current_screen_portal_candidate: Aabb2<f32>,
@@ -265,71 +379,44 @@ fn camera_position_from_view_matrix(view_matrix: Matrix4<f32>) -> Vector3<f32> {
 impl VisibilityEngine for PortalVisibilityEngine {
     fn prepare(
         &mut self,
-        spatial_data: Option<&dyn SpatialQueryEngine>,
-        world: &World,
+        spatial_data: Option<&Arc<dyn SpatialQueryEngine>>,
         culling_info: &CullingInfo,
     ) {
-        self.debug_portals.clear();
-        let camera_position = camera_position_from_view_matrix(culling_info.view);
-
-        // If no spatial data is available, mark all entities as visible
+        // Without spatial data nothing changes, as before.
         let Some(spatial_data) = spatial_data else {
             return;
         };
-
-        let maybe_camera_cell_idx = spatial_data.get_cell_idx_from_position(camera_position);
-        let maybe_camera_cell =
-            maybe_camera_cell_idx.and_then(|index| spatial_data.get_cell_by_index(index as usize));
-
-        render_log!(
-            DEBUG,
-            "visibility engine - starting from cell: {:?}",
-            maybe_camera_cell_idx
-        );
-
-        if maybe_camera_cell.is_none() {
+        if let Some(worker) = &self.worker
+            && worker
+                .jobs
+                .send((Arc::clone(spatial_data), *culling_info))
+                .is_ok()
+        {
+            self.in_flight += 1;
             return;
         }
+        self.ready = Some(Self::flood(spatial_data.as_ref(), culling_info));
+    }
 
-        let projection_view = culling_info.projection * culling_info.view;
-        let maybe_frustum = Frustum::from_matrix4(projection_view);
-
-        if maybe_frustum.is_none() {
-            return;
+    fn resolve(&mut self, spatial_data: Option<&dyn SpatialQueryEngine>, world: &World) {
+        // The last flood asked for; any before it are stale.
+        let mut flood = self.ready.take();
+        while self.in_flight > 0 {
+            self.in_flight -= 1;
+            match self.worker.as_ref().map(|worker| worker.floods.recv()) {
+                Some(Ok(latest)) => flood = Some(latest),
+                _ => {
+                    self.worker = None;
+                    self.in_flight = 0;
+                }
+            }
         }
-
-        let frustum = maybe_frustum.unwrap();
-
-        let mut visible_cells = HashSet::new();
-        let mut visited_cells = HashMap::new();
-
-        let camera_cell = maybe_camera_cell.unwrap();
-        let screen_portal = Aabb2::new(
-            point2(0.0, 0.0),
-            point2(culling_info.screen_size.x, culling_info.screen_size.y),
-        );
-        Self::check_cell_recursive(
-            spatial_data,
-            screen_portal,
-            culling_info.screen_size.x,
-            culling_info.screen_size.y,
-            projection_view,
-            &frustum,
-            &mut visible_cells,
-            &mut visited_cells,
-            &mut self.debug_portals,
-            camera_cell,
-            0,
-        );
-
-        render_log!(
-            DEBUG,
-            "total cells: {} | visible cells: {}",
-            spatial_data.get_cell_count(),
-            visible_cells.len()
-        );
-
-        self.update_entities(world, &visible_cells, |position, size, cells| {
+        // A camera outside the level keeps the last visibility, as before.
+        let (Some(Some(flood)), Some(spatial_data)) = (flood, spatial_data) else {
+            return;
+        };
+        self.debug_portals = flood.debug_portals;
+        self.update_entities(world, &flood.visible_cells, |position, size, cells| {
             if let Some(size) = size {
                 spatial_data.cells_intersecting_box(position, size * 0.5, cells);
             } else if let Some(cell) = spatial_data.get_cell_idx_from_position(position) {

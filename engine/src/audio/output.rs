@@ -230,6 +230,7 @@ mod xsdk {
         std::thread::Builder::new()
             .name("audio".into())
             .spawn(move || {
+                crate::hardware_threads::place_current(crate::hardware_threads::AUDIO);
                 loop {
                     let mut frame = std::ptr::null_mut();
                     match unsafe { xsdk_audio_next_frame(WAIT_MS, &mut frame) } {
