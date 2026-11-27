@@ -57,6 +57,9 @@ pub struct VkRenderer {
     grade: gamma::Grade,
     /// Built on first use for the current swapchain.
     gamma_target: Option<gamma::GammaTarget>,
+    /// The device can't make the grade's target (vulkan4xenon): don't try
+    /// again each frame.
+    gamma_unsupported: bool,
     /// Presenting failed with SURFACE_LOST; the runtime must hand over a new
     /// surface ([`VkRenderer::recreate_surface`]).
     surface_lost: bool,
@@ -101,6 +104,7 @@ impl VkRenderer {
             captured: None,
             grade: gamma::Grade::NEUTRAL,
             gamma_target: None,
+            gamma_unsupported: false,
             surface_lost: false,
             ctx,
         };
@@ -295,11 +299,12 @@ impl VkRenderer {
         }
         let swapchain = self.swapchain.as_ref()?;
         let gamma = (!self.grade.is_neutral()).then_some(self.grade);
-        if gamma.is_some() && self.gamma_target.is_none() {
+        if gamma.is_some() && self.gamma_target.is_none() && !self.gamma_unsupported {
             match gamma::GammaTarget::new(&self.ctx, swapchain) {
                 Ok(target) => self.gamma_target = Some(target),
                 Err(e) => {
                     warn!("{e}; brightness off");
+                    self.gamma_unsupported = true;
                     self.grade = gamma::Grade::NEUTRAL;
                 }
             }
@@ -460,12 +465,23 @@ impl VkRenderer {
         unsafe {
             device.cmd_end_render_pass(frame.commands);
             if let Some((buffer, _, _)) = readback {
-                let image = swapchain.images[frame.image_index as usize];
+                // vulkan4xenon copies out of no swapchain image: the Xbox 360
+                // reads the frame back from the grade's offscreen image,
+                // before the grade.
+                let (image, layout) = match &self.gamma_target {
+                    Some(target) if cfg!(target_os = "xbox360") => {
+                        (target.image(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    }
+                    _ => (
+                        swapchain.images[frame.image_index as usize],
+                        vk::ImageLayout::PRESENT_SRC_KHR,
+                    ),
+                };
                 image_barrier(
                     device,
                     frame.commands,
                     image,
-                    vk::ImageLayout::PRESENT_SRC_KHR,
+                    layout,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 );
                 device.cmd_copy_image_to_buffer(
@@ -493,7 +509,7 @@ impl VkRenderer {
                     frame.commands,
                     image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    vk::ImageLayout::PRESENT_SRC_KHR,
+                    layout,
                 );
             }
             device

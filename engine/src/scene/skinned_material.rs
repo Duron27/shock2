@@ -233,20 +233,40 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 
             // Light reaching the surface before albedo, shared with the shine.
             // Models are small: shallow relief.
+#ifdef SHOCK_XBOX360
+            // No relief on the Xbox 360, as in lightmap_material: too slow there.
+            // A model without normals gives zero: normalize would be NaN, which
+            // this GPU carries through to a black pixel where others clamp it.
+            vec3 normal = worldNormal * inversesqrt(max(dot(worldNormal, worldNormal), 1e-10));
+#else
             vec3 normal = bumpNormal(texture1, texCoord, worldPos, normalize(worldNormal), 0.012);
+#endif
             vec3 light = ambientLight * ambientIntensity;
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
+#ifdef SHOCK_XBOX360
+            // Slot 0 alone: a loop that indexes the light arrays by its
+            // counter hangs the Xbox 360's GPU (vulkan4xenon's vkreplay,
+            // 2026-11-26), as in lightmap_material.
+            light += CONSOLE_OBJECT_LIGHT(worldPos, normal, vec3(1.0));
+#else
             for (int i = 0; i < SHOCK_COUNT(6); i++) {
                 light += calculateSpotlight(i, worldPos, normal, vec3(1.0), specular, power);
             }
+#endif
             finalColor += texColor.rgb * light * litScale;
+#ifdef SHOCK_XBOX360
+            // No shine on the Xbox 360, as in lightmap_material: too slow there.
+            vec4 shaded = vec4(finalColor, texColor.a * (1.0 - transparency));
+#else
             vec4 shaded = applyShine(vec4(finalColor, texColor.a * (1.0 - transparency)), light, specular, 1.0 - transparency, texCoord, worldPos, normal);
+#endif
 
             // Held weapons are machined metal: they mirror the room, most
             // where the finish is silver (bright, unsaturated texels) and a
             // little where it is dark or painted. Scaled by the light that
             // reaches the gun, so it doesn't glow in a dark corridor.
+#ifndef SHOCK_XBOX360 // too slow on the Xbox 360's GPU even when off
             if (heldReflection > 0.0 && heldEnvironment) {
                 highp vec3 toEye = normalize(fogEyeDensity.xyz - worldPos);
                 float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
@@ -267,6 +287,7 @@ pub(crate) const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                 float amount = clamp(metal * fresnel * heldReflection * 0.75, 0.0, 0.85);
                 shaded.rgb = mix(shaded.rgb, mirror, amount);
             }
+#endif
 
             fragColor = applyMaterialPass(applyIncidence(shaded, texColor, worldPos, worldNormal), texColor, worldPos, worldNormal);
             fragColor.rgb *= fogFactor(worldPos);
@@ -464,10 +485,8 @@ impl SkinnedMaterial {
             [uv_rect.x, uv_rect.y, uv_rect.z, uv_rect.w],
         );
         gfx::set_f32(uniforms.lit_scale_loc, lit_scale);
-        gfx::set_f32(
-            uniforms.ambient_intensity_loc,
-            lights.ambient_intensity(render_context.ambient_light_intensity),
-        );
+        let ambient_intensity = lights.ambient_intensity(render_context.ambient_light_intensity);
+        gfx::set_f32(uniforms.ambient_intensity_loc, ambient_intensity);
         gfx::set_vec3(
             uniforms.emissive_tint_loc,
             [
@@ -501,9 +520,23 @@ impl SkinnedMaterial {
 
         // How this array's lights behave: what an unlit surface shows, and
         // how the lights fall off.
+        // The Xbox 360 lights an object by its first light alone: the rest
+        // reach it through its ambient (LightArray::console_folded_ambient),
+        // already scaled, so the shader's intensity is 1 there.
+        #[cfg(target_os = "xbox360")]
+        let ambient = {
+            gfx::set_f32(uniforms.ambient_intensity_loc, 1.0);
+            lights.console_folded_ambient(
+                world_matrix.w.truncate(),
+                ambient_intensity,
+                crate::scene::light::SHADER_SPOTLIGHT_SLOTS,
+            )
+        };
+        #[cfg(not(target_os = "xbox360"))]
+        let ambient = lights.ambient;
         gfx::set_vec3(
             uniforms.ambient_light_loc,
-            [lights.ambient.x, lights.ambient.y, lights.ambient.z],
+            [ambient.x, ambient.y, ambient.z],
         );
         gfx::set_f32(uniforms.lambert_wrap_loc, lights.lambert_wrap);
         let falloff_modes = lights.falloff.map(|mode| match mode {
@@ -513,7 +546,9 @@ impl SkinnedMaterial {
         gfx::set_i32_array(uniforms.light_falloff_mode_loc, &falloff_modes);
 
         // Set spotlight array uniforms
-        for i in 0..6 {
+        // The Xbox 360's shaders read slot 0 alone (CONSOLE_FLASHLIGHT): the
+        // rest would be thousands of wasted uniform writes a frame there.
+        for i in 0..crate::scene::light::SHADER_SPOTLIGHT_SLOTS {
             if let Some(light) = lights.get_light(i) {
                 let pos = light.position();
                 let color_intensity = light.color_intensity();

@@ -95,6 +95,7 @@ vec3 hotPart(vec2 at, vec2 size) {
 // streak like light scattered in a lens. One pass, no extra targets.
 vec3 glare(vec2 size) {
     vec3 sum = vec3(0.0);
+#ifndef SHOCK_XBOX360 // both arms of a branch run there: off (gamma::GLARE)
     if (grade.bloom > 0.0) {
         float radius = size.y * 0.08;
         float weights = 0.0;
@@ -129,6 +130,7 @@ vec3 glare(vec2 size) {
         // A cool tint, like the coating on a lens.
         sum += streak * vec3(0.75, 0.85, 1.0) * grade.streak;
     }
+#endif
     return sum;
 }
 
@@ -223,7 +225,22 @@ impl Grade {
 /// Mip levels of the offscreen frame. Level 0 is the frame; the rest are
 /// rebuilt every frame (see [`GammaTarget::record_mips`]) so the glare taps
 /// read pre-blurred light instead of speckling on single texels.
-const LEVELS: u32 = 4;
+/// One on the Xbox 360: vulkan4xenon draws into no image with mips, and its
+/// GPU can't afford the glare's taps anyway (bloom and streak are off there).
+const LEVELS: u32 = if cfg!(target_os = "xbox360") { 1 } else { 4 };
+/// Whether the glare runs: not on the Xbox 360 (see [`LEVELS`]).
+const GLARE: f32 = if cfg!(target_os = "xbox360") {
+    0.0
+} else {
+    1.0
+};
+/// Whether the film grain shows: not on the Xbox 360, whose float hash
+/// (`pixelHash`) turns it into a fuzz across the whole picture on a TV.
+const GRAIN: f32 = if cfg!(target_os = "xbox360") {
+    0.0
+} else {
+    1.0
+};
 
 pub(crate) struct GammaTarget {
     image: vk::Image,
@@ -248,6 +265,11 @@ pub(crate) struct GammaTarget {
 }
 
 impl GammaTarget {
+    /// The offscreen frame, for a readback (VkRenderer::request_capture).
+    pub(crate) fn image(&self) -> vk::Image {
+        self.image
+    }
+
     pub fn new(ctx: &VkContext, swapchain: &VkSwapchain) -> Result<GammaTarget, String> {
         unsafe { Self::build(ctx, swapchain) }.map_err(|e| format!("gamma target: {e}"))
     }
@@ -583,13 +605,13 @@ impl GammaTarget {
             1.0f32,
             1.0 / grade.gamma.max(0.1),
             grade.vignette,
-            grade.grain,
+            grade.grain * GRAIN,
             grade.time,
             grade.contrast,
             grade.saturation,
             grade.danger,
-            grade.bloom,
-            grade.streak,
+            grade.bloom * GLARE,
+            grade.streak * GLARE,
             extent.width as f32,
             extent.height as f32,
             1.0,

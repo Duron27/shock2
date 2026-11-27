@@ -120,9 +120,11 @@ impl Target {
         context: &EngineRenderContext,
         view: &Matrix4<f32>,
         scene: &Scene,
-    ) -> Mask {
+    ) -> Option<Mask> {
         use gfx::vk_backend;
-        let origin = vk_backend::begin_depth_capture().unwrap_or_default();
+        // No capture (a backend without depth-only passes): the actor draws
+        // unmasked rather than into the frame's own depth.
+        let origin = vk_backend::begin_depth_capture()?;
         let context = EngineRenderContext {
             self_depth: Phase::Capture,
             ..*context
@@ -135,9 +137,9 @@ impl Target {
                 depth.draw_opaque(engine, &context, view, scene.lights());
             }
         }
-        Mask {
-            texture: vk_backend::end_depth_capture().unwrap_or(0),
+        Some(Mask {
+            texture: vk_backend::end_depth_capture()?,
             origin,
-        }
+        })
     }
 }

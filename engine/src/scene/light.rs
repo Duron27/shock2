@@ -171,6 +171,10 @@ pub const DEFAULT_AMBIENT: f32 = 0.5;
 /// are not the lights drawn; the shader spells it `SOURCE_RADIUS`.
 pub const LIGHT_SOURCE_RADIUS: f32 = 0.8;
 
+/// Spotlight slots the shaders read: all six, but slot 0 alone on the Xbox
+/// 360, whose GPU can afford one light (flashlight.glsl's CONSOLE_FLASHLIGHT).
+pub const SHADER_SPOTLIGHT_SLOTS: usize = if cfg!(target_os = "xbox360") { 1 } else { 6 };
+
 /// Container for managing up to 6 lights for single-pass lighting
 #[derive(Debug, Clone)]
 pub struct LightArray {
@@ -241,6 +245,62 @@ impl LightArray {
     }
 
     /// Get a reference to the light in the specified slot
+    /// The ambient an object's shader takes on the Xbox 360, which lights
+    /// each object by its first `shaded` lights alone ([`SHADER_SPOTLIGHT_SLOTS`];
+    /// more cost about 3 ms of its GPU each): the rest of the object's lights, as
+    /// they reach its origin `at`, fold into its ambient, an average facing's
+    /// worth (a quarter: lambert's mean over every direction, as a face turned
+    /// away gets none). The same falloffs as the shader's `consoleLight`. The
+    /// ambient comes back scaled by `ambient_intensity` already, for a shader
+    /// intensity of 1: an object's is often 0 (lit by its lamps alone), which
+    /// would zero the folded lamps with it.
+    #[cfg_attr(not(target_os = "xbox360"), allow(dead_code))]
+    pub fn console_folded_ambient(
+        &self,
+        at: Vector3<f32>,
+        ambient_intensity: f32,
+        shaded: usize,
+    ) -> Vector3<f32> {
+        let mut folded = Vector3::new(0.0, 0.0, 0.0);
+        for (index, slot) in self.lights.iter().enumerate().skip(shaded) {
+            let Some(light) = slot else { continue };
+            let color = light.color_intensity();
+            let to_light = light.position() - at;
+            let distance = to_light.magnitude();
+            if color.w <= 0.0 || distance > light.range() {
+                continue;
+            }
+            let lamp = self.falloff[index] == LightFalloff::InverseDistance;
+            let cone = if light.inner_cone_angle() < 0.0 || distance < 1e-5 {
+                1.0
+            } else {
+                let direction = light.direction();
+                let spot = if direction.magnitude2() > 1e-10 {
+                    (-to_light / distance).dot(direction.normalize())
+                } else {
+                    1.0
+                };
+                let (outer, inner) = (
+                    light.outer_cone_angle().cos(),
+                    light.inner_cone_angle().cos(),
+                );
+                if lamp {
+                    ((spot - outer) / (inner - outer).max(1e-5)).clamp(0.0, 1.0)
+                } else {
+                    smoothstep(outer, inner, spot)
+                }
+            };
+            let fade = if lamp {
+                1.0 / distance.max(LIGHT_SOURCE_RADIUS)
+            } else {
+                (1.0 - smoothstep(light.range() * 0.75, light.range(), distance))
+                    / (1.0 + 0.1 * distance + 0.01 * distance * distance)
+            };
+            folded += color.truncate() * (color.w * cone * fade * 0.25);
+        }
+        self.ambient * ambient_intensity + folded
+    }
+
     pub fn get_light(&self, index: usize) -> Option<&SceneLight> {
         self.lights.get(index).and_then(|slot| slot.as_ref())
     }
@@ -485,9 +545,48 @@ impl SpotLight {
     }
 }
 
+/// GLSL's smoothstep.
+#[cfg_attr(not(target_os = "xbox360"), allow(dead_code))]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_folded_ambient_adds_the_lights_past_the_shaded_ones() {
+        let mut lights = LightArray::new();
+        lights.ambient = Vector3::new(0.1, 0.1, 0.1);
+        let lamp = |x: f32| {
+            let mut light = SpotLight::new(
+                Vector3::new(x, 0.0, 0.0),
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(1.0, 1.0, 1.0),
+                2.0,
+            );
+            light.inner_cone_angle = -1.0; // a point lamp
+            light
+        };
+        for x in [1.0, 2.0, 4.0, 40.0] {
+            let slot = lights.add_light(lamp(x)).unwrap();
+            lights.falloff[slot] = LightFalloff::InverseDistance;
+        }
+        let at = Vector3::new(0.0, 0.0, 0.0);
+        let folded = lights.console_folded_ambient(at, 2.0, 1);
+        // The shader's slots stay out; the rest give a quarter of 2/distance over
+        // the ambient scaled by its intensity; out of range gives nothing.
+        let expected: f32 = [1.0, 2.0, 4.0].iter().skip(1).map(|d| 2.0 / d * 0.25).sum();
+        assert!(
+            (folded.x - (0.1 * 2.0 + expected)).abs() < 1e-5,
+            "{folded:?}"
+        );
+        // An intensity of 0 (an object lit by its lamps alone) keeps them.
+        let unlit = lights.console_folded_ambient(at, 0.0, 1);
+        assert!((unlit.x - expected).abs() < 1e-5, "{unlit:?}");
+    }
 
     /// Hand lights merge in every frame; the object's highlight strength must
     /// survive it or shine materials lose their highlight under a torch.

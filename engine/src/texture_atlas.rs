@@ -210,6 +210,12 @@ where
         ret
     }
 
+    /// Rows of the atlas holding packed images: the current row's top plus
+    /// its tallest image.
+    pub fn used_height(&self) -> u32 {
+        self.current_atlas_pixel_y + self.current_row_max_height
+    }
+
     fn reserve_space(&mut self, width: u32, height: u32) {
         let bounds_x = self.current_atlas_pixel_x + width;
 

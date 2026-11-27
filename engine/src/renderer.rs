@@ -64,7 +64,7 @@ impl Renderer {
                 let mask = s
                     .self_depth_group
                     .zip(self_depth_scene)
-                    .map(|(group, scene)| {
+                    .and_then(|(group, scene)| {
                         if cached_mask.is_none_or(|(id, _)| id != group) {
                             cached_mask = Some((
                                 group,

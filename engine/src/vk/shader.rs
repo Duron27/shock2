@@ -374,7 +374,7 @@ pub fn record_module(words: &[u32], stage: Stage) {
     }
 }
 
-fn source_hash(source: &str) -> u64 {
+pub(crate) fn source_hash(source: &str) -> u64 {
     spirv_hash(&source.bytes().map(u32::from).collect::<Vec<_>>())
 }
 

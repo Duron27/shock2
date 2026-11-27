@@ -141,8 +141,15 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
         uniform bool heldEnvironment;
 
         void main() {
+#ifdef SHOCK_PLAIN
+            // The plain variant (PLAIN_SHADER_PROGRAM): no material pass,
+            // incidence, self-depth or glow, which the Xbox 360's GPU would
+            // otherwise run for every object pixel, both arms of each branch.
+            vec4 texColor = texture(texture1, texCoord);
+#else
             if (hiddenBySelfDepth()) discard;
             vec4 texColor = sampleMaterialPass(texture1, texCoord, worldPos, worldNormal);
+#endif
 
             if (additiveUnlit) {
                 // SRC_COLOR/ONE squares RGB. Scale by sqrt(opacity) so the
@@ -150,7 +157,11 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                 fragColor = vec4(texColor.rgb * sqrt(texColor.a * (1.0 - transparency)), 1.0);
                 return;
             }
+#ifdef SHOCK_PLAIN
+            if (texColor.a < 0.1) discard;
+#else
             if (materialAlphaRejected(texColor.a)) discard;
+#endif
             if (unlit) {
                 // UI texels are already display colours. Skip every lighting
                 // contribution, including lamps merged in by the renderer.
@@ -160,27 +171,49 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
 
 
             vec3 finalColor = texColor.rgb * emissivity;
+#ifndef SHOCK_PLAIN
             // Mostly flat, so dark metal heats up too; a little detail keeps its form.
             vec2 inRect = step(glowRect.xy, texCoord) * step(texCoord, glowRect.zw);
             finalColor += glow * inRect.x * inRect.y
                 * (0.6 + 0.4 * dot(texColor.rgb, vec3(0.299, 0.587, 0.114)));
+#endif
 
             // Light reaching the surface before albedo, shared with the shine.
             // Models are small: shallow relief.
+#ifdef SHOCK_XBOX360
+            // No relief on the Xbox 360, as in lightmap_material: too slow there.
+            // A model without normals gives zero: normalize would be NaN, which
+            // this GPU carries through to a black pixel where others clamp it.
+            vec3 normal = worldNormal * inversesqrt(max(dot(worldNormal, worldNormal), 1e-10));
+#else
             vec3 normal = bumpNormal(texture1, texCoord, worldPos, normalize(worldNormal), 0.012);
+#endif
             vec3 light = ambientLight * ambientIntensity;
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
+#ifdef SHOCK_XBOX360
+            // Slot 0 alone: a loop that indexes the light arrays by its
+            // counter hangs the Xbox 360's GPU (vulkan4xenon's vkreplay,
+            // 2026-11-26), as in lightmap_material.
+            light += CONSOLE_OBJECT_LIGHT(worldPos, normal, vec3(1.0));
+#else
             for (int i = 0; i < SHOCK_COUNT(6); i++) {
                 light += calculateSpotlight(i, worldPos, normal, vec3(1.0), specular, power);
             }
+#endif
             finalColor += texColor.rgb * light * litScale;
+#ifdef SHOCK_XBOX360
+            // No shine on the Xbox 360, as in lightmap_material: too slow there.
+            vec4 shaded = vec4(finalColor, texColor.a * (1.0 - transparency));
+#else
             vec4 shaded = applyShine(vec4(finalColor, texColor.a * (1.0 - transparency)), light, specular, 1.0 - transparency, texCoord, worldPos, normal);
+#endif
 
             // Held weapons are machined metal: they mirror the room, most
             // where the finish is silver (bright, unsaturated texels) and a
             // little where it is dark or painted. Scaled by the light that
             // reaches the gun, so it doesn't glow in a dark corridor.
+#ifndef SHOCK_XBOX360 // too slow on the Xbox 360's GPU even when off
             if (heldReflection > 0.0 && heldEnvironment) {
                 highp vec3 toEye = normalize(fogEyeDensity.xyz - worldPos);
                 float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
@@ -201,8 +234,13 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                 float amount = clamp(metal * fresnel * heldReflection * 0.75, 0.0, 0.85);
                 shaded.rgb = mix(shaded.rgb, mirror, amount);
             }
+#endif
 
+#ifdef SHOCK_PLAIN
+            fragColor = shaded;
+#else
             fragColor = applyMaterialPass(applyIncidence(shaded, texColor, worldPos, worldNormal), texColor, worldPos, worldNormal);
+#endif
             fragColor.rgb *= fogFactor(worldPos);
         }
 "#;
@@ -248,6 +286,12 @@ struct UnifiedUniforms {
 
 static UNIFIED_SHADER_PROGRAM: OnceCell<(ShaderProgram, UnifiedUniforms)> = OnceCell::new();
 static SELF_DEPTH_SHADER_PROGRAM: OnceCell<(ShaderProgram, UnifiedUniforms)> = OnceCell::new();
+/// The unified program less its material pass, incidence, self-depth test
+/// and glow (`SHOCK_PLAIN`), for the draws that use none of them. Only the
+/// Xbox 360 draws with it, whose GPU runs every branch of a shader in full:
+/// those cost its object draws about half of a 45 ms frame. Built everywhere
+/// so the shader sweep (xbox360/tools/shader_sweep.sh) records it.
+static PLAIN_SHADER_PROGRAM: OnceCell<(ShaderProgram, UnifiedUniforms)> = OnceCell::new();
 
 pub struct BasicMaterial<T>
 where
@@ -288,8 +332,15 @@ where
         world_matrix: &Matrix4<f32>,
         lights: &crate::scene::light::LightArray,
     ) {
+        let plain = cfg!(target_os = "xbox360")
+            && self.render_pass.is_none()
+            && self.incidence.is_none()
+            && matches!(render_context.self_depth, super::self_depth::Phase::None)
+            && self.glow.color == cgmath::Vector3::new(0.0, 0.0, 0.0);
         let program = if matches!(render_context.self_depth, super::self_depth::Phase::Capture) {
             &SELF_DEPTH_SHADER_PROGRAM
+        } else if plain {
+            &PLAIN_SHADER_PROGRAM
         } else {
             &UNIFIED_SHADER_PROGRAM
         };
@@ -356,20 +407,32 @@ where
             [uv_rect.x, uv_rect.y, uv_rect.z, uv_rect.w],
         );
         gfx::set_f32(uniforms.lit_scale_loc, lit_scale);
-        gfx::set_f32(
-            uniforms.ambient_intensity_loc,
-            if self.fixed_ambient {
-                1.0
-            } else {
-                lights.ambient_intensity(render_context.ambient_light_intensity)
-            },
-        );
+        let ambient_intensity = if self.fixed_ambient {
+            1.0
+        } else {
+            lights.ambient_intensity(render_context.ambient_light_intensity)
+        };
+        gfx::set_f32(uniforms.ambient_intensity_loc, ambient_intensity);
 
         // How this array's lights behave: what an unlit surface shows, and
         // how the lights fall off.
+        // The Xbox 360 lights an object by its first light alone: the rest
+        // reach it through its ambient (LightArray::console_folded_ambient),
+        // already scaled, so the shader's intensity is 1 there.
+        #[cfg(target_os = "xbox360")]
+        let ambient = {
+            gfx::set_f32(uniforms.ambient_intensity_loc, 1.0);
+            lights.console_folded_ambient(
+                world_matrix.w.truncate(),
+                ambient_intensity,
+                crate::scene::light::SHADER_SPOTLIGHT_SLOTS,
+            )
+        };
+        #[cfg(not(target_os = "xbox360"))]
+        let ambient = lights.ambient;
         gfx::set_vec3(
             uniforms.ambient_light_loc,
-            [lights.ambient.x, lights.ambient.y, lights.ambient.z],
+            [ambient.x, ambient.y, ambient.z],
         );
         gfx::set_f32(uniforms.lambert_wrap_loc, lights.lambert_wrap);
         let falloff_modes = lights.falloff.map(|mode| match mode {
@@ -379,7 +442,9 @@ where
         gfx::set_i32_array(uniforms.light_falloff_mode_loc, &falloff_modes);
 
         // Set spotlight array uniforms
-        for i in 0..6 {
+        // The Xbox 360's shaders read slot 0 alone (CONSOLE_FLASHLIGHT): the
+        // rest would be thousands of wasted uniform writes a frame there.
+        for i in 0..crate::scene::light::SHADER_SPOTLIGHT_SLOTS {
             if let Some(light) = lights.get_light(i) {
                 let pos = light.position();
                 let color_intensity = light.color_intensity();
@@ -474,13 +539,14 @@ where
     }
 
     fn initialize(&mut self, _is_opengl_es: bool) {
-        let build = |capture| {
+        let build = |capture, plain: bool| {
             // Build and compile unified shader program with 6-spotlight support
             let vertex_shader =
                 &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
 
             let fragment_shader = &format!(
-                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                "{}{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                if plain { "#define SHOCK_PLAIN 1\n" } else { "" },
                 include_str!("flashlight.glsl"),
                 super::point_shadow::GLSL,
                 super::fog::GLSL,
@@ -582,8 +648,9 @@ where
             };
             (shader, uniforms)
         };
-        UNIFIED_SHADER_PROGRAM.get_or_init(|| build(false));
-        SELF_DEPTH_SHADER_PROGRAM.get_or_init(|| build(true));
+        UNIFIED_SHADER_PROGRAM.get_or_init(|| build(false, false));
+        SELF_DEPTH_SHADER_PROGRAM.get_or_init(|| build(true, false));
+        PLAIN_SHADER_PROGRAM.get_or_init(|| build(false, true));
         self.has_initialized = true;
     }
 
