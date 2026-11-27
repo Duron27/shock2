@@ -77,6 +77,8 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
         uniform highp float spotlightInnerAngle[6];
         uniform highp float spotlightOuterAngle[6];
         uniform highp float spotlightRange[6];
+        // Slots 0..spotlightCount may hold a light; the rest are empty.
+        uniform float spotlightCount;
 
         // Calculate spotlight contribution
         // One return: the Xbox 360's shader compiler inlines only single-exit
@@ -130,8 +132,13 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             vec4 diffuseColor = texture(texture2, texCoord + diffuseUvOffset);
             // Before any discard: the bump takes screen-space derivatives.
             vec3 geometric = normalize(worldNormal);
+#ifdef SHOCK_XBOX360
+            // No relief on the Xbox 360: its bump costs about 12 ms a frame.
+            vec3 bumped = geometric;
+#else
             vec3 bumped = unlit ? geometric
                 : bumpNormal(texture2, texCoord + diffuseUvOffset, worldPos, geometric, 0.04);
+#endif
             if (layerAlphaTest && diffuseColor.a * layerColorAlpha.a < 0.1) discard;
 
             // Dark's mission ambient is a minimum final intensity: preserve
@@ -139,6 +146,10 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             vec3 finalColor = max(diffuseColor.rgb * lightmapColor.rgb, ambientColor);
 
             vec3 normal = geometric;
+            // The Xbox 360's GPU takes about 10 ms a draw over these lamp
+            // loops, even with each one's uniform off: it has no lamp
+            // shadows, bump or gloss.
+#ifndef SHOCK_XBOX360
             // An object between a shadow lamp and this surface takes back the
             // share of the baked light that lamp would have put here. World
             // casters are not in this set: the lightmap holds their shadows.
@@ -227,13 +238,28 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
                 finalColor += reflected * gloss;
             }
 
+#endif
+
             // Add dynamic spotlight contributions on top of baked lighting
             vec3 specular = vec3(0.0);
             float power = shineHighlights() ? shinePower(length(worldNormal)) : SHINE_POWER;
             vec3 spotlights = vec3(0.0);
-            for (int i = 0; i < SHOCK_COUNT(6); i++) {
+            // Only the slots in use: the Xbox 360's shader compiler runs every
+            // branch of a light, so each pass costs a full-screen layer about
+            // 10 ms there, lit or not (vulkan4xenon's vkhang, 2026-11-26).
+#ifdef SHOCK_XBOX360
+            // Only slot 0 (the flashlight, which the mission adds first): a
+            // loop that indexes the light arrays by its counter hangs the
+            // Xbox 360's GPU, at any count (vulkan4xenon's vkreplay,
+            // 2026-11-26), and each full light costs about 16 ms a frame
+            // there even when off.
+            if (spotlightCount > 0.5)
+                spotlights += CONSOLE_FLASHLIGHT(worldPos, bumped, diffuseColor.rgb);
+#else
+            for (int i = 0; i < int(spotlightCount); i++) {
                 spotlights += calculateSpotlight(i, worldPos, bumped, diffuseColor.rgb, specular, power);
             }
+#endif
             finalColor += spotlights;
 
             vec4 base = vec4((unlit ? diffuseColor.rgb : finalColor) * layerColorAlpha.rgb,
@@ -241,8 +267,13 @@ const UNIFIED_FRAGMENT_SHADER_SOURCE: &str = r#"
             // Terrain enables only the light-driven highlight (zero authored
             // sheen passes and no environment reflection). Reuse the object's
             // mask/coverage composition and move that mask with the diffuse.
+#ifdef SHOCK_XBOX360
+            // No highlight on the Xbox 360: the shine costs about 20 ms a frame there.
+            fragColor = base;
+#else
             fragColor = applyShine(base, vec3(0.0), specular, 1.0,
                 texCoord + diffuseUvOffset, worldPos, normal);
+#endif
             if (!unlit) fragColor.rgb *= fogFactor(worldPos);
         }
 "#;
@@ -277,9 +308,56 @@ struct UnifiedUniforms {
     spotlight_inner_angle_loc: [gfx::Uniform; 6],
     spotlight_outer_angle_loc: [gfx::Uniform; 6],
     spotlight_range_loc: [gfx::Uniform; 6],
+    spotlight_count_loc: gfx::Uniform,
 }
 
 static UNIFIED_SHADER_PROGRAM: OnceCell<(ShaderProgram, UnifiedUniforms)> = OnceCell::new();
+/// The Xbox 360's lamp-shadow pass: how much of each world pixel a moving
+/// caster's shadow keeps, multiplied into the world drawn already, inside
+/// the shadows' screen rectangle alone (`begin_shadow_pass`). The world
+/// shader can't take the shadow itself there: as both arms of its branches
+/// run, it cost every world pixel about 40 ms a frame. Built everywhere so
+/// the shader sweep (xbox360/tools/shader_sweep.sh) records it.
+static SHADOW_PASS_PROGRAM: OnceCell<(ShaderProgram, ShadowPassUniforms)> = OnceCell::new();
+
+struct ShadowPassUniforms {
+    point_shadow: crate::scene::point_shadow::Uniforms,
+    world_wave: crate::scene::world_wave::Uniforms,
+    world_loc: gfx::Uniform,
+    view_loc: gfx::Uniform,
+    projection_loc: gfx::Uniform,
+}
+
+/// [`SHADOW_PASS_PROGRAM`]'s: the lamp's one shadow (point_shadow's
+/// Xbox 360 receiver), as a factor. It shades by the lamp's angle and
+/// range alone, not the bake under it as the desktop does, which would
+/// take the lightmap and diffuse reads this pass is spared.
+const SHADOW_PASS_FRAGMENT_SHADER_SOURCE: &str = r#"
+        out vec4 fragColor;
+        in highp vec3 worldPos;
+        in vec3 worldNormal;
+        // No discard (nor the texture read an alpha test takes): it would
+        // turn off early depth rejection, and this pass redraws every world
+        // draw over pixels the base pass already decided. Layered draws,
+        // the only alpha-tested ones, take no shadow pass.
+        void main() {
+            vec3 normal = worldNormal * inversesqrt(max(dot(worldNormal, worldNormal), 1e-10));
+            highp vec4 lamp = pointShadowLights[0];
+            highp vec3 toLamp = lamp.xyz - worldPos;
+            highp float distance = length(toLamp);
+            float ndl = max(dot(normal, toLamp / max(distance, 0.00001)), 0.0);
+            // In an if: straight-line, with no discard, this shader sends
+            // xost into unbounded recursion ("maximum recursion depth").
+            float shadow = 0.0;
+            if (distance < lamp.w) shadow = 1.0 - pointShadowVisibility(0, 1, worldPos, normal);
+            // Strongest facing the lamp near it, fading out toward its range.
+            float facing = smoothstep(0.0, 0.3, ndl);
+            float fade = 1.0 - smoothstep(0.5 * lamp.w, lamp.w, distance);
+            float reaches = step(0.0001, lamp.w) * step(distance, lamp.w);
+            float kept = 1.0 - pointShadowStrength * 0.75 * shadow * facing * fade * reaches;
+            fragColor = vec4(kept, kept, kept, 1.0);
+        }
+"#;
 
 /// Depth only, for shadow maps: no lighting, and above all no sampling of
 /// the shadow atlas being drawn into. Alpha-tested layers (grates) keep
@@ -470,7 +548,13 @@ impl LightmapMaterial {
         );
 
         // Set spotlight array uniforms
-        for i in 0..6 {
+        let used = (0..6)
+            .rposition(|i| lights.get_light(i).is_some())
+            .map_or(0, |last| last + 1);
+        gfx::set_f32(uniforms.spotlight_count_loc, used as f32);
+        // The Xbox 360's shaders read slot 0 alone (CONSOLE_FLASHLIGHT): the
+        // rest would be thousands of wasted uniform writes a frame there.
+        for i in 0..crate::scene::light::SHADER_SPOTLIGHT_SLOTS {
             if let Some(light) = lights.get_light(i) {
                 let pos = light.position();
                 let color_intensity = light.color_intensity();
@@ -645,6 +729,25 @@ impl Material for LightmapMaterial {
                     shader.uniform("spotlightRange[4]"),
                     shader.uniform("spotlightRange[5]"),
                 ],
+                spotlight_count_loc: shader.uniform("spotlightCount"),
+            };
+            (shader, uniforms)
+        });
+        let _ = SHADOW_PASS_PROGRAM.get_or_init(|| {
+            let vertex_shader =
+                &[crate::scene::world_wave::GLSL, UNIFIED_VERTEX_SHADER_SOURCE].concat();
+            let fragment_shader = &[
+                crate::scene::point_shadow::GLSL,
+                SHADOW_PASS_FRAGMENT_SHADER_SOURCE,
+            ]
+            .concat();
+            let shader = gfx::Program::new(vertex_shader, fragment_shader);
+            let uniforms = ShadowPassUniforms {
+                point_shadow: crate::scene::point_shadow::Uniforms::new(&shader),
+                world_wave: crate::scene::world_wave::Uniforms::new(&shader),
+                world_loc: shader.uniform("world"),
+                view_loc: shader.uniform("view"),
+                projection_loc: shader.uniform("projection"),
             };
             (shader, uniforms)
         });
@@ -661,6 +764,51 @@ impl Material for LightmapMaterial {
         lights: &crate::scene::light::LightArray,
     ) -> bool {
         self.draw_unified(render_context, view_matrix, world_matrix, lights);
+        true
+    }
+
+    fn begin_shadow_pass(
+        &self,
+        render_context: &EngineRenderContext,
+        view_matrix: &Matrix4<f32>,
+        world_matrix: &Matrix4<f32>,
+        lights: &crate::scene::light::LightArray,
+    ) -> bool {
+        // A layer over the base would take the shadow twice.
+        if self.layer.is_some() {
+            return false;
+        }
+        let Some(viewport) = gfx::vk_backend::current_viewport() else {
+            return false;
+        };
+        let view_projection = render_context.projection_matrix * view_matrix;
+        let Some([x, y, w, h]) =
+            crate::scene::point_shadow::receiver_scissor(&view_projection, viewport)
+        else {
+            return false;
+        };
+        let (shader_program, uniforms) = SHADOW_PASS_PROGRAM
+            .get()
+            .expect("shadow pass shader not compiled");
+        shader_program.bind();
+        uniforms.world_wave.bind(render_context.world_wave);
+        uniforms.point_shadow.bind(lights, render_context);
+        gfx::set_mat4(uniforms.world_loc, world_matrix);
+        gfx::set_mat4(uniforms.view_loc, view_matrix);
+        gfx::set_mat4(uniforms.projection_loc, &render_context.projection_matrix);
+        gfx::enable(gfx::Cap::ScissorTest);
+        gfx::scissor(x, y, w, h);
+        // The pixel times what the shadow keeps of it; alpha left alone.
+        gfx::enable(gfx::Cap::Blend);
+        gfx::blend_func_separate(
+            gfx::BlendFactor::DstColor,
+            gfx::BlendFactor::Zero,
+            gfx::BlendFactor::Zero,
+            gfx::BlendFactor::One,
+        );
+        // The base pass wrote these pixels' depth: shade only those.
+        gfx::depth_mask(false);
+        gfx::depth_func(gfx::DepthFunc::LessEqual);
         true
     }
 

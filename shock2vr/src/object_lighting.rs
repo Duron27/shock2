@@ -10,8 +10,6 @@
 //! is ranked by how much each light contributes at the object's position and
 //! the strongest are kept.
 
-use std::collections::HashMap;
-
 use cgmath::{InnerSpace, Vector3, Vector4, vec3};
 use dark::mission::WorldLight;
 use engine::scene::{
@@ -26,7 +24,7 @@ use crate::mission::spatial_query::SpatialQueryEngine;
 /// first-person weapons. Absence means legacy shading (disabled/no world rep).
 pub struct ObjectLighting<'a> {
     spatial: &'a dyn SpatialQueryEngine,
-    intensities: Option<&'a HashMap<i16, f32>>,
+    intensities: Option<&'a dark::mission::LightIntensities>,
     player_position: Vector3<f32>,
     environment: Option<std::rc::Rc<engine::texture::CubeTexture>>,
 }
@@ -34,7 +32,7 @@ pub struct ObjectLighting<'a> {
 impl<'a> ObjectLighting<'a> {
     pub fn for_scene(
         spatial: Option<&'a dyn SpatialQueryEngine>,
-        intensities: Option<&'a HashMap<i16, f32>>,
+        intensities: Option<&'a dark::mission::LightIntensities>,
         player_position: Vector3<f32>,
         environment: Option<std::rc::Rc<engine::texture::CubeTexture>>,
     ) -> Option<Self> {
@@ -243,7 +241,7 @@ pub(crate) fn gallery_brightness() -> f32 {
 pub fn lights_for_position(
     spatial: &dyn SpatialQueryEngine,
     position: Vector3<f32>,
-    intensities: Option<&HashMap<i16, f32>>,
+    intensities: Option<&dark::mission::LightIntensities>,
 ) -> LightArray {
     let table = spatial.get_light_table();
     let brightness = BRIGHTNESS_SCALE

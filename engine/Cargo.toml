@@ -27,6 +27,8 @@ getrandom = { version = "0.2", features = ["custom"] }
 [dependencies]
 ash = { version = "0.37.3", default-features = false, features = ["debug"] }
 cgmath = "0.18.0"
+# Fx hashing for the gfx backend's per-draw maps: SipHash costs the Xbox 360's cores real time a draw.
+rustc-hash = "2.1.1"
 collision = { version = "0.20.1", git = "https://github.com/rustgd/collision-rs" }
 fbxcel-dom = "0.0.10"
 image = "0.24.3"

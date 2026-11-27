@@ -11,8 +11,13 @@
 //! Everything lives in one thread-local [`State`], installed by
 //! [`crate::vk::VkRenderer`] for its device and torn down before the device.
 
+#[cfg(not(target_os = "xbox360"))]
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+// Fx, not SipHash: these maps are read several times a draw (images,
+// samplers, descriptor sets), which SipHash made about 3 ms a frame on the
+// Xbox 360.
+use rustc_hash::FxHashMap as HashMap;
 
 use ash::vk;
 use tracing::info;
@@ -112,6 +117,10 @@ impl Allocator {
             }
         }
         let size = BLOCK_SIZE.max(req.size.next_multiple_of(1 << 20));
+        tracing::debug!(
+            "GPU memory: allocating {} MiB of memory type {type_index}",
+            size >> 20
+        );
         let memory = unsafe {
             dev.device.allocate_memory(
                 &vk::MemoryAllocateInfo::builder()
@@ -246,6 +255,7 @@ struct ImageObj {
     mips: u32,
     /// 1, or 6 for a cube.
     layers: u32,
+    size: (u32, u32),
 }
 
 #[derive(Default, Clone)]
@@ -274,6 +284,12 @@ struct ProgramObj {
     names: HashMap<String, u32>,
     samplers: Vec<SamplerBinding>,
     vertex_inputs: BTreeMap<u32, (bool, u32)>,
+    /// Logged at its first draw.
+    drawn: bool,
+    /// The modules' SPIR-V and the set layout's (binding, type, stages), for
+    /// the draw dump; empty off the console.
+    spirv: [Vec<u32>; 2],
+    layout_bindings: Vec<[u32; 3]>,
 }
 
 enum Garbage {
@@ -379,9 +395,32 @@ struct FrameRes {
     pool_at: usize,
     /// Sets taken from `pools[pool_at]` this frame.
     pool_used: u32,
+    /// This frame's descriptor sets by what they hold: draws with the same
+    /// program, uniform ring chunks and textures share one, their uniform
+    /// offsets given when it is bound (dynamic uniform buffers). Allocating
+    /// and writing one a draw cost the Xbox 360 about 3 ms a frame.
+    sets: HashMap<SetKey, vk::DescriptorSet>,
+}
+
+/// What a draw's descriptor set holds: its layout, each uniform binding's
+/// ring chunk, and each sampler binding's view and sampler.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct SetKey {
+    layout: vk::DescriptorSetLayout,
+    buffers: [(u32, vk::Buffer, u64); 2],
+    images: Vec<(u32, vk::ImageView, vk::Sampler)>,
 }
 
 struct State {
+    /// `dump_draws.txt`'s frame, and each buffer's bytes until it's written.
+    dump: super::draw_dump::DrawDump,
+    dump_bytes: HashMap<u32, Vec<u8>>,
+    /// Draws per program since [`take_draw_counts`].
+    draw_counts: BTreeMap<u32, u32>,
+    /// Draws this frame, for `max_draws.txt`.
+    frame_draws: u32,
+    /// Region uploads since [`take_draw_counts`], by image size and mips.
+    upload_counts: BTreeMap<(u32, u32, u32), u32>,
     dev: Dev,
     alloc: Allocator,
     upload_pool: vk::CommandPool,
@@ -426,11 +465,24 @@ struct DepthCapture {
     /// tile by tile across frames.
     load_pass: vk::RenderPass,
     images: [Option<(u32, vk::Framebuffer, vk::Extent2D)>; CAPTURE_TARGETS],
+    /// Each target's unwritten colour image ([`CAPTURE_COLOR`]).
+    colors: [Option<u32>; CAPTURE_TARGETS],
     /// The target the open capture draws into.
     active: usize,
 }
 
-const CAPTURE_TARGETS: usize = 2;
+/// vulkan4xenon's subpasses take one to four colour attachments, so a
+/// depth capture there draws into a colour image too, which nothing writes
+/// (colour masked off) or reads (docs/SUPPORT.md, "Render passes").
+const CAPTURE_COLOR: Option<vk::Format> = if cfg!(target_os = "xbox360") {
+    Some(vk::Format::B8G8R8A8_UNORM)
+} else {
+    None
+};
+
+/// Self depth, the shadow atlas, and the Xbox 360's second atlas
+/// ([`begin_shadow_capture`]).
+const CAPTURE_TARGETS: usize = 3;
 const SELF_DEPTH_TARGET: usize = 0;
 const SHADOW_TARGET: usize = 1;
 
@@ -450,6 +502,7 @@ struct Stats {
     draws: u32,
     pipelines: u32,
     descriptor_writes: u32,
+    uniform_sets: u32,
     draw_time: std::time::Duration,
     upload_time: std::time::Duration,
     fence_wait: std::time::Duration,
@@ -457,15 +510,28 @@ struct Stats {
     since: Option<std::time::Instant>,
 }
 
+#[cfg(not(target_os = "xbox360"))]
 thread_local! {
     static STATS: RefCell<Stats> = RefCell::new(Stats::default());
     static STATS_ON: bool = std::env::var_os("SHOCK2_VK_STATS").is_some();
 }
 
+#[cfg(not(target_os = "xbox360"))]
 fn stat(f: impl FnOnce(&mut Stats)) {
     if STATS_ON.with(|on| *on) {
         STATS.with(|s| f(&mut s.borrow_mut()));
     }
+}
+
+// Always on the Xbox 360, which has no environment; its log is the net log.
+// The backend's thread owns them, without a TLS lookup (hardware_threads::OwnedCell).
+#[cfg(target_os = "xbox360")]
+static STATS: crate::hardware_threads::OwnedCell<Option<Stats>> =
+    crate::hardware_threads::OwnedCell::new(None);
+
+#[cfg(target_os = "xbox360")]
+fn stat(f: impl FnOnce(&mut Stats)) {
+    STATS.with(|s| f(s.get_or_insert_with(Stats::default)));
 }
 
 /// Time the renderer spent waiting for a frame slot's fence and for the
@@ -485,10 +551,10 @@ fn stats_frame() {
         let elapsed = since.elapsed().as_secs_f32();
         if elapsed >= 1.0 {
             let f = s.frames.max(1) as f32;
-            println!(
+            let line = format!(
                 "SHOCK2_VK_STATS {:.1} fps | per frame: {:.0} draws, {:.0} descriptor writes, \
                  {:.2} ms recording draws, {:.2} ms uploads, {:.2} ms waiting on the GPU, \
-                 {:.2} ms acquiring | {} pipelines built",
+                 {:.2} ms acquiring | {} pipelines built, {:.0} uniform sets",
                 f / elapsed,
                 s.draws as f32 / f,
                 s.descriptor_writes as f32 / f,
@@ -497,7 +563,13 @@ fn stats_frame() {
                 s.fence_wait.as_secs_f32() * 1000.0 / f,
                 s.acquire_wait.as_secs_f32() * 1000.0 / f,
                 s.pipelines,
+                s.uniform_sets as f32 / f,
             );
+            if cfg!(target_os = "xbox360") {
+                info!("{line}");
+            } else {
+                println!("{line}");
+            }
             *s = Stats {
                 since: Some(std::time::Instant::now()),
                 ..Default::default()
@@ -506,12 +578,25 @@ fn stats_frame() {
     });
 }
 
+#[cfg(not(target_os = "xbox360"))]
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
+#[cfg(not(target_os = "xbox360"))]
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     STATE.with(|s| s.borrow_mut().as_mut().map(f))
+}
+
+/// The installing thread's, as the thread local is elsewhere, without its
+/// TLS lookup on every gfx call (hardware_threads::OwnedCell).
+#[cfg(target_os = "xbox360")]
+static STATE: crate::hardware_threads::OwnedCell<Option<State>> =
+    crate::hardware_threads::OwnedCell::new(None);
+
+#[cfg(target_os = "xbox360")]
+fn with<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    STATE.with(|s| s.as_mut().map(f)).flatten()
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
@@ -542,17 +627,22 @@ pub fn install(ctx: &crate::vk::VkContext) {
     }
     .expect("vkCreateCommandPool");
     let mut state = State {
+        dump: super::draw_dump::DrawDump::from_file(),
+        dump_bytes: HashMap::default(),
+        draw_counts: BTreeMap::new(),
+        frame_draws: 0,
+        upload_counts: BTreeMap::new(),
         dev,
         alloc: Allocator::default(),
         upload_pool,
         next_id: 1,
-        buffers: HashMap::new(),
-        images: HashMap::new(),
+        buffers: HashMap::default(),
+        images: HashMap::default(),
         programs: Vec::new(),
-        samplers: HashMap::new(),
-        pipelines: HashMap::new(),
+        samplers: HashMap::default(),
+        pipelines: HashMap::default(),
         layouts: Vec::new(),
-        layout_ids: HashMap::new(),
+        layout_ids: HashMap::default(),
         zero_buffer: 0,
         white: 0,
         white_cube: 0,
@@ -582,12 +672,23 @@ pub fn install(ctx: &crate::vk::VkContext) {
         },
     );
     state.white_cube = state.create_cube(1, &[255; 24]);
+    #[cfg(not(target_os = "xbox360"))]
     STATE.with(|s| *s.borrow_mut() = Some(state));
+    #[cfg(target_os = "xbox360")]
+    {
+        let claimed = STATE.claim() && STATS.claim();
+        assert!(claimed, "gfx: the Vulkan backend belongs to another thread");
+        STATE.with(|s| *s = Some(state));
+    }
 }
 
 /// Destroy every object the backend made. The device must be idle.
 pub fn shutdown() {
-    let Some(mut s) = STATE.with(|s| s.borrow_mut().take()) else {
+    #[cfg(not(target_os = "xbox360"))]
+    let taken = STATE.with(|s| s.borrow_mut().take());
+    #[cfg(target_os = "xbox360")]
+    let taken = STATE.with(|s| s.take()).flatten();
+    let Some(mut s) = taken else {
         return;
     };
     s.flush_uploads();
@@ -684,7 +785,14 @@ pub fn begin_frame(
     slot: usize,
 ) {
     with(|s| {
-        s.submit_uploads();
+        // On the Xbox 360 an update into an image the last frame still reads
+        // (the lightmap atlas's flicker, every frame) waits there for the GPU
+        // to finish that frame: end_frame submits them instead, after this
+        // frame's recording has given the GPU time to get there, and still
+        // ahead of the frame that draws with them.
+        if !cfg!(target_os = "xbox360") {
+            s.submit_uploads();
+        }
         // Frames before `submitted - (FRAMES - 1)` are complete.
         let done_before = s.submitted.saturating_sub(FRAMES as u64 - 1);
         let mut keep = Vec::new();
@@ -698,10 +806,21 @@ pub fn begin_frame(
             }
         }
         s.garbage = keep;
+        s.frame_draws = 0;
+        s.dump.begin_frame(
+            extent.width,
+            extent.height,
+            [
+                formats.0.as_raw() as u32,
+                formats.1.as_raw() as u32,
+                samples.as_raw(),
+            ],
+        );
         let frame = &mut s.frames[slot];
         frame.ubo_at = (0, 0);
         frame.pool_at = 0;
         frame.pool_used = 0;
+        frame.sets.clear();
         for &pool in &frame.pools {
             unsafe {
                 s.dev
@@ -737,6 +856,10 @@ pub fn end_frame() {
         if s.recording.take().is_some() {
             stats_frame();
             s.submitted += 1;
+        }
+        s.dump.end_frame();
+        if !s.dump.pending() && !s.dump_bytes.is_empty() {
+            s.dump_bytes = HashMap::default();
         }
     });
 }
@@ -775,7 +898,8 @@ impl State {
         let buffer = unsafe {
             d.create_buffer(
                 &vk::BufferCreateInfo::builder()
-                    .size(size.max(16))
+                    // Room past the end: the Xbox 360's vertex fetch reads past a buffer's last vertex.
+                    .size(size.max(16) + if cfg!(target_os = "xbox360") { 4096 } else { 0 })
                     .usage(usage)
                     .sharing_mode(vk::SharingMode::EXCLUSIVE),
                 None,
@@ -797,6 +921,9 @@ impl State {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), alloc.mapped, bytes.len());
         }
         let id = self.id();
+        if self.dump.pending() {
+            self.dump_bytes.insert(id, bytes.to_vec());
+        }
         self.buffers.insert(
             id,
             BufferObj {
@@ -811,6 +938,12 @@ impl State {
 
     /// A device-local buffer holding `bytes`, copied in by the next flush.
     fn create_static_buffer(&mut self, bytes: &[u8], usage: vk::BufferUsageFlags) -> u32 {
+        // The Xbox 360's memory is one pool, so device-local buys nothing,
+        // and vulkan4xenon makes a copy into a buffer wait for every draw
+        // before it (about 4.6 ms a frame): its buffers are the host's.
+        if cfg!(target_os = "xbox360") {
+            return self.create_buffer(bytes, usage);
+        }
         let size = bytes.len() as u64;
         let (buffer, alloc) = self.raw_buffer_in(
             size,
@@ -834,6 +967,9 @@ impl State {
             }
         }
         let id = self.id();
+        if self.dump.pending() {
+            self.dump_bytes.insert(id, bytes.to_vec());
+        }
         self.buffers.insert(
             id,
             BufferObj {
@@ -932,10 +1068,12 @@ impl State {
                 let fence = d
                     .create_fence(&vk::FenceCreateInfo::default(), None)
                     .expect("vkCreateFence");
+                tracing::debug!("upload: submitting and waiting");
                 d.queue_submit(self.dev.queue, &submit, fence)
                     .expect("vkQueueSubmit");
                 d.wait_for_fences(&[fence], true, u64::MAX)
                     .expect("vkWaitForFences");
+                tracing::debug!("upload: done");
                 d.destroy_fence(fence, None);
                 d.free_command_buffers(self.upload_pool, &cmds);
             } else {
@@ -976,6 +1114,7 @@ impl State {
         pixels: &[u8],
         sampling: Sampling,
     ) -> u32 {
+        tracing::debug!("texture: {width}x{height}");
         let rgba = to_rgba(format, pixels);
         self.create_image(width, height, 1, &rgba, sampling)
     }
@@ -1001,7 +1140,10 @@ impl State {
         sampling: Sampling,
     ) -> u32 {
         let cube = layers == 6;
-        let mips = if sampling.filter == Filter::LinearMipmap {
+        let power_of_two = width.is_power_of_two() && height.is_power_of_two();
+        let mips = if sampling.filter == Filter::LinearMipmap
+            && (power_of_two || !cfg!(target_os = "xbox360"))
+        {
             32 - width.max(height).max(1).leading_zeros()
         } else {
             1
@@ -1068,6 +1210,7 @@ impl State {
                 sampling,
                 mips,
                 layers,
+                size: (width, height),
             },
         );
         self.upload(id, 0, 0, width, height, rgba, true, (width, height));
@@ -1093,6 +1236,13 @@ impl State {
             let i = &self.images[&id];
             (i.image, i.mips, i.layers)
         };
+        // The console's frame log counts uploads by size and levels
+        // (`take_draw_counts`); images made since the last count carry 1000
+        // on their levels.
+        *self
+            .upload_counts
+            .entry((size.0, size.1, mips + if fresh { 1000 } else { 0 }))
+            .or_default() += 1;
         let cmd = self.upload_commands();
         let d = &self.dev.device;
         unsafe {
@@ -1183,15 +1333,22 @@ impl State {
         if let Some(&s) = self.samplers.get(&sampling) {
             return s;
         }
-        let (filter, mip, max_lod) = match sampling.filter {
+        let (filter, mut mip, mut max_lod) = match sampling.filter {
             Filter::Nearest => (vk::Filter::NEAREST, vk::SamplerMipmapMode::NEAREST, 0.0),
             Filter::Linear => (vk::Filter::LINEAR, vk::SamplerMipmapMode::NEAREST, 0.0),
             Filter::LinearMipmap => (vk::Filter::LINEAR, vk::SamplerMipmapMode::LINEAR, 1000.0),
         };
+        let knobs = sampler_knobs();
         let aniso = self
             .dev
             .anisotropy
-            .filter(|_| sampling.filter == Filter::LinearMipmap);
+            .filter(|_| sampling.filter == Filter::LinearMipmap && !knobs.no_aniso);
+        if let Some(lod) = knobs.max_lod {
+            max_lod = f32::min(max_lod, lod);
+        }
+        if knobs.nearest_mip {
+            mip = vk::SamplerMipmapMode::NEAREST;
+        }
         let wrap = if sampling.wrap {
             vk::SamplerAddressMode::REPEAT
         } else {
@@ -1430,7 +1587,7 @@ impl State {
             if fresh {
                 let sizes = [
                     vk::DescriptorPoolSize {
-                        ty: vk::DescriptorType::UNIFORM_BUFFER,
+                        ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
                         descriptor_count: POOL_SETS * 2,
                     },
                     vk::DescriptorPoolSize {
@@ -1486,7 +1643,47 @@ impl State {
         first: u32,
         count: u32,
     ) {
-        let (Some(program_id), Some(rec)) = (self.program, self.recording.as_ref()) else {
+        let Some(program_id) = self.program else {
+            return;
+        };
+        // Diagnostic: `maxverts=N` in sampler.txt cuts each draw to N vertices.
+        let count = match sampler_knobs().max_verts {
+            Some(n) if topology == Topology::Triangles => count.min(n / 3 * 3),
+            _ => count,
+        };
+        if skipped_programs().contains(&program_id) {
+            return;
+        }
+        if let Some((min, max)) = max_draws() {
+            let index = self.frame_draws;
+            self.frame_draws += 1;
+            if index < min || index >= max {
+                return;
+            }
+            let textures: Vec<String> = self
+                .units
+                .iter()
+                .chain(self.cube_units.iter())
+                .flatten()
+                .filter_map(|id| self.images.get(id))
+                .map(|i| format!("{}x{}/{}x{}", i.size.0, i.size.1, i.mips, i.layers))
+                .collect();
+            tracing::info!(
+                "draw {}: program {program_id}, {} from {first}, indexed {}, textures {}",
+                index,
+                count,
+                indices.is_some(),
+                textures.join(" ")
+            );
+        }
+        *self.draw_counts.entry(program_id).or_default() += 1;
+        if let Some(program) = self.programs.get_mut(program_id as usize)
+            && !program.drawn
+        {
+            program.drawn = true;
+            tracing::debug!("first draw with program {program_id}");
+        }
+        let Some(rec) = self.recording.as_ref() else {
             return;
         };
         let (cmd, slot, render_pass, formats, extent) = (
@@ -1515,27 +1712,34 @@ impl State {
         let pipeline = self.pipeline(key, render_pass);
 
         // Uniform blocks into the ring, then this draw's descriptor set.
-        let blocks: [Vec<u8>; 2] = self.programs[program_id as usize].blocks.clone();
-        let mut buffer_writes = Vec::new();
+        let blocks = std::mem::take(&mut self.programs[program_id as usize].blocks);
+        // Each uniform binding's ring chunk and size, and its offset there.
+        let mut buffers = [(u32::MAX, vk::Buffer::null(), 0u64); 2];
+        let mut dynamic_offsets = [0u32; 2];
+        let mut dynamic_count = 0;
         for (binding, bytes) in blocks.iter().enumerate() {
             if !bytes.is_empty() {
                 let (buffer, offset) = self.push_uniforms(slot, bytes);
-                buffer_writes.push((
-                    binding as u32,
-                    vk::DescriptorBufferInfo {
-                        buffer,
-                        offset,
-                        range: bytes.len() as u64,
-                    },
-                ));
+                buffers[dynamic_count] = (binding as u32, buffer, bytes.len() as u64);
+                dynamic_offsets[dynamic_count] = offset as u32;
+                dynamic_count += 1;
             }
         }
+        let blocks = if self.dump.active() {
+            let copy = blocks.clone();
+            self.programs[program_id as usize].blocks = blocks;
+            copy
+        } else {
+            self.programs[program_id as usize].blocks = blocks;
+            Default::default()
+        };
         let sampler_units: Vec<(u32, u32, bool)> = self.programs[program_id as usize]
             .samplers
             .iter()
             .map(|s| (s.binding, s.unit, s.cube))
             .collect();
         let mut image_writes = Vec::new();
+        let mut dump_samplers: Vec<[u32; 7]> = Vec::new();
         for (binding, unit, cube) in sampler_units {
             let (units, fallback) = if cube {
                 (&self.cube_units, self.white_cube)
@@ -1548,8 +1752,29 @@ impl State {
                 .flatten()
                 .filter(|id| self.images.contains_key(id))
                 .unwrap_or(fallback);
+            // Diagnostic: `nobig` in sampler.txt samples white for the lightmap atlas.
+            let image = if sampler_knobs().no_big && self.images[&image].size.0 > 2048 {
+                fallback
+            } else {
+                image
+            };
             let (view, sampling) = {
                 let i = &self.images[&image];
+                if self.dump.active() {
+                    dump_samplers.push([
+                        binding,
+                        i.size.0,
+                        i.size.1,
+                        i.mips,
+                        i.layers,
+                        match i.sampling.filter {
+                            Filter::Nearest => 0,
+                            Filter::Linear => 1,
+                            Filter::LinearMipmap => 2,
+                        },
+                        i.sampling.wrap as u32,
+                    ]);
+                }
                 (i.view, i.sampling)
             };
             let sampler = self.sampler(sampling);
@@ -1564,33 +1789,61 @@ impl State {
         }
         let program = &self.programs[program_id as usize];
         let (set_layout, pipeline_layout) = (program.set_layout, program.layout);
-        let set = self.descriptor_set(slot, set_layout);
-        let writes: Vec<vk::WriteDescriptorSet> = buffer_writes
-            .iter()
-            .map(|(binding, info)| {
-                vk::WriteDescriptorSet::builder()
-                    .dst_set(set)
-                    .dst_binding(*binding)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(std::slice::from_ref(info))
-                    .build()
-            })
-            .chain(image_writes.iter().map(|(binding, info)| {
-                vk::WriteDescriptorSet::builder()
-                    .dst_set(set)
-                    .dst_binding(*binding)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(std::slice::from_ref(info))
-                    .build()
-            }))
-            .collect();
-        let d = &self.dev.device;
-        unsafe {
-            if !writes.is_empty() {
-                d.update_descriptor_sets(&writes, &[]);
+        let set_key = SetKey {
+            layout: set_layout,
+            buffers,
+            images: image_writes
+                .iter()
+                .map(|(binding, info)| (*binding, info.image_view, info.sampler))
+                .collect(),
+        };
+        let set = match self.frames[slot].sets.get(&set_key) {
+            Some(&set) => set,
+            None => {
+                let set = self.descriptor_set(slot, set_layout);
+                let buffer_infos: Vec<(u32, vk::DescriptorBufferInfo)> = buffers[..dynamic_count]
+                    .iter()
+                    .map(|&(binding, buffer, range)| {
+                        (
+                            binding,
+                            vk::DescriptorBufferInfo {
+                                buffer,
+                                offset: 0,
+                                range,
+                            },
+                        )
+                    })
+                    .collect();
+                let writes: Vec<vk::WriteDescriptorSet> = buffer_infos
+                    .iter()
+                    .map(|(binding, info)| {
+                        vk::WriteDescriptorSet::builder()
+                            .dst_set(set)
+                            .dst_binding(*binding)
+                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)
+                            .buffer_info(std::slice::from_ref(info))
+                            .build()
+                    })
+                    .chain(image_writes.iter().map(|(binding, info)| {
+                        vk::WriteDescriptorSet::builder()
+                            .dst_set(set)
+                            .dst_binding(*binding)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(std::slice::from_ref(info))
+                            .build()
+                    }))
+                    .collect();
+                unsafe {
+                    if !writes.is_empty() {
+                        self.dev.device.update_descriptor_sets(&writes, &[]);
+                    }
+                }
+                stat(|s| s.descriptor_writes += writes.len() as u32);
+                self.frames[slot].sets.insert(set_key, set);
+                set
             }
-            stat(|s| s.descriptor_writes += writes.len() as u32);
-        }
+        };
+        let d = &self.dev.device;
 
         // GL rects are bottom-left; the swapchain is top-left.
         let h = extent.height as i32;
@@ -1619,6 +1872,26 @@ impl State {
         let Some(vertex_buffer) = vertex_buffer else {
             return;
         };
+        if self.dump.active() {
+            let mut dump = std::mem::take(&mut self.dump);
+            let bias = if gl.polygon_offset {
+                gl.offset
+            } else {
+                (0.0, 0.0)
+            };
+            let shape = DumpShape {
+                vertices,
+                indices,
+                key,
+                first,
+                count,
+                viewport,
+                scissor,
+                bias,
+            };
+            dump_draw(self, &mut dump, &shape, &blocks, &dump_samplers);
+            self.dump = dump;
+        }
         let rec = self.recording.as_mut().unwrap();
         unsafe {
             if rec.pipeline != pipeline {
@@ -1648,7 +1921,7 @@ impl State {
                 pipeline_layout,
                 0,
                 &[set],
-                &[],
+                &dynamic_offsets[..dynamic_count],
             );
             d.cmd_push_constants(
                 cmd,
@@ -1667,6 +1940,126 @@ impl State {
             }
         }
     }
+}
+
+/// What [`dump_draw`] needs of a draw beyond the backend's state.
+struct DumpShape {
+    vertices: u32,
+    indices: Option<u32>,
+    key: PipelineKey,
+    first: u32,
+    count: u32,
+    viewport: vk::Viewport,
+    scissor: vk::Rect2D,
+    bias: (f32, f32),
+}
+
+/// One draw into the draw dump, as [`State::pipeline`] and the draw issue it.
+fn dump_draw(
+    s: &State,
+    dump: &mut super::draw_dump::DrawDump,
+    d: &DumpShape,
+    blocks: &[Vec<u8>; 2],
+    samplers: &[[u32; 7]],
+) {
+    let key = d.key;
+    let program = &s.programs[key.program as usize];
+    let layout = &s.layouts[key.layout as usize];
+    dump.program(key.program, &program.spirv, &program.layout_bindings);
+    let attributes: Vec<[u32; 4]> = program
+        .vertex_inputs
+        .iter()
+        .map(
+            |(&location, &(int, _))| match layout.attributes.get(location as usize) {
+                Some(a) => [
+                    location,
+                    0,
+                    attribute_format(a.kind == super::AttributeKind::Int, a.components).as_raw()
+                        as u32,
+                    a.offset,
+                ],
+                None => [location, 1, attribute_format(int, 4).as_raw() as u32, 0],
+            },
+        )
+        .collect();
+    let empty = Vec::new();
+    let bytes = s.dump_bytes.get(&d.vertices).unwrap_or(&empty);
+    let stride = layout.stride as usize;
+    let (vertices, indices): (&[u8], &[u8]) = match d.indices {
+        Some(i) => {
+            let index_bytes = s.dump_bytes.get(&i).unwrap_or(&empty);
+            let from = (d.first as usize * 4).min(index_bytes.len());
+            let to = ((d.first + d.count) as usize * 4).min(index_bytes.len());
+            (bytes, &index_bytes[from..to])
+        }
+        None => {
+            let from = (d.first as usize * stride).min(bytes.len());
+            let to = ((d.first + d.count) as usize * stride).min(bytes.len());
+            (&bytes[from..to], &[])
+        }
+    };
+    if bytes.is_empty() {
+        tracing::warn!("draw dump: no bytes kept for buffer {}", d.vertices);
+    }
+    let factors = key.blend.unwrap_or([
+        BlendFactor::One,
+        BlendFactor::Zero,
+        BlendFactor::One,
+        BlendFactor::Zero,
+    ]);
+    let mask = key
+        .color_mask
+        .iter()
+        .enumerate()
+        .fold(0, |m, (i, on)| m | ((*on as u32) << i));
+    let v = d.viewport;
+    let r = d.scissor;
+    dump.draw(&super::draw_dump::Draw {
+        program: key.program,
+        topology: match key.topology {
+            Topology::Triangles => 0,
+            Topology::Lines => 1,
+        },
+        count: d.count,
+        stride: layout.stride,
+        attributes: &attributes,
+        cull: match key.cull {
+            Some(face) => [
+                vk::CullModeFlags::BACK.as_raw(),
+                match face {
+                    FrontFace::Clockwise => vk::FrontFace::CLOCKWISE,
+                    _ => vk::FrontFace::COUNTER_CLOCKWISE,
+                }
+                .as_raw() as u32,
+            ],
+            None => [0, vk::FrontFace::COUNTER_CLOCKWISE.as_raw() as u32],
+        },
+        depth_test: key.depth_test,
+        depth_write: key.depth_write,
+        depth_compare: match key.depth_func {
+            DepthFunc::Less => vk::CompareOp::LESS,
+            DepthFunc::LessEqual => vk::CompareOp::LESS_OR_EQUAL,
+            DepthFunc::Always => vk::CompareOp::ALWAYS,
+        }
+        .as_raw() as u32,
+        blend: key.blend.is_some(),
+        blend_factors: factors.map(|f| blend_factor(f).as_raw() as u32),
+        color_mask: mask,
+        depth_bias: key.depth_bias,
+        bias: [d.bias.1, d.bias.0],
+        formats: [key.formats.0 as u32, key.formats.1 as u32, key.samples],
+        viewport: [v.x, v.y, v.width, v.height, v.min_depth, v.max_depth],
+        scissor: [
+            r.offset.x,
+            r.offset.y,
+            r.extent.width as i32,
+            r.extent.height as i32,
+        ],
+        vertices,
+        indices,
+        blocks: [&blocks[0], &blocks[1]],
+        samplers,
+    });
 }
 
 fn clip_rect(r: [i32; 4], extent: vk::Extent2D) -> vk::Rect2D {
@@ -1784,6 +2177,13 @@ unsafe fn barrier(
 // ---------------------------------------------------------------------------
 
 pub fn create_program(vertex: &str, fragment: &str) -> u32 {
+    let (vertex_source, fragment_source) = (vertex, fragment);
+    let source_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (vertex, fragment).hash(&mut hasher);
+        hasher.finish()
+    };
     let vs = shader::compile(vertex, shader::Stage::Vertex)
         .unwrap_or_else(|e| panic!("vertex shader: {e}"));
     let fs = shader::compile(fragment, shader::Stage::Fragment)
@@ -1803,7 +2203,7 @@ pub fn create_program(vertex: &str, fragment: &str) -> u32 {
         let fragment = module(&linked.fragment);
 
         let mut slots: Vec<Slot> = Vec::new();
-        let mut names: HashMap<String, u32> = HashMap::new();
+        let mut names: HashMap<String, u32> = HashMap::default();
         let mut slot_for = |name: &str, slots: &mut Vec<Slot>| -> usize {
             *names.entry(name.to_string()).or_insert_with(|| {
                 slots.push(Slot::default());
@@ -1834,7 +2234,7 @@ pub fn create_program(vertex: &str, fragment: &str) -> u32 {
                 set_bindings.push(
                     vk::DescriptorSetLayoutBinding::builder()
                         .binding(index as u32)
-                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)
                         .descriptor_count(1)
                         .stage_flags(if index == 0 {
                             vk::ShaderStageFlags::VERTEX
@@ -1903,12 +2303,152 @@ pub fn create_program(vertex: &str, fragment: &str) -> u32 {
             names,
             samplers,
             vertex_inputs: linked.vertex_inputs,
+            drawn: false,
+            spirv: if cfg!(target_os = "xbox360") {
+                [linked.vertex.clone(), linked.fragment.clone()]
+            } else {
+                [Vec::new(), Vec::new()]
+            },
+            layout_bindings: if cfg!(target_os = "xbox360") {
+                set_bindings
+                    .iter()
+                    .map(|b| {
+                        [
+                            b.binding,
+                            b.descriptor_type.as_raw() as u32,
+                            b.stage_flags.as_raw(),
+                        ]
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         });
-        s.programs.len() as u32 - 1
+        let id = s.programs.len() as u32 - 1;
+        tracing::debug!(
+            "program {id}: {source_hash:016x} (vertex {:016x}, fragment {:016x})",
+            shader::source_hash(vertex_source),
+            shader::source_hash(fragment_source)
+        );
+        id
     })
 }
 
 pub const NO_UNIFORM: u32 = u32::MAX;
+
+/// Draws per program since the last call, as `program:count` pairs.
+pub fn take_draw_counts() -> String {
+    with(|s| {
+        let draws = std::mem::take(&mut s.draw_counts)
+            .into_iter()
+            .map(|(program, count)| format!("{program}:{count}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let uploads = std::mem::take(&mut s.upload_counts)
+            .into_iter()
+            .map(|((w, h, mips), count)| format!("{count}x {w}x{h}/{mips}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{draws}; uploads {uploads}")
+    })
+    .unwrap_or_default()
+}
+
+/// Programs whose draws are skipped: on the Xbox 360, the numbers in
+/// `game:\\skip_programs.txt` (numbers and `a-b` ranges), to find a draw
+/// that hangs its GPU. Empty elsewhere.
+fn skipped_programs() -> &'static [u32] {
+    static SKIPPED: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    SKIPPED.get_or_init(|| {
+        if !cfg!(target_os = "xbox360") {
+            return Vec::new();
+        }
+        let text = std::fs::read_to_string(r"game:\skip_programs.txt").unwrap_or_default();
+        let skipped = parse_program_list(&text);
+        if !skipped.is_empty() {
+            tracing::info!("skipping draws of programs {skipped:?}");
+        }
+        skipped
+    })
+}
+
+/// `max_draws.txt` beside the console's `.xex`: draw only the first N draws
+/// of each frame, and log each, to find a draw that hangs the GPU.
+/// `n` keeps draws 0..n, `a-b` keeps draws a..=b.
+/// `sampler.txt` beside the console's `.xex`, to look for a GPU hang in
+/// texture sampling: `noaniso`, `nearestmip` and `maxlod=<f>`, by whitespace.
+/// A console diagnostic: nothing reads it elsewhere.
+#[derive(Default, Clone, Copy)]
+struct SamplerKnobs {
+    no_aniso: bool,
+    nearest_mip: bool,
+    max_lod: Option<f32>,
+    max_verts: Option<u32>,
+    no_big: bool,
+}
+
+fn sampler_knobs() -> SamplerKnobs {
+    static KNOBS: std::sync::OnceLock<SamplerKnobs> = std::sync::OnceLock::new();
+    *KNOBS.get_or_init(|| {
+        if !cfg!(target_os = "xbox360") {
+            return SamplerKnobs::default();
+        }
+        let text = std::fs::read_to_string(r"game:\sampler.txt").unwrap_or_default();
+        let mut knobs = SamplerKnobs::default();
+        for word in text.split_whitespace() {
+            match word {
+                "noaniso" => knobs.no_aniso = true,
+                "nearestmip" => knobs.nearest_mip = true,
+                "nobig" => knobs.no_big = true,
+                _ if word.starts_with("maxverts=") => knobs.max_verts = word[9..].parse().ok(),
+                _ => {
+                    knobs.max_lod = word
+                        .strip_prefix("maxlod=")
+                        .and_then(|v| v.parse().ok())
+                        .or(knobs.max_lod)
+                }
+            }
+        }
+        tracing::info!(
+            "sampler knobs: noaniso {} nearestmip {} maxlod {:?} maxverts {:?} nobig {}",
+            knobs.no_aniso,
+            knobs.nearest_mip,
+            knobs.max_lod,
+            knobs.max_verts,
+            knobs.no_big
+        );
+        knobs
+    })
+}
+
+fn max_draws() -> Option<(u32, u32)> {
+    static MAX: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        if !cfg!(target_os = "xbox360") {
+            return None;
+        }
+        let text = std::fs::read_to_string(r"game:\max_draws.txt").ok()?;
+        let text = text.trim();
+        let range = match text.split_once('-') {
+            Some((a, b)) => Some((a.parse().ok()?, b.parse::<u32>().ok()? + 1)),
+            None => text.parse().ok().map(|n| (0, n)),
+        };
+        if let Some((min, max)) = range {
+            tracing::info!("drawing only draws {min}..{max} of each frame");
+        }
+        range
+    })
+}
+
+fn parse_program_list(text: &str) -> Vec<u32> {
+    text.split(|c: char| c == ',' || c.is_whitespace())
+        .filter_map(|item| match item.split_once('-') {
+            Some((a, b)) => Some(a.parse().ok()?..=b.parse().ok()?),
+            None => item.parse().ok().map(|n| n..=n),
+        })
+        .flatten()
+        .collect()
+}
 
 /// A uniform handle: the name's slot, and in the top 8 bits the array
 /// element it starts at (GL's `name[3]` locations).
@@ -1931,10 +2471,19 @@ pub fn bind_program(program: u32) {
 
 /// Write `values` (32-bit words, `columns` columns of `rows` each per
 /// element, `elements` elements) into the bound program's uniform.
-fn write_uniform(uniform: u32, words: &[u32], rows: usize, columns: usize) {
+/// Write `values` (each turned into its word by `word`) into the bound
+/// program's blocks. No allocation: a frame makes thousands of these.
+fn write_uniform<T: Copy>(
+    uniform: u32,
+    values: &[T],
+    word: impl Fn(T) -> u32,
+    rows: usize,
+    columns: usize,
+) {
     if uniform == NO_UNIFORM {
         return;
     }
+    let words = values;
     with(|s| {
         let Some(program) = s.program else { return };
         let p = &mut s.programs[program as usize];
@@ -1955,25 +2504,22 @@ fn write_uniform(uniform: u32, words: &[u32], rows: usize, columns: usize) {
                         if let (Some(dst), Some(v)) =
                             (bytes.get_mut(o..o + 4), element.get(c * rows + r))
                         {
-                            dst.copy_from_slice(&v.to_ne_bytes());
+                            dst.copy_from_slice(&word(*v).to_ne_bytes());
                         }
                     }
                 }
             }
         }
     });
-}
-
-fn bits(v: &[f32]) -> Vec<u32> {
-    v.iter().map(|f| f.to_bits()).collect()
+    stat(|s| s.uniform_sets += 1);
 }
 
 pub fn set_floats(uniform: u32, values: &[f32], components: usize) {
-    write_uniform(uniform, &bits(values), components, 1);
+    write_uniform(uniform, values, f32::to_bits, components, 1);
 }
 
 pub fn set_matrices(uniform: u32, values: &[f32], size: usize) {
-    write_uniform(uniform, &bits(values), size, size);
+    write_uniform(uniform, values, f32::to_bits, size, size);
 }
 
 /// An int or bool uniform's word. On the Xbox 360 its shaders declare these
@@ -1987,12 +2533,11 @@ fn int_word(i: i32) -> u32 {
 }
 
 pub fn set_ivec(uniform: u32, values: &[i32], components: usize) {
-    let words: Vec<u32> = values.iter().map(|&i| int_word(i)).collect();
-    write_uniform(uniform, &words, components, 1);
+    write_uniform(uniform, values, int_word, components, 1);
 }
 
 pub fn set_mat3x4(uniform: u32, values: &[f32]) {
-    write_uniform(uniform, &bits(values), 4, 3);
+    write_uniform(uniform, values, f32::to_bits, 4, 3);
 }
 
 pub fn set_ints(uniform: u32, values: &[i32]) {
@@ -2009,8 +2554,7 @@ pub fn set_ints(uniform: u32, values: &[i32]) {
     })
     .flatten();
     if sampler.is_none() {
-        let words: Vec<u32> = values.iter().map(|&i| int_word(i)).collect();
-        write_uniform(uniform, &words, 1, 1);
+        write_uniform(uniform, values, int_word, 1, 1);
     }
 }
 
@@ -2044,6 +2588,31 @@ pub fn color_mask(mask: [bool; 4]) {
 }
 pub fn scissor(rect: [i32; 4]) {
     with(|s| s.gl.scissor = rect);
+}
+
+/// The GL-style state, kept to be put back with [`restore_state`] after a
+/// draw that changes it (the Xbox 360's lamp-shadow pass).
+pub struct SavedState(GlState);
+
+pub fn save_state() -> Option<SavedState> {
+    with(|s| SavedState(s.gl))
+}
+
+pub fn restore_state(saved: SavedState) {
+    with(|s| s.gl = saved.0);
+}
+
+/// The viewport draws go to (GL's, bottom-left origin): the frame's whole
+/// extent unless one was set.
+pub fn current_viewport() -> Option<[i32; 4]> {
+    with(|s| {
+        s.gl.viewport.or_else(|| {
+            s.recording
+                .as_ref()
+                .map(|r| [0, 0, r.extent.width as i32, r.extent.height as i32])
+        })
+    })
+    .flatten()
 }
 pub fn viewport(rect: [i32; 4]) {
     with(|s| s.gl.viewport = Some(rect));
@@ -2094,6 +2663,18 @@ pub fn clear(color: bool, depth: bool) {
         if attachments.is_empty() || rect.extent.width == 0 || rect.extent.height == 0 {
             return;
         }
+        let clear_color = s.gl.clear_color;
+        s.dump.clear(
+            color,
+            depth,
+            clear_color,
+            [
+                rect.offset.x,
+                rect.offset.y,
+                rect.extent.width as i32,
+                rect.extent.height as i32,
+            ],
+        );
         unsafe {
             s.dev.device.cmd_clear_attachments(
                 rec.commands,
@@ -2124,8 +2705,16 @@ pub fn begin_depth_capture() -> Option<[i32; 2]> {
 /// whether the old contents were kept.
 pub fn begin_shadow_capture(size: [u32; 2], keep: bool) -> Option<bool> {
     with(|s| {
+        // An atlas per frame slot on the Xbox 360, which keeps no rows from
+        // frame to frame: drawing into the one the frame before still
+        // samples made vulkan4xenon wait out that frame's GPU work, so the
+        // CPU and GPU stopped overlapping (18 fps where 42 without shadows).
+        let target = match &s.recording {
+            Some(rec) if cfg!(target_os = "xbox360") && !keep => SHADOW_TARGET + rec.slot % 2,
+            _ => SHADOW_TARGET,
+        };
         s.begin_depth_capture(
-            SHADOW_TARGET,
+            target,
             Some(vk::Extent2D {
                 width: size[0].max(1),
                 height: size[1].max(1),
@@ -2159,6 +2748,11 @@ impl State {
         fixed_size: Option<vk::Extent2D>,
         keep: bool,
     ) -> Option<[i32; 2]> {
+        // Only shadow maps on the Xbox 360: nothing there samples a self
+        // depth mask (no VR held items), and its capture costs a pass.
+        if cfg!(target_os = "xbox360") && target == SELF_DEPTH_TARGET {
+            return None;
+        }
         let rec = self.recording.as_ref()?;
         if rec.paused.is_some() {
             return None;
@@ -2198,12 +2792,18 @@ impl State {
                 *unit = None;
             }
         }
-        let clears = [vk::ClearValue {
+        let depth_clear = vk::ClearValue {
             depth_stencil: vk::ClearDepthStencilValue {
                 depth: 1.0,
                 stencil: 0,
             },
-        }];
+        };
+        let clears = [vk::ClearValue::default(), depth_clear];
+        let clears = if CAPTURE_COLOR.is_some() {
+            &clears[..]
+        } else {
+            &clears[1..]
+        };
         unsafe {
             let d = &self.dev.device;
             d.cmd_end_render_pass(cmd);
@@ -2216,15 +2816,20 @@ impl State {
                         offset: vk::Offset2D::default(),
                         extent: size,
                     })
-                    .clear_values(&clears),
+                    .clear_values(clears),
                 vk::SubpassContents::INLINE,
             );
         }
+        self.dump
+            .capture_begin(size.width, size.height, self.capture_kept);
         let gl = self.gl;
         let rec = self.recording.as_mut().unwrap();
         rec.paused = Some((rec.render_pass, rec.formats, rec.samples, rec.extent, gl));
         rec.render_pass = pass;
-        rec.formats = (vk::Format::UNDEFINED.as_raw(), CAPTURE_DEPTH.as_raw());
+        rec.formats = (
+            CAPTURE_COLOR.unwrap_or(vk::Format::UNDEFINED).as_raw(),
+            CAPTURE_DEPTH.as_raw(),
+        );
         rec.samples = vk::SampleCountFlags::TYPE_1;
         rec.extent = size;
         rec.pipeline = vk::Pipeline::null();
@@ -2254,6 +2859,7 @@ impl State {
         rec.bias = None;
         let (cmd, resume, framebuffer) = (rec.commands, rec.resume_pass, rec.framebuffer);
         self.gl = gl;
+        self.dump.capture_end();
         unsafe {
             let d = &self.dev.device;
             d.cmd_end_render_pass(cmd);
@@ -2285,6 +2891,7 @@ impl State {
             pass,
             load_pass,
             images: [None; CAPTURE_TARGETS],
+            colors: [None; CAPTURE_TARGETS],
             active: SELF_DEPTH_TARGET,
         });
         pass
@@ -2301,7 +2908,7 @@ impl State {
         } else {
             (vk::AttachmentLoadOp::CLEAR, vk::ImageLayout::UNDEFINED)
         };
-        let attachments = [vk::AttachmentDescription::builder()
+        let depth = vk::AttachmentDescription::builder()
             .format(CAPTURE_DEPTH)
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(load_op)
@@ -2310,15 +2917,38 @@ impl State {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(initial)
             .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .build()];
+            .build();
+        let color = vk::AttachmentDescription::builder()
+            .format(CAPTURE_COLOR.unwrap_or(vk::Format::UNDEFINED))
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .build();
+        let with_color = [color, depth];
+        let attachments = if CAPTURE_COLOR.is_some() {
+            &with_color[..]
+        } else {
+            &with_color[1..]
+        };
         let depth_ref = vk::AttachmentReference {
-            attachment: 0,
+            attachment: u32::from(CAPTURE_COLOR.is_some()),
             layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         };
-        let subpass = [vk::SubpassDescription::builder()
+        let color_ref = [vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        }];
+        let mut subpass = vk::SubpassDescription::builder()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .depth_stencil_attachment(&depth_ref)
-            .build()];
+            .depth_stencil_attachment(&depth_ref);
+        if CAPTURE_COLOR.is_some() {
+            subpass = subpass.color_attachments(&color_ref);
+        }
+        let subpass = [subpass.build()];
         let tests = vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
             | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
         let dependencies = [
@@ -2347,7 +2977,7 @@ impl State {
         unsafe {
             self.dev.device.create_render_pass(
                 &vk::RenderPassCreateInfo::builder()
-                    .attachments(&attachments)
+                    .attachments(attachments)
                     .subpasses(&subpass)
                     .dependencies(&dependencies),
                 None,
@@ -2370,6 +3000,14 @@ impl State {
                 return (id, framebuffer);
             }
             if let Some(i) = self.images.remove(&id) {
+                self.retire(Garbage::Image(i.image, i.view, i.alloc));
+            }
+            if let Some(color) = self
+                .depth_capture
+                .as_mut()
+                .and_then(|c| c.colors[target].take())
+                && let Some(i) = self.images.remove(&color)
+            {
                 self.retire(Garbage::Image(i.image, i.view, i.alloc));
             }
             self.retire(Garbage::Framebuffer(framebuffer));
@@ -2422,12 +3060,18 @@ impl State {
             )
         }
         .expect("vkCreateImageView");
-        let attachments = [view];
+        let color = CAPTURE_COLOR.map(|format| self.capture_color_image(format, size));
+        let with_color = [color.map_or(vk::ImageView::null(), |(_, v)| v), view];
+        let attachments = if color.is_some() {
+            &with_color[..]
+        } else {
+            &with_color[1..]
+        };
         let framebuffer = unsafe {
             d.create_framebuffer(
                 &vk::FramebufferCreateInfo::builder()
                     .render_pass(pass)
-                    .attachments(&attachments)
+                    .attachments(attachments)
                     .width(size.width)
                     .height(size.height)
                     .layers(1),
@@ -2448,12 +3092,84 @@ impl State {
                 },
                 mips: 1,
                 layers: 1,
+                size: (size.width, size.height),
             },
         );
         if let Some(c) = self.depth_capture.as_mut() {
             c.images[target] = Some((id, framebuffer, size));
+            c.colors[target] = color.map(|(id, _)| id);
         }
         (id, framebuffer)
+    }
+
+    /// A capture's colour image ([`CAPTURE_COLOR`]): its id and view.
+    fn capture_color_image(
+        &mut self,
+        format: vk::Format,
+        size: vk::Extent2D,
+    ) -> (u32, vk::ImageView) {
+        let d = self.dev.device.clone();
+        let image = unsafe {
+            d.create_image(
+                &vk::ImageCreateInfo::builder()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D {
+                        width: size.width,
+                        height: size.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                None,
+            )
+        }
+        .expect("vkCreateImage");
+        let req = unsafe { d.get_image_memory_requirements(image) };
+        let alloc = self
+            .alloc
+            .alloc(&self.dev, req, vk::MemoryPropertyFlags::DEVICE_LOCAL, false);
+        unsafe { d.bind_image_memory(image, alloc.memory, alloc.offset) }
+            .expect("vkBindImageMemory");
+        let view = unsafe {
+            d.create_image_view(
+                &vk::ImageViewCreateInfo::builder()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+                None,
+            )
+        }
+        .expect("vkCreateImageView");
+        let id = self.id();
+        self.images.insert(
+            id,
+            ImageObj {
+                image,
+                view,
+                alloc,
+                sampling: Sampling {
+                    filter: Filter::Nearest,
+                    wrap: false,
+                },
+                mips: 1,
+                layers: 1,
+                size: (size.width, size.height),
+            },
+        );
+        (id, view)
     }
 }
 
@@ -2641,7 +3357,13 @@ impl Drop for VkTexture {
 
 #[cfg(test)]
 mod tests {
-    use super::take;
+
+    #[test]
+    fn program_lists_take_numbers_and_ranges() {
+        assert_eq!(parse_program_list("3, 5-7\n12 x"), [3, 5, 6, 7, 12]);
+        assert!(parse_program_list("").is_empty());
+    }
+    use super::{parse_program_list, take};
 
     #[test]
     fn first_fit_splits_and_aligns() {

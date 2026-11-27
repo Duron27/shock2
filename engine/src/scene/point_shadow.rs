@@ -32,10 +32,15 @@ use cgmath::{InnerSpace, Matrix3, Matrix4, Vector3, Vector4};
 use super::{RenderLayer, SceneObject, light::LightArray, scene::Scene};
 use crate::{engine::EngineRenderContext, gfx, renderer::Renderer};
 
-/// Lamps that cast shadows in one frame.
-pub const MAX_SHADOW_LIGHTS: usize = 4;
-/// Texels along a cube face's side.
-pub const FACE_SIZE: u32 = 512;
+/// Lamps that cast shadows in one frame. The Xbox 360 takes the nearest
+/// alone: its receivers can't loop over lamps (an array indexed by a loop
+/// counter hangs its GPU), and every lamp is a shader's worth of sampling
+/// paid on every pixel, as both arms of a branch run there.
+pub const MAX_SHADOW_LIGHTS: usize = if XBOX { 1 } else { 4 };
+/// Texels along a cube face's side. Smaller on the Xbox 360, whose atlas
+/// (with the colour image its capture takes) must fit eDRAM's 10 MB.
+pub const FACE_SIZE: u32 = if XBOX { 256 } else { 512 };
+const XBOX: bool = cfg!(target_os = "xbox360");
 /// Shadow-map near plane: a caster closer to its lamp than this (the lamp's
 /// own fixture, mostly) casts nothing.
 pub const NEAR: f32 = 0.5;
@@ -114,6 +119,10 @@ fn tile_viewport(set: usize, light: usize, face: usize) -> [i32; 4] {
 /// (`None`: unused, or its world depth isn't drawn yet).
 struct Frame {
     texture: u32,
+    /// Whether any moving caster was drawn into set 1 this frame.
+    casting: bool,
+    /// World box holding every moving caster's shadow (min, max).
+    zone: Option<(Vector3<f32>, Vector3<f32>)>,
     lights: [Option<ShadowLight>; MAX_SHADOW_LIGHTS],
     strength: f32,
 }
@@ -244,9 +253,12 @@ pub(crate) fn render_atlas(
             gfx::disable(gfx::Cap::ScissorTest);
         };
 
-        // World depth: only rows whose lamp changed, a few per frame.
+        // World depth: only rows whose lamp changed, a few per frame. Not on
+        // the Xbox 360, whose objects take no lamp shadow (they shade one
+        // light, unshadowed) and whose world's own shadows are in its
+        // lightmaps: only set 1, the moving casters, is sampled there.
         let mut rebuilt = 0;
-        for row in 0..MAX_SHADOW_LIGHTS {
+        for row in 0..if XBOX { 0 } else { MAX_SHADOW_LIGHTS } {
             let Some(light) = rows[row] else { continue };
             if cache.rows[row].is_some_and(|c| same_lamp(&c, &light)) {
                 continue;
@@ -265,6 +277,8 @@ pub(crate) fn render_atlas(
         // Moving casters: every frame, into set 1 (all rows cleared).
         let [_, set1_y, _, _] = tile_viewport(1, MAX_SHADOW_LIGHTS - 1, 0);
         clear_rect(0, set1_y, 6 * size, MAX_SHADOW_LIGHTS as i32 * size);
+        let mut casting = false;
+        let mut zone: Option<(Vector3<f32>, Vector3<f32>)> = None;
         for (row, light) in rows.iter().enumerate() {
             let Some(light) = light else { continue };
             let near: Vec<_> = movers
@@ -275,6 +289,17 @@ pub(crate) fn render_atlas(
                 .copied()
                 .collect();
             if !near.is_empty() {
+                casting = true;
+                for object in &near {
+                    let (lo, hi) = shadow_bounds(light, object.get_world_position());
+                    zone = Some(match zone {
+                        None => (lo, hi),
+                        Some((a, b)) => (
+                            Vector3::new(a.x.min(lo.x), a.y.min(lo.y), a.z.min(lo.z)),
+                            Vector3::new(b.x.max(hi.x), b.y.max(hi.y), b.z.max(hi.z)),
+                        ),
+                    });
+                }
                 draw_row(1, row, light, &near);
             }
         }
@@ -284,17 +309,113 @@ pub(crate) fn render_atlas(
         // shadow map would leak light through walls.
         let mut ready = [None; MAX_SHADOW_LIGHTS];
         for row in 0..MAX_SHADOW_LIGHTS {
-            ready[row] = rows[row].filter(|l| cache.rows[row].is_some_and(|c| same_lamp(&c, l)));
+            ready[row] =
+                rows[row].filter(|l| XBOX || cache.rows[row].is_some_and(|c| same_lamp(&c, l)));
         }
         FRAME.with(|f| {
             *f.borrow_mut() = Some(Frame {
                 texture,
+                casting,
+                zone,
                 lights: ready,
                 strength: scene.point_shadow_strength,
             })
         });
         Some(FrameGuard)
     })
+}
+
+/// A caster's size about its origin, for [`shadow_bounds`]: a creature's
+/// height, about.
+const CASTER_RADIUS: f32 = 2.5;
+/// The farthest past its caster a shadow is darkened: past it, a lamp's
+/// shadow on a far wall is cut off, not drawn.
+const SHADOW_REACH: f32 = 12.0;
+
+/// The world box a caster at `at` can shadow, from `light`: itself, and on
+/// along the lamp's direction.
+fn shadow_bounds(light: &ShadowLight, at: Vector3<f32>) -> (Vector3<f32>, Vector3<f32>) {
+    let away = at - light.position;
+    let distance = away.magnitude().max(0.001);
+    let reach = (light.far() - distance).clamp(0.0, SHADOW_REACH);
+    let end = at + away / distance * reach;
+    let r = Vector3::new(CASTER_RADIUS, CASTER_RADIUS, CASTER_RADIUS);
+    let lo = Vector3::new(at.x.min(end.x), at.y.min(end.y), at.z.min(end.z)) - r;
+    let hi = Vector3::new(at.x.max(end.x), at.y.max(end.y), at.z.max(end.z)) + r;
+    (lo, hi)
+}
+
+/// The scissor rectangle (GL's, bottom-left origin) over this frame's
+/// shadows in the view `view_projection` draws, within `viewport`; `None`
+/// when no shadow is on screen. The Xbox 360's world takes its lamp-shadow
+/// pass inside it alone.
+#[cfg_attr(not(target_os = "xbox360"), allow(dead_code))]
+pub(crate) fn receiver_scissor(
+    view_projection: &Matrix4<f32>,
+    viewport: [i32; 4],
+) -> Option<[i32; 4]> {
+    let (lo, hi) = FRAME.with(|f| {
+        f.borrow()
+            .as_ref()
+            .filter(|f| f.casting && f.lights.iter().any(Option::is_some))
+            .and_then(|f| f.zone)
+    })?;
+    screen_rect(view_projection, viewport, lo, hi)
+}
+
+fn screen_rect(
+    view_projection: &Matrix4<f32>,
+    viewport: [i32; 4],
+    lo: Vector3<f32>,
+    hi: Vector3<f32>,
+) -> Option<[i32; 4]> {
+    let [vx, vy, vw, vh] = viewport;
+    let corners: Vec<Vector4<f32>> = (0..8)
+        .map(|i| {
+            view_projection
+                * Vector4::new(
+                    if i & 1 == 0 { lo.x } else { hi.x },
+                    if i & 2 == 0 { lo.y } else { hi.y },
+                    if i & 4 == 0 { lo.z } else { hi.z },
+                    1.0,
+                )
+        })
+        .collect();
+    // The box clipped by the near plane (GL's clip space: z + w >= 0): its
+    // corners in front, and where each edge crossing the plane meets it.
+    let near = |c: &Vector4<f32>| c.z + c.w;
+    let mut points: Vec<Vector4<f32>> =
+        corners.iter().copied().filter(|c| near(c) >= 0.0).collect();
+    for a in 0..8 {
+        for bit in [1, 2, 4] {
+            let b = a | bit;
+            if b == a {
+                continue;
+            }
+            let (da, db) = (near(&corners[a]), near(&corners[b]));
+            if (da >= 0.0) != (db >= 0.0) {
+                points.push(corners[a] + (corners[b] - corners[a]) * (da / (da - db)));
+            }
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for clip in points {
+        // On the near plane w is the near distance, never 0.
+        let w = clip.w.max(1.0e-4);
+        let (x, y) = (clip.x / w, clip.y / w);
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    let to_x = |n: f32| vx + ((n.clamp(-1.0, 1.0) * 0.5 + 0.5) * vw as f32) as i32;
+    let to_y = |n: f32| vy + ((n.clamp(-1.0, 1.0) * 0.5 + 0.5) * vh as f32) as i32;
+    let (left, bottom) = (to_x(x0), to_y(y0));
+    let (right, top) = ((to_x(x1) + 1).min(vx + vw), (to_y(y1) + 1).min(vy + vh));
+    (right > left && top > bottom).then_some([left, bottom, right - left, top - bottom])
 }
 
 /// Shared receiver code. `lightShadowSlot[i]` is the shadow light lit slot
@@ -308,8 +429,13 @@ uniform vec4 pointShadowColor[4];
 uniform int lightShadowSlot[6];
 uniform float pointShadowStrength;
 const highp float POINT_SHADOW_NEAR = 0.5;
+#ifdef SHOCK_XBOX360
+const int POINT_SHADOW_FACE = 256;
+const int POINT_SHADOW_MAX = 1;
+#else
 const int POINT_SHADOW_FACE = 512;
 const int POINT_SHADOW_MAX = 4;
+#endif
 // The atlas: six faces across, a row per set and light.
 const highp vec2 POINT_SHADOW_ATLAS = vec2(6 * POINT_SHADOW_FACE, 2 * POINT_SHADOW_MAX * POINT_SHADOW_FACE);
 
@@ -341,6 +467,45 @@ highp float pointShadowFace(highp vec3 d, out highp vec3 forward, out highp vec3
 // 1 objects only).
 highp float pointShadowVisibility(int light, int set, highp vec3 worldPos, vec3 normal) {
     highp float visibility = 1.0;
+#ifdef SHOCK_XBOX360
+    // The Xbox 360's one lamp, by a constant index (a uniform array indexed
+    // by a variable is addressed relative to a register there), and four
+    // taps unrolled rather than nine in a loop: every pixel pays for them.
+    highp vec4 l = pointShadowLights[0];
+    highp float far = l.w;
+    highp vec3 d = worldPos - l.xyz;
+    highp float dist = length(d);
+    vec3 n = dot(normal, d) > 0.0 ? -normal : normal;
+    d += n * (3.0 * dist / float(POINT_SHADOW_FACE));
+    highp vec3 forward = vec3(0.0, 0.0, -1.0);
+    highp vec3 up = vec3(0.0, 1.0, 0.0);
+    highp float face = pointShadowFace(d, forward, up);
+    highp float m = dot(d, forward);
+    highp vec3 right = cross(forward, up);
+    highp vec2 uv = vec2(dot(d, right), dot(d, up)) / max(m, POINT_SHADOW_NEAR) * 0.5 + 0.5;
+    highp float size = float(POINT_SHADOW_FACE);
+    highp vec2 tile = vec2(face, float(set)) * size;
+    highp vec2 texel = tile + vec2(uv.x, 1.0 - uv.y) * size;
+    highp float n2 = POINT_SHADOW_NEAR;
+    highp float bias = 0.03 + 0.008 * m;
+    highp float lit = 0.0;
+    #define SHOCK_SHADOW_TAP(ox, oy) { \
+        highp vec2 t = clamp(texel + vec2(ox, oy), tile + 0.5, tile + size - 0.5); \
+        highp float z = textureLod(pointShadowAtlas, (floor(t) + 0.5) / POINT_SHADOW_ATLAS, 0.0).r * 2.0 - 1.0; \
+        highp float occluder = 2.0 * far * n2 / ((far + n2) - z * (far - n2)); \
+        lit += m - bias > occluder ? 0.0 : 1.0; }
+    SHOCK_SHADOW_TAP(-0.5, -0.5)
+    SHOCK_SHADOW_TAP(0.5, -0.5)
+    SHOCK_SHADOW_TAP(-0.5, 0.5)
+    SHOCK_SHADOW_TAP(0.5, 0.5)
+    #undef SHOCK_SHADOW_TAP
+    // A product of steps, not &&, and the slot compared as a float: xost
+    // reads neither a short-circuit's phi nor the constant an int compare
+    // folds to once this is inlined.
+    highp float applies = (pointShadowEnabled ? 1.0 : 0.0) * step(0.0, float(light))
+        * step(0.0001, far) * step(dist, far) * step(POINT_SHADOW_NEAR, m);
+    visibility = mix(1.0, lit * 0.25, applies);
+#else
     if (pointShadowEnabled && light >= 0) {
         highp vec4 l = pointShadowLights[light];
         highp float far = l.w;
@@ -382,6 +547,7 @@ highp float pointShadowVisibility(int light, int set, highp vec3 worldPos, vec3 
             }
         }
     }
+#endif
     return visibility;
 }
 "#;
@@ -550,6 +716,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn screen_rect_bounds_a_box_ahead_and_clips_one_behind() {
+        let projection = cgmath::perspective(cgmath::Deg(90.0), 1.0, 0.1, 100.0);
+        let view = Matrix4::look_at_rh(
+            cgmath::Point3::new(0.0, 0.0, 0.0),
+            cgmath::Point3::new(0.0, 0.0, -1.0),
+            Vector3::unit_y(),
+        );
+        let vp = projection * view;
+        // A unit box 10 ahead, centred: a small rectangle at the middle.
+        let [x, y, w, h] = screen_rect(
+            &vp,
+            [0, 0, 1000, 1000],
+            Vector3::new(-0.5, -0.5, -10.5),
+            Vector3::new(0.5, 0.5, -9.5),
+        )
+        .unwrap();
+        assert!(
+            (440..=500).contains(&x) && (440..=500).contains(&y),
+            "{x} {y}"
+        );
+        assert!(
+            (40..=120).contains(&w) && (40..=120).contains(&h),
+            "{w} {h}"
+        );
+        // Off to the side: nothing on screen.
+        assert!(
+            screen_rect(
+                &vp,
+                [0, 0, 1000, 1000],
+                Vector3::new(50.0, -0.5, -10.5),
+                Vector3::new(51.0, 0.5, -9.5)
+            )
+            .is_none()
+        );
+        // Wholly behind the eye: nothing.
+        assert!(
+            screen_rect(
+                &vp,
+                [0, 0, 1000, 1000],
+                Vector3::new(-0.5, -0.5, 9.5),
+                Vector3::new(0.5, 0.5, 10.5)
+            )
+            .is_none()
+        );
+        // Beside the eye reaching ahead to the right: the right side only,
+        // not the whole screen as giving up on the corners behind would.
+        let [x, _, w, _] = screen_rect(
+            &vp,
+            [0, 0, 1000, 1000],
+            Vector3::new(2.0, -0.5, -10.0),
+            Vector3::new(3.0, 0.5, 2.0),
+        )
+        .unwrap();
+        assert!(x >= 500 && x + w == 1000, "{x} {w}");
+        // Round the eye: the whole viewport.
+        assert_eq!(
+            screen_rect(
+                &vp,
+                [0, 0, 1000, 1000],
+                Vector3::new(-1.0, -1.0, -1.0),
+                Vector3::new(1.0, 1.0, 1.0)
+            ),
+            Some([0, 0, 1000, 1000])
+        );
     }
 
     #[test]

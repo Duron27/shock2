@@ -94,6 +94,20 @@ pub trait Material: Any {
     /// Shared like the emissivity scale, so callers reset it afterwards.
     fn set_glow(&mut self, _glow: Glow) {}
 
+    /// The Xbox 360's lamp shadows: bind a second pass over this draw's
+    /// geometry that darkens it where a moving caster's shadow falls, and
+    /// say whether to draw it. The caller saves and restores the gfx state
+    /// around it (`vk_backend::save_state`).
+    fn begin_shadow_pass(
+        &self,
+        _render_context: &EngineRenderContext,
+        _view_matrix: &Matrix4<f32>,
+        _world_matrix: &Matrix4<f32>,
+        _lights: &crate::scene::light::LightArray,
+    ) -> bool {
+        false
+    }
+
     /// Replace diffuse only after a complete material plan has loaded.
     fn set_diffuse_texture(&mut self, _texture: std::rc::Rc<dyn crate::texture::TextureTrait>) {}
 

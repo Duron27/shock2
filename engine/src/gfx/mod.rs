@@ -9,6 +9,7 @@
 //!
 //! Everything here runs on the render thread only.
 
+pub mod draw_dump;
 pub mod vk_backend;
 
 // ---------------------------------------------------------------------------

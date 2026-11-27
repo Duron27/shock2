@@ -14,6 +14,13 @@ debug-assertions = false
 overflow-checks = false
 codegen-units = 16
 
+# The Xbox 360 build (xbox360/build.sh): release's code for every crate, ours
+# included - dev's debug assertions, overflow checks and 256 codegen units in
+# the engine's own crates cost its slow cores real time every frame.
+[profile.xbox360]
+inherits = "release"
+debug = false
+
 [workspace]
 resolver = "2"
 

@@ -131,6 +131,17 @@ impl MaterialStack {
     }
 }
 
+pub type SkinningPalette = [Matrix4<f32>; crate::scene::SKINNING_PALETTE_SIZE];
+
+/// The identity palette every unskinned object shares.
+fn identity_palette() -> Rc<SkinningPalette> {
+    thread_local! {
+        static IDENTITY: Rc<SkinningPalette> =
+            Rc::new([Matrix4::identity(); crate::scene::SKINNING_PALETTE_SIZE]);
+    }
+    IDENTITY.with(Rc::clone)
+}
+
 #[derive(Clone)]
 pub struct SceneObject {
     /// Authored material identity, retained for per-instance part animation.
@@ -140,7 +151,10 @@ pub struct SceneObject {
     pub geometry: Rc<Box<dyn Geometry>>,
     pub transform: Matrix4<f32>,
     pub local_transform: Matrix4<f32>, //hack...
-    pub skinning_data: [Matrix4<f32>; crate::scene::SKINNING_PALETTE_SIZE],
+    /// Shared, not inline: 80 matrices are 5 KB, and scene objects are cloned
+    /// several times a frame (an in-order CPU like the Xbox 360's spent most of
+    /// the scene build copying palettes). Setting one replaces the `Rc`.
+    pub skinning_data: Rc<SkinningPalette>,
     pub depth_write: bool,
     /// Visual displacement for this object, including its self-depth passes.
     pub world_wave: super::world_wave::WorldWave,
@@ -438,7 +452,7 @@ impl SceneObject {
             geometry,
             transform,
             local_transform: Matrix4::identity(),
-            skinning_data: [Matrix4::identity(); crate::scene::SKINNING_PALETTE_SIZE],
+            skinning_data: identity_palette(),
             depth_write: true,
             world_wave: Default::default(),
             morph_weights: Vec::new(),
@@ -562,7 +576,7 @@ impl SceneObject {
             &render_context,
             view,
             &xform,
-            &self.skinning_data,
+            &self.skinning_data[..],
             lights,
         ) {
             if self
@@ -571,6 +585,19 @@ impl SceneObject {
                 .is_none_or(|stack| !stack.material_only)
             {
                 self.draw_geometry(true);
+                if cfg!(target_os = "xbox360")
+                    && let Some(saved) = gfx::vk_backend::save_state()
+                {
+                    if self.material.borrow().begin_shadow_pass(
+                        &render_context,
+                        view,
+                        &xform,
+                        lights,
+                    ) {
+                        self.draw_geometry(true);
+                    }
+                    gfx::vk_backend::restore_state(saved);
+                }
             }
             self.draw_material_stack(engine_context, &render_context, view, lights, true);
         }
@@ -630,7 +657,7 @@ impl SceneObject {
             &render_context,
             view,
             &xform,
-            &self.skinning_data,
+            &self.skinning_data[..],
             lights,
         );
         if prepared {
@@ -683,8 +710,15 @@ impl SceneObject {
             material.set_full_bright(self.full_bright);
             material.set_glow(self.glow.unwrap_or(super::material::Glow::NONE));
             let xform = self.transform * self.local_transform;
-            let prepared = material.draw_opaque(context, view, &xform, &self.skinning_data, lights)
-                || material.draw_transparent(context, view, &xform, &self.skinning_data, lights);
+            let prepared =
+                material.draw_opaque(context, view, &xform, &self.skinning_data[..], lights)
+                    || material.draw_transparent(
+                        context,
+                        view,
+                        &xform,
+                        &self.skinning_data[..],
+                        lights,
+                    );
             if prepared {
                 gfx::depth_mask(opaque_phase && self.depth_write && pass.writes_depth);
                 self.draw_geometry_with_blend(true, pass.blend);
@@ -725,8 +759,10 @@ impl SceneObject {
         skinning_data: [Matrix4<f32>; crate::scene::MAX_SKINNED_JOINTS],
     ) {
         let half = crate::scene::MAX_SKINNED_JOINTS;
-        self.skinning_data[..half].copy_from_slice(&skinning_data);
-        self.skinning_data[half..].copy_from_slice(&skinning_data);
+        let mut palette = [Matrix4::identity(); crate::scene::SKINNING_PALETTE_SIZE];
+        palette[..half].copy_from_slice(&skinning_data);
+        palette[half..].copy_from_slice(&skinning_data);
+        self.skinning_data = Rc::new(palette);
     }
 
     /// Set the full 80-slot palette: joint transforms in 0..40, per-joint
@@ -736,7 +772,7 @@ impl SceneObject {
         &mut self,
         palette: [Matrix4<f32>; crate::scene::SKINNING_PALETTE_SIZE],
     ) {
-        self.skinning_data = palette;
+        self.skinning_data = Rc::new(palette);
     }
 
     pub fn get_transform(&self) -> Matrix4<f32> {
@@ -751,7 +787,7 @@ impl SceneObject {
             geometry: Rc::new(geometry),
             transform: Matrix4::identity(),
             local_transform: Matrix4::identity(),
-            skinning_data: [Matrix4::identity(); crate::scene::SKINNING_PALETTE_SIZE],
+            skinning_data: identity_palette(),
             depth_write: true,
             world_wave: Default::default(),
             morph_weights: Vec::new(),
@@ -781,7 +817,7 @@ impl SceneObject {
             geometry: self.geometry.clone(),
             transform: self.transform,
             local_transform: self.local_transform,
-            skinning_data: self.skinning_data,
+            skinning_data: self.skinning_data.clone(),
             depth_write: self.depth_write,
             world_wave: self.world_wave,
             morph_weights: self.morph_weights.clone(),

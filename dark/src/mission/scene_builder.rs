@@ -28,11 +28,15 @@ struct AnimatedLightmapRegion {
 
 /// Rare state changes update only the affected atlas rectangles. The ordinary
 /// frame shader remains the same single lightmap sample on desktop and Quest.
+/// Each switched light's live value, read for every object's every light a
+/// frame (object lighting): Fx, as SipHash costs the Xbox 360 real time.
+pub type LightIntensities = rustc_hash::FxHashMap<i16, f32>;
+
 pub struct AnimatedLightmapController {
     texture: Rc<Texture>,
     regions: Vec<AnimatedLightmapRegion>,
     light_to_regions: HashMap<i16, Vec<usize>>,
-    intensities: HashMap<i16, f32>,
+    intensities: LightIntensities,
     compose_scratch: Vec<u8>,
 }
 
@@ -110,7 +114,7 @@ impl AnimatedLightmapController {
     /// Keep values even for lights without an atlas region: their authored
     /// object-light entry can still reach a prop. Missing entries are static
     /// lights, whose table brightness needs no multiplier.
-    pub fn light_intensities(&self) -> &HashMap<i16, f32> {
+    pub fn light_intensities(&self) -> &LightIntensities {
         &self.intensities
     }
 
@@ -150,7 +154,7 @@ impl AnimatedLightmapController {
 fn compose_region(
     base_pixels: &[u8],
     layers: &[super::SwitchableLightmapLayer],
-    intensities: &HashMap<i16, f32>,
+    intensities: &LightIntensities,
     output: &mut Vec<u8>,
 ) {
     output.clear();
@@ -411,7 +415,7 @@ mod tests {
                 pixels: vec![80, 80, 80],
             },
         ];
-        let intensities = HashMap::from([(195, 1.0), (311, 0.5)]);
+        let intensities = LightIntensities::from_iter([(195, 1.0), (311, 0.5)]);
         let mut output = Vec::new();
 
         compose_region(&[140, 200, 250], &layers, &intensities, &mut output);
@@ -427,7 +431,12 @@ mod tests {
         }];
         let mut output = Vec::new();
 
-        compose_region(&[10, 20, 30], &layers, &HashMap::new(), &mut output);
+        compose_region(
+            &[10, 20, 30],
+            &layers,
+            &LightIntensities::default(),
+            &mut output,
+        );
 
         assert_eq!(output, vec![10, 20, 30]);
     }

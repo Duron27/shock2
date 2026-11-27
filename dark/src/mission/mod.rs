@@ -41,7 +41,7 @@ use cgmath::Vector4;
 use cgmath::vec4;
 use engine::assets::asset_paths::AbstractAssetPath;
 use engine::scene::VertexPositionTextureLightmapAtlasNormal;
-pub use scene_builder::{AnimatedLightmapController, MissionScene, to_scene};
+pub use scene_builder::{AnimatedLightmapController, LightIntensities, MissionScene, to_scene};
 
 use crate::properties::PropertyDefinition;
 use crate::ss2_chunk_file_reader;
@@ -150,7 +150,14 @@ pub struct TextureSize {
     pub height: u32,
 }
 
-const LIGHTMAP_SIZE: u32 = 4096;
+const LIGHTMAP_WIDTH: u32 = 4096;
+/// The tallest shipped mission (eng1) packs its lightmaps into 1296 rows.
+/// The Xbox 360 takes the half that holds them: its memory is 512 MB in all.
+const LIGHTMAP_HEIGHT: u32 = if cfg!(target_os = "xbox360") {
+    2048
+} else {
+    4096
+};
 /// Keep a long synchronous mission parse responsive to host-platform queues.
 const LOAD_EVENT_PUMP_CELL_INTERVAL: usize = 32;
 
@@ -227,7 +234,7 @@ pub fn read<T: io::Read + io::Seek>(
 
     // Read cells
     let mut cells: Vec<Cell> = Vec::new();
-    let mut packer = TexturePacker::<image::Rgb<u8>>::new_rgb(LIGHTMAP_SIZE, LIGHTMAP_SIZE);
+    let mut packer = TexturePacker::<image::Rgb<u8>>::new_rgb(LIGHTMAP_WIDTH, LIGHTMAP_HEIGHT);
     for cell_idx in 0..wr_num_cells {
         if cell_idx as usize % LOAD_EVENT_PUMP_CELL_INTERVAL == 0 {
             engine::platform::service_events();
@@ -237,6 +244,10 @@ pub fn read<T: io::Read + io::Seek>(
     }
     engine::platform::service_events();
 
+    tracing::debug!(
+        "lightmap atlas: {} of {LIGHTMAP_HEIGHT} rows",
+        packer.used_height()
+    );
     let bsp_tree = BspTree::read(reader, &cells);
     engine::platform::service_events();
 
@@ -280,6 +291,7 @@ pub fn read<T: io::Read + io::Seek>(
         obj_texture_families,
         reader,
     );
+    tracing::debug!("mission load: water render info");
     let water_render_info = read_water_render_info(&table_of_contents, reader);
     let water_currents = water_motion::read_water_currents(
         &read_chunk_bytes(&table_of_contents, reader, "CELL_MOTION").unwrap_or_default(),
@@ -287,6 +299,7 @@ pub fn read<T: io::Read + io::Seek>(
     for cell in &mut cells {
         cell.water_current = water_currents[cell.flow_group as usize];
     }
+    tracing::debug!("mission load: geometry");
     let all_geometry = create_geometry(
         asset_paths,
         base_path,
@@ -296,6 +309,7 @@ pub fn read<T: io::Read + io::Seek>(
     );
     engine::platform::service_events();
 
+    tracing::debug!("mission load: render params, rooms, songs, map, paths");
     let render_params = RenderParams::read(&table_of_contents, reader);
     let room_database = RoomDatabase::read(&table_of_contents, reader);
     let song_params = SongParams::read(&table_of_contents, reader);
@@ -463,6 +477,10 @@ fn create_geometry(
         .iter()
         .map(|texture| texture_dimensions(asset_paths, base_path, texture))
         .collect();
+    tracing::debug!(
+        "mission load: {} texture sizes read; building cells",
+        dimensions.len()
+    );
     let mut cell_idx = 0;
     for (cell_index, cell) in cells.iter().enumerate() {
         if cell_index % LOAD_EVENT_PUMP_CELL_INTERVAL == 0 {
@@ -688,6 +706,7 @@ fn texture_dimensions(
         tex_info.texture_filename
     )
     .to_ascii_lowercase();
+    tracing::debug!("texture size: {tex_name}");
 
     let resolved = crate::util::terrain::resolve(
         asset_paths,
