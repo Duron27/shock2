@@ -32,8 +32,11 @@ dashboard.
   came from openxbdm's Buck2 cache, which had downloaded that same archive.
 - **Rust 1.98.0's library source**, for `-Zbuild-std`: `rustup toolchain install 1.98.0 --profile minimal --component
   rust-src`. The build uses that toolchain's cargo with xenon-forge's rustc.
-- **xsdk** at `~/xsdk-gcc` (its toolchain) and **xsdk and vulkan4xenon** under `XENOSWORKS` (default: openmw-xenon's
-  `sources/xenosworks`), each built with `make`.
+- **xsdk** at `~/xsdk-gcc` (its toolchain) and **xsdk and vulkan4xenon**: the submodules `deps/xsdk` and
+  `deps/vulkan4xenon` (forks of xenosworks' with what this port needs; `git submodule update --init`, or clone with
+  `--recurse-submodules`), which `build.sh` builds with `make` when their libraries are missing. `XENOSWORKS` points
+  it at another folder holding both instead; without the submodules it falls back to openmw-xenon's
+  `sources/xenosworks`.
 - **glslang** for the triangle's shaders (the system's Khronos build is fine for GLSL; xsdk docs/GETTING_STARTED.md
   section 4).
 

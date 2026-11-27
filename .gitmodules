@@ -1,0 +1,6 @@
+[submodule "xbox360/deps/xsdk"]
+	path = xbox360/deps/xsdk
+	url = https://github.com/Duron27/xsdk.git
+[submodule "xbox360/deps/vulkan4xenon"]
+	path = xbox360/deps/vulkan4xenon
+	url = https://github.com/Duron27/vulkan4xenon.git

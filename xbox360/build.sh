@@ -8,7 +8,8 @@
 #   build.sh game       -> game/build/shock2.xex: the game (runtimes/xbox360_runtime), with the engine's shaders from
 #                          tools/console_shaders.sh in game/build/shaders (made first if missing; needs a desktop GPU)
 # Environment:
-#   XENOSWORKS  the folder holding xsdk and vulkan4xenon, each built with `make` (default: openmw-xenon's)
+#   XENOSWORKS  the folder holding xsdk and vulkan4xenon (default: the submodules in deps/, which it builds with make
+#               when their libraries are missing; or openmw-xenon's sources/xenosworks if they aren't checked out)
 #   XSDK_GCC    xsdk's toolchain PREFIX (default: ~/xsdk-gcc)
 #   XENON_FORGE xenon-forge's prebuilt PPC64-ILP32 Rust and LLVM (default: ~/xenon-forge-toolchain)
 #   RUST_SRC    the Rust 1.98.0 library source it builds core from (default: rustup's 1.98.0 rust-src)
@@ -20,10 +21,24 @@ set -euo pipefail
 
 TITLE="${1:?usage: build.sh hello|triangle|stdcheck|datacheck|game}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+XSDK_GCC="${XSDK_GCC:-$HOME/xsdk-gcc}"
+# xsdk and vulkan4xenon: the submodules (git submodule update --init) pin the commits this branch builds with.
+if [ -z "${XENOSWORKS:-}" ] && [ -f "$HERE/deps/xsdk/Makefile" ] && [ -f "$HERE/deps/vulkan4xenon/Makefile" ]; then
+	XENOSWORKS="$HERE/deps"
+	# Built as openmw-xenon's CI builds them (its scripts/ci-build.sh), when a library is missing.
+	if [ ! -f "$XENOSWORKS/xsdk/build/libxsdk.a" ] || [ ! -f "$XENOSWORKS/xsdk/build/host/libxsc.so" ]; then
+		make -C "$XENOSWORKS/xsdk" -j"$(nproc)" TOOLCHAIN="$XSDK_GCC/bin/powerpc-xsdk-elf-" build/libxsdk.a \
+			build/host/libxsc.so
+	fi
+	if [ ! -f "$XENOSWORKS/vulkan4xenon/build/libvulkan4xenon.a" ]; then
+		make -C "$XENOSWORKS/vulkan4xenon" -j"$(nproc)" TOOLCHAIN="$XSDK_GCC/bin/powerpc-xsdk-elf-" XSDK=../xsdk \
+			build/libvulkan4xenon.a
+	fi
+fi
 XENOSWORKS="${XENOSWORKS:-$HOME/AndroidStudioProjects/openmw-xenon/sources/xenosworks}"
+export XENOSWORKS
 XSDK="$XENOSWORKS/xsdk"
 V4X="$XENOSWORKS/vulkan4xenon"
-XSDK_GCC="${XSDK_GCC:-$HOME/xsdk-gcc}"
 XENON_FORGE="${XENON_FORGE:-$HOME/xenon-forge-toolchain}"
 RUST_SRC="${RUST_SRC:-$HOME/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library}"
 GLSLANG="${GLSLANG:-$(command -v glslang)}"

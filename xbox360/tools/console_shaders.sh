@@ -8,6 +8,7 @@
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$HERE/../.."
+if [ -z "${XENOSWORKS:-}" ] && [ -f "$HERE/../deps/xsdk/Makefile" ]; then XENOSWORKS="$HERE/../deps"; fi
 XENOSWORKS="${XENOSWORKS:-$HOME/AndroidStudioProjects/openmw-xenon/sources/xenosworks}"
 OUT="$(realpath -m "$1")"
 DUMP="$(realpath -m "${2:-$OUT/dump}")"
