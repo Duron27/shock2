@@ -87,6 +87,29 @@ pub fn starting_mission(mission_txt: Option<&str>) -> String {
         .to_owned()
 }
 
+/// The log's level: the first line of `log_level.txt` beside the `.xex`
+/// (`debug`, `trace`, ...) when there is one, else info.
+pub fn log_level(log_level_txt: Option<&str>) -> tracing::Level {
+    log_level_txt
+        .and_then(|text| text.lines().next())
+        .and_then(|line| line.trim().parse().ok())
+        .unwrap_or(tracing::Level::INFO)
+}
+
+/// `key value` pairs, one a line, of `dev_params.txt` beside the `.xex`:
+/// developer parameters set at startup, as the debug runtime's HTTP API sets
+/// them. Lines that don't parse are skipped.
+pub fn dev_param_lines(text: &str) -> Vec<(&str, f32)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let key = words.next()?;
+            let value = words.next()?.parse().ok()?;
+            Some((key, value))
+        })
+        .collect()
+}
+
 /// Where the view looks, in degrees: the SDL runtime's `Look`, which turns
 /// the head and rests the simulated hands in front of it.
 #[derive(Default)]
@@ -187,6 +210,21 @@ mod tests {
         });
         assert!(wants_exit(&both));
         assert!(!wants_exit(&back));
+    }
+
+    #[test]
+    fn log_level_txt_picks_the_level() {
+        assert_eq!(log_level(None), tracing::Level::INFO);
+        assert_eq!(log_level(Some("nonsense")), tracing::Level::INFO);
+        assert_eq!(log_level(Some("debug\r\n")), tracing::Level::DEBUG);
+    }
+
+    #[test]
+    fn dev_params_txt_reads_key_value_lines() {
+        assert_eq!(
+            dev_param_lines("bump_strength 0\r\n\nworld_gloss x\npoint_shadows 0.5"),
+            [("bump_strength", 0.0), ("point_shadows", 0.5)]
+        );
     }
 
     #[test]

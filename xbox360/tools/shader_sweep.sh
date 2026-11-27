@@ -21,7 +21,9 @@ for scene in "${SCENES[@]}"; do
 	log=$(mktemp)
 	args=(--port 0 ${SWEEP_WINDOW:-})
 	[ "$scene" != menu ] && args+=(--mission "$scene")
-	SHOCK2_SHADER_DUMP="$DUMP" "$BIN" "${args[@]}" > "$log" 2>&1 &
+	# Silent: ALSA's null device (silent_alsa.conf), as the sweep fires every weapon.
+	ALSA_CONFIG_PATH="${SWEEP_ALSA_CONFIG-$ROOT/xbox360/tools/silent_alsa.conf}" \
+		SHOCK2_SHADER_DUMP="$DUMP" "$BIN" "${args[@]}" > "$log" 2>&1 &
 	pid=$!
 	port=
 	for _ in $(seq 1 600); do

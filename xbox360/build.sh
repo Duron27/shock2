@@ -82,9 +82,9 @@ fi
 if [ -n "$WORKSPACE" ]; then
 	# The engine's crates, in the main workspace with its lock file and patches; its own target dir.
 	(cd "$HERE/.." && __CARGO_TESTS_ONLY_SRC_ROOT="$RUST_SRC" RUSTC="$XENON_FORGE/bin/rustc" RUSTC_BOOTSTRAP=1 \
-		cargo +1.98.0 build -p "$CRATE" --lib --target "$HERE/powerpc64-xsdk-ilp32.json" --target-dir "$HERE/../target/xbox360" \
+		cargo +1.98.0 build -p "$CRATE" --lib --profile xbox360 --target "$HERE/powerpc64-xsdk-ilp32.json" --target-dir "$HERE/../target/xbox360" \
 		-Zbuild-std=$BUILD_STD -Zbuild-std-features=compiler-builtins-mem -Zjson-target-spec)
-	LIB="$HERE/../target/xbox360/powerpc64-xsdk-ilp32/debug/lib$CRATE.a"
+	LIB="$HERE/../target/xbox360/powerpc64-xsdk-ilp32/xbox360/lib$CRATE.a"
 else
 	(cd "$HERE" && __CARGO_TESTS_ONLY_SRC_ROOT="$RUST_SRC" RUSTC="$XENON_FORGE/bin/rustc" RUSTC_BOOTSTRAP=1 \
 		cargo +1.98.0 build --release -p "$CRATE" --target "$HERE/powerpc64-xsdk-ilp32.json" \
